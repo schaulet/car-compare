@@ -16,14 +16,13 @@ git clone <repository-url>
 cd car-compare
 
 # Installer les dépendances
-uv sync --all-extras
+xc setup
 
 # Lancer les tests
-uv run pytest
-uv run behave tests/features/
+xc test
 
 # Lancer l'application
-uv run uvicorn car_compare.main:app --reload
+xc dev
 ```
 
 ## Documentation
@@ -47,3 +46,105 @@ L'API est disponible sur `http://localhost:8000`
 - SQLAlchemy (async)
 - Pydantic
 - pytest + behave (tests)
+- [xc](https://xcfile.dev) - Task runner
+
+## Tasks
+
+### setup
+
+Installe les dépendances du projet.
+
+```bash
+uv sync --all-extras
+```
+
+### dev
+
+Démarre le serveur de développement.
+
+Requires: setup
+
+```bash
+uv run uvicorn car_compare.main:app --reload
+```
+
+### test
+
+Lance tous les tests du projet (pytest + behave).
+
+Requires: setup
+
+```bash
+uv run pytest
+uv run behave tests/features/
+```
+
+### test-unit
+
+Lance uniquement les tests unitaires.
+
+Requires: setup
+
+```bash
+uv run pytest tests/unit/
+```
+
+### test-integration
+
+Lance uniquement les tests d'intégration.
+
+Requires: setup
+
+```bash
+uv run pytest tests/integration/
+```
+
+### test-bdd
+
+Lance les tests BDD avec Behave.
+
+Requires: setup
+
+```bash
+uv run behave tests/features/
+```
+
+### lint
+
+Vérifie la qualité du code avec ruff.
+
+Requires: setup
+
+```bash
+uv run ruff check .
+```
+
+### format
+
+Formate le code source avec ruff.
+
+Requires: setup
+
+```bash
+uv run ruff format .
+```
+
+### build
+
+Construit le package pour distribution.
+
+Requires: setup
+
+```bash
+uv build
+```
+
+### clean
+
+Nettoie les fichiers générés.
+
+```bash
+rm -rf .venv dist __pycache__ .pytest_cache .ruff_cache *.egg-info
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+```

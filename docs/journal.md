@@ -2,6 +2,22 @@
 
 ## 2026-09-09
 
+### Ajout des commandes xc au README.md
+- **Demande**: Ajouter des commandes xc dans le README.md dans une section `## Tasks`
+- **Référence**: https://xcfile.dev
+- **Actions réalisées**:
+  - Ajout de la section `## Tasks` dans le README.md avec des tâches xc pour :
+    - `setup` : Installation des dépendances avec uv
+    - `dev` : Démarrage du serveur de développement FastAPI
+    - `test` : Exécution de tous les tests (pytest + behave)
+    - `test-unit` : Tests unitaires uniquement
+    - `test-integration` : Tests d'intégration uniquement
+    - `test-bdd` : Tests BDD avec Behave
+    - `lint` : Vérification du code avec ruff
+    - `format` : Formatage du code avec ruff
+    - `build` : Construction du package
+    - `clean` : Nettoyage des fichiers générés
+
 ### Initialisation complète du projet
 - **Demande**: Création d'un outil d'aide à l'achat/location de voiture
 - **Actions réalisées**:

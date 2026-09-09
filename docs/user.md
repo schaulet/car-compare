@@ -9,7 +9,8 @@ Bienvenue dans **Car Compare**, votre assistant pour choisir le véhicule idéal
 ### Prérequis
 
 - Python 3.11 ou supérieur
-- uv (gestionnaire de paquets Python)
+- [uv](https://github.com/astral-sh/uv) (gestionnaire de paquets Python)
+- [xc](https://xcfile.dev) (task runner, optionnel)
 
 ### Installation
 
@@ -19,10 +20,12 @@ git clone <repository-url>
 cd car-compare
 
 # Installer les dépendances
-uv sync
+xc setup
+# ou manuellement : uv sync --all-extras
 
 # Lancer l'application
-uv run uvicorn car_compare.main:app --reload
+xc dev
+# ou manuellement : uv run uvicorn car_compare.main:app --reload
 ```
 
 L'API est accessible sur `http://localhost:8000`
@@ -31,6 +34,23 @@ L'API est accessible sur `http://localhost:8000`
 
 - Swagger UI : `http://localhost:8000/docs`
 - ReDoc : `http://localhost:8000/redoc`
+
+## Commandes disponibles (xc)
+
+| Commande | Description |
+|----------|-------------|
+| `xc setup` | Installer les dépendances |
+| `xc dev` | Démarrer le serveur de développement |
+| `xc test` | Lancer tous les tests |
+| `xc test-unit` | Lancer les tests unitaires |
+| `xc test-integration` | Lancer les tests d'intégration |
+| `xc test-bdd` | Lancer les tests BDD |
+| `xc lint` | Vérifier le code |
+| `xc format` | Formater le code |
+| `xc build` | Construire le package |
+| `xc clean` | Nettoyer les fichiers générés |
+
+> **Note** : xc est optionnel. Les commandes peuvent être exécutées manuellement en copiant les scripts depuis le README.md.
 
 ## Utilisation de l'API
 
@@ -120,6 +140,14 @@ La comparaison affiche :
 4. **Considérez la revente** si vous changez souvent de voiture
 
 ## FAQ
+
+### Q: Comment installer xc ?
+
+Voir https://xcfile.dev/getting-started/#installation
+
+### Q: xc est-il obligatoire ?
+
+Non, les commandes peuvent être exécutées manuellement en copiant les scripts depuis le README.md.
 
 ### Q: Comment sont calculées les émissions CO2 ?
 

@@ -109,7 +109,7 @@ car-compare/
 │           ├── __init__.py
 │           └── common_steps.py
 ├── pyproject.toml          # Configuration projet
-├── README.md
+├── README.md               # Documentation + tâches xc
 └── .gitignore
 ```
 
@@ -141,7 +141,34 @@ Utilisation de FastAPI Depends pour l'injection de dépendances :
 - **Points d'extension** : Stratégies de calcul, sources de données
 - **Registry pattern** : Pour les types de carburant, types d'achat
 
-## 4. Configuration
+## 4. Outils de développement
+
+### Task runner : xc
+
+Les tâches sont définies directement dans le `README.md` au format Markdown.
+Voir https://xcfile.dev pour la documentation complète.
+
+```bash
+xc              # Liste les tâches disponibles
+xc setup        # Installe les dépendances
+xc dev          # Lance le serveur de développement
+xc test         # Lance tous les tests
+xc lint         # Vérifie le code
+```
+
+### Gestionnaire de packages : uv
+
+```bash
+uv venv           # Créer l'environnement virtuel
+uv add <package>  # Ajouter une dépendance
+uv run <command>  # Exécuter une commande dans l'environnement
+```
+
+### Linter/Formatter : ruff
+
+Configuration dans `pyproject.toml`.
+
+## 5. Configuration
 
 ### Variables d'environnement
 
@@ -151,14 +178,14 @@ Utilisation de FastAPI Depends pour l'injection de dépendances :
 | DEBUG | Mode debug | false |
 | API_PREFIX | Préfixe API | /api/v1 |
 
-## 5. Sécurité (Future)
+## 6. Sécurité (Future)
 
 - Authentification JWT
 - Rate limiting
 - Validation des entrées (Pydantic)
 - CORS configuré
 
-## 6. Performance
+## 7. Performance
 
 - Pagination des listes
 - Indexes sur les colonnes recherchées
