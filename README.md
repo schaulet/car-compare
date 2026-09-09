@@ -1,21 +1,52 @@
-# car-compare
+# Car Compare
 
-Outil d'aide à l'achat/location de voiture.
+Outil d'aide à l'achat/location de voiture - Comparateur de véhicules avec calcul du TCO (Total Cost of Ownership).
+
+## Fonctionnalités
+
+- **Gestion des véhicules** : Ajout, modification et suppression de véhicules
+- **Simulation TCO** : Calcul du coût total de possession incluant carburant, assurance, entretien et dépréciation
+- **Comparaison** : Comparaison côte à côte de plusieurs véhicules avec identification du meilleur choix
 
 ## Installation
 
-### Prérequis
-
-- Python 3.11+
-- [uv](https://github.com/astral-sh/uv) - Gestionnaire de packages Python
-- [xc](https://xcfile.dev) - Task runner (optionnel)
-
-### Démarrage rapide
-
 ```bash
+# Cloner le projet
+git clone <repository-url>
+cd car-compare
+
+# Installer les dépendances
 xc setup
+
+# Lancer les tests
+xc test
+
+# Lancer l'application
 xc dev
 ```
+
+## Documentation
+
+- [Documentation générale](docs/doc.md)
+- [Spécifications fonctionnelles](docs/spec.md)
+- [Architecture technique](docs/archi.md)
+- [Guide utilisateur](docs/user.md)
+
+## API
+
+L'API est disponible sur `http://localhost:8000`
+
+- Documentation Swagger : `http://localhost:8000/docs`
+- Documentation ReDoc : `http://localhost:8000/redoc`
+
+## Stack technique
+
+- Python 3.11+
+- FastAPI
+- SQLAlchemy (async)
+- Pydantic
+- pytest + behave (tests)
+- [xc](https://xcfile.dev) - Task runner
 
 ## Tasks
 
@@ -24,8 +55,7 @@ xc dev
 Installe les dépendances du projet.
 
 ```bash
-uv venv
-uv sync
+uv sync --all-extras
 ```
 
 ### dev
@@ -35,17 +65,48 @@ Démarre le serveur de développement.
 Requires: setup
 
 ```bash
-uv run python -m car_compare
+uv run uvicorn car_compare.main:app --reload
 ```
 
 ### test
 
-Lance les tests du projet.
+Lance tous les tests du projet (pytest + behave).
 
 Requires: setup
 
 ```bash
 uv run pytest
+uv run behave tests/features/
+```
+
+### test-unit
+
+Lance uniquement les tests unitaires.
+
+Requires: setup
+
+```bash
+uv run pytest tests/unit/
+```
+
+### test-integration
+
+Lance uniquement les tests d'intégration.
+
+Requires: setup
+
+```bash
+uv run pytest tests/integration/
+```
+
+### test-bdd
+
+Lance les tests BDD avec Behave.
+
+Requires: setup
+
+```bash
+uv run behave tests/features/
 ```
 
 ### lint
@@ -83,6 +144,7 @@ uv build
 Nettoie les fichiers générés.
 
 ```bash
-rm -rf .venv dist __pycache__ .pytest_cache .ruff_cache
+rm -rf .venv dist __pycache__ .pytest_cache .ruff_cache *.egg-info
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 ```
