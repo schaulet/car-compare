@@ -51,6 +51,13 @@ L'agent module :
 
 Côté Azure DevOps : New, Active, Resolved. Le détail d'état est aussi un tag `azurz:<état>`.
 
+### UC5 — Portail du lab Azure DevOps
+
+1. L'opérateur ouvre le service Rust `azdo`.
+2. Il saisit un nom d'utilisateur quelconque et le PAT comme mot de passe.
+3. Le portail affiche le projet et les hubs (éléments de travail, tableaux, dépôts, pipelines, plans de test, artefacts).
+4. Les clients REST continuent d'appeler les mêmes chemins `/{org}/{project}/_apis/...` avec `api-version=7.1`.
+
 ## Annexe — Car Compare
 
 # Spécifications Fonctionnelles - Car Compare

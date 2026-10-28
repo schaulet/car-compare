@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Azure DevOps</title>
+  <style>
+    :root {
+      --blue: #0078d4; --blue-dark: #106ebe; --soft: #deecf9;
+      --text: #323130; --muted: #605e5c; --line: #edebe9; --page: #faf9f8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; color: var(--text); background: #fff;
+      font-family: "Segoe UI", "Segoe UI Web", sans-serif;
+    }
+    header {
+      height: 48px; display: flex; align-items: center; gap: 16px;
+      padding: 0 16px; border-bottom: 1px solid var(--line); background: #fff;
+    }
+    .mark { width: 24px; height: 24px; background: linear-gradient(135deg, #0078d4 0 50%, #50e6ff 50%); }
+    .brand { font-weight: 600; }
+    .crumb { color: var(--muted); }
+    .crumb strong { color: var(--text); font-weight: 600; }
+    header form { margin-left: auto; }
+    header button, .command button, .panel button {
+      height: 32px; border: 1px solid transparent; background: var(--blue); color: #fff;
+      font: inherit; padding: 0 12px; cursor: pointer;
+    }
+    header button { background: #fff; color: var(--text); border-color: #8a8886; }
+    .layout { display: grid; grid-template-columns: 240px 1fr; min-height: calc(100vh - 48px); }
+    nav { background: var(--page); border-right: 1px solid var(--line); padding: 12px 0 24px; }
+    nav .group { margin: 14px 16px 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    nav a {
+      display: block; padding: 7px 16px 7px 22px; color: var(--text); text-decoration: none;
+      border-left: 3px solid transparent;
+    }
+    nav a:hover { background: #f3f2f1; }
+    nav a.active { background: var(--soft); border-left-color: var(--blue); color: var(--blue); font-weight: 600; }
+    main { padding: 16px 24px 40px; min-width: 0; }
+    h1 { margin: 0 0 4px; font-size: 28px; font-weight: 600; }
+    .sub { color: var(--muted); margin: 0 0 16px; }
+    .command { display: flex; gap: 8px; align-items: center; margin: 8px 0 16px; }
+    input, select, textarea {
+      height: 32px; border: 1px solid #8a8886; padding: 0 8px; font: inherit; background: #fff;
+    }
+    textarea { height: auto; padding: 8px; width: min(720px, 100%); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    th { font-size: 12px; color: var(--muted); font-weight: 600; }
+    tr.click { cursor: pointer; }
+    tr.click:hover { background: #f3f2f1; }
+    .pill {
+      display: inline-block; min-width: 72px; text-align: center; padding: 2px 8px;
+      border-radius: 2px; color: #fff; font-size: 12px; background: #666;
+    }
+    .state-new { background: #6b6b6b; }
+    .state-active { background: #007acc; }
+    .state-resolved { background: #d83b01; }
+    .state-closed { background: #107c10; }
+    .type { font-size: 12px; font-weight: 600; }
+    .board { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; align-items: start; }
+    .col { background: var(--page); border: 1px solid var(--line); min-height: 240px; }
+    .col h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--line); }
+    .card { margin: 8px; background: #fff; border: 1px solid var(--line); padding: 8px 10px; cursor: pointer; }
+    .card:hover { border-color: var(--blue); }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .tile { border: 1px solid var(--line); padding: 14px 16px; background: #fff; text-decoration: none; color: inherit; }
+    .tile b { display: block; font-size: 28px; color: var(--blue); }
+    .panel { margin-top: 16px; border: 1px solid var(--line); background: #fff; padding: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .error { color: #a4262c; }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { display: flex; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav .group { display: none; }
+      nav a { white-space: nowrap; }
+      .board { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body data-org="__ORG__" data-project="__PROJECT__" data-user="__USER__">
+  <header>
+    <div class="mark" aria-hidden="true"></div>
+    <div class="brand">Azure DevOps</div>
+    <div class="crumb" id="crumb"></div>
+    <form method="post" action="/_signout"><button type="submit">Se déconnecter</button></form>
+  </header>
+  <div class="layout">
+    <nav>
+      <a href="/__ORG__/__PROJECT__">Vue d'ensemble</a>
+      <div class="group">Boards</div>
+      <a href="/__ORG__/__PROJECT__/_workitems">Éléments de travail</a>
+      <a href="/__ORG__/__PROJECT__/_boards">Tableaux</a>
+      <a href="/__ORG__/__PROJECT__/_backlogs">Backlogs</a>
+      <a href="/__ORG__/__PROJECT__/_sprints">Sprints</a>
+      <a href="/__ORG__/__PROJECT__/_queries">Requêtes</a>
+      <div class="group">Dépôts</div>
+      <a href="/__ORG__/__PROJECT__/_git">Fichiers</a>
+      <a href="/__ORG__/__PROJECT__/_git/commits">Commits</a>
+      <a href="/__ORG__/__PROJECT__/_git/pushes">Poussées</a>
+      <a href="/__ORG__/__PROJECT__/_git/branches">Branches</a>
+      <a href="/__ORG__/__PROJECT__/_git/pulls">Demandes de tirage</a>
+      <div class="group">Pipelines</div>
+      <a href="/__ORG__/__PROJECT__/_build">Pipelines</a>
+      <a href="/__ORG__/__PROJECT__/_environments">Environnements</a>
+      <a href="/__ORG__/__PROJECT__/_release">Versions</a>
+      <a href="/__ORG__/__PROJECT__/_library">Bibliothèque</a>
+      <div class="group">Plans de test</div>
+      <a href="/__ORG__/__PROJECT__/_testPlans">Plans de test</a>
+      <a href="/__ORG__/__PROJECT__/_testPlans/runs">Exécutions</a>
+      <div class="group">Artefacts</div>
+      <a href="/__ORG__/__PROJECT__/_artifacts">Artefacts</a>
+      <a href="/__ORG__/__PROJECT__/_wiki">Wiki</a>
+      <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
+    </nav>
+    <main id="view"></main>
+  </div>
+  <script>
+    const org = document.body.dataset.org;
+    const project = document.body.dataset.project;
+    const user = document.body.dataset.user || "azurz";
+    const root = "/" + org + "/" + project + "/_apis";
+    const hub = location.pathname.replace("/" + org + "/" + project, "") || "/";
+    document.querySelectorAll("nav a").forEach((link) => {
+      if (link.getAttribute("href") === location.pathname) link.classList.add("active");
+    });
+    document.getElementById("crumb").textContent = org + " / " + (project || "Projets") + " · " + user;
+
+    async function api(method, path, body, contentType) {
+      const response = await fetch(path, {
+        method,
+        headers: body ? { "Content-Type": contentType || "application/json" } : {},
+        body: body ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      });
+      const text = await response.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch (error) { data = { message: text }; }
+      if (!response.ok) throw new Error(data.message || data.detail || text);
+      return data;
+    }
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+    }
+    function stateClass(state) {
+      const name = String(state || "New").toLowerCase();
+      if (name === "active") return "state-active";
+      if (name === "resolved") return "state-resolved";
+      if (name === "closed") return "state-closed";
+      return "state-new";
+    }
+    async function workItems() {
+      const wiql = await api("POST", root + "/wit/wiql?api-version=7.1", {
+        query: "SELECT [System.Id] FROM WorkItems",
+      });
+      const ids = (wiql.workItems || []).map((item) => item.id);
+      if (!ids.length) return [];
+      const page = await api("GET", root + "/wit/workitems?ids=" + ids.join(",") + "&api-version=7.1");
+      return page.value || [];
+    }
+    function titleOf(item) { return item.fields?.["System.Title"] || "(sans titre)"; }
+    function rows(items) {
+      if (!items.length) return "<p class='sub'>Aucun élément de travail.</p>";
+      return "<table><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th>État</th></tr></thead><tbody>" +
+        items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='type'>" + esc(item.fields?.["System.WorkItemType"]) + "</td><td><span class='pill " + stateClass(item.fields?.["System.State"]) + "'>" + esc(item.fields?.["System.State"] || "New") + "</span></td></tr>").join("") +
+        "</tbody></table>";
+    }
+    async function openItem(id) {
+      const item = await api("GET", root + "/wit/workitems/" + id + "?api-version=7.1");
+      const fields = item.fields || {};
+      const comments = await api("GET", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3");
+      const panel = document.createElement("section");
+      panel.className = "panel";
+      const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
+      const notes = (comments.comments || []).map((note) => "<li>" + esc(note.text) + "</li>").join("") || "<li>Aucun commentaire.</li>";
+      panel.innerHTML = "<h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
+        "<div class='row'><input id='wi-title' value='" + esc(fields["System.Title"] || "") + "' style='flex:1' />" +
+        "<select id='wi-state'>" + states + "</select></div>" +
+        "<textarea id='wi-desc' rows='4'>" + esc(fields["System.Description"] || "") + "</textarea>" +
+        "<div class='command'><button id='wi-save' type='button'>Enregistrer</button></div>" +
+        "<h3>Discussion</h3><ul>" + notes + "</ul>" +
+        "<div class='row'><input id='wi-note' placeholder='Commentaire' style='flex:1' /><button id='wi-comment' type='button'>Ajouter</button></div>";
+      document.getElementById("view").appendChild(panel);
+      panel.querySelector("#wi-save").onclick = async () => {
+        const patch = JSON.stringify([
+          { op: "replace", path: "/fields/System.Title", value: panel.querySelector("#wi-title").value },
+          { op: "replace", path: "/fields/System.State", value: panel.querySelector("#wi-state").value },
+          { op: "replace", path: "/fields/System.Description", value: panel.querySelector("#wi-desc").value },
+        ]);
+        await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+        location.reload();
+      };
+      panel.querySelector("#wi-comment").onclick = async () => {
+        await api("POST", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3", { text: panel.querySelector("#wi-note").value });
+        location.reload();
+      };
+    }
+    function bindRows() {
+      document.querySelectorAll("tr.click").forEach((row) => { row.onclick = () => openItem(row.dataset.id); });
+    }
+    async function collection(area) {
+      const data = await api("GET", root + "/" + area + "?api-version=7.1");
+      return data.value || [];
+    }
+    async function render() {
+      const view = document.getElementById("view");
+      try {
+        if (!project) {
+          const data = await api("GET", "/" + org + "/_apis/projects?api-version=7.1");
+          view.innerHTML = "<h1>Projets</h1><div class='cards'>" + (data.value || []).map((item) => "<a class='tile' href='/" + org + "/" + encodeURIComponent(item.name) + "'><b>" + esc(item.name) + "</b>" + esc(item.description || "") + "</a>").join("") + "</div>";
+          return;
+        }
+        if (hub === "/" || hub === "") {
+          const [items, repos, builds, plans, feeds] = await Promise.all([
+            workItems(), collection("git/repositories"), collection("build/definitions"),
+            collection("testplan/plans"), collection("packaging/feeds"),
+          ]);
+          view.innerHTML = "<h1>" + esc(project) + "</h1><p class='sub'>Vue d'ensemble</p><div class='cards'>" +
+            "<div class='tile'><b>" + items.length + "</b>Éléments de travail</div>" +
+            "<div class='tile'><b>" + repos.length + "</b>Dépôts</div>" +
+            "<div class='tile'><b>" + builds.length + "</b>Pipelines</div>" +
+            "<div class='tile'><b>" + plans.length + "</b>Plans de test</div>" +
+            "<div class='tile'><b>" + feeds.length + "</b>Artefacts</div></div>";
+          return;
+        }
+        if (hub === "/_workitems" || hub === "/_backlogs" || hub === "/_sprints") {
+          const items = await workItems();
+          const heading = hub === "/_backlogs" ? "Backlogs" : hub === "/_sprints" ? "Sprints" : "Éléments de travail";
+          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items);
+          bindRows();
+          document.getElementById("create").onclick = async () => {
+            const kind = document.getElementById("kind").value;
+            const title = document.getElementById("new-title").value || "Sans titre";
+            const patch = JSON.stringify([{ op: "add", path: "/fields/System.Title", value: title }]);
+            await api("POST", root + "/wit/workitems/$" + encodeURIComponent(kind) + "?api-version=7.1", patch, "application/json-patch+json");
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_boards") {
+          const items = await workItems();
+          const columns = ["New", "Active", "Resolved", "Closed"];
+          view.innerHTML = "<h1>Tableaux</h1><div class='board'>" + columns.map((state) => {
+            const cards = items.filter((item) => (item.fields?.["System.State"] || "New") === state).map((item) => "<article class='card' data-id='" + item.id + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub'>Vide</p>";
+            return "<section class='col'><h2>" + state + "</h2>" + cards + "</section>";
+          }).join("") + "</div>";
+          document.querySelectorAll(".card").forEach((card) => { card.onclick = () => openItem(card.dataset.id); });
+          return;
+        }
+        if (hub === "/_queries") {
+          view.innerHTML = "<h1>Requêtes</h1><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'</textarea><div class='command'><button id='run' type='button'>Exécuter</button></div><div id='result'></div>";
+          document.getElementById("run").onclick = async () => {
+            const found = await api("POST", root + "/wit/wiql?api-version=7.1", { query: document.getElementById("wiql").value });
+            const ids = (found.workItems || []).map((item) => item.id);
+            const page = ids.length ? await api("GET", root + "/wit/workitems?ids=" + ids.join(",") + "&api-version=7.1") : { value: [] };
+            document.getElementById("result").innerHTML = rows(page.value || []);
+            bindRows();
+          };
+          return;
+        }
+        const catalogs = {
+          "/_git": ["Dépôts", "git/repositories", "name", "Nouveau dépôt"],
+          "/_git/commits": ["Commits", "git/commits", "comment", "Nouveau commit"],
+          "/_git/pushes": ["Poussées", "git/pushes", "refName", "Nouvelle poussée"],
+          "/_git/branches": ["Branches", "git/refs", "name", "refs/heads/"],
+          "/_git/pulls": ["Demandes de tirage", "git/pullrequests", "title", "Nouvelle demande de tirage"],
+          "/_build": ["Pipelines", "build/definitions", "name", "Nouveau pipeline"],
+          "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
+          "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
+          "/_library": ["Bibliothèque", "distributedtask/variablegroups", "name", "Nouveau groupe de variables"],
+          "/_testPlans": ["Plans de test", "testplan/plans", "name", "Nouveau plan"],
+          "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
+          "/_artifacts": ["Artefacts", "packaging/feeds", "name", "Nouveau flux"],
+          "/_wiki": ["Wiki", "wiki/wikis", "name", "Nouveau wiki"],
+        };
+        if (catalogs[hub]) {
+          const heading = catalogs[hub][0];
+          const area = catalogs[hub][1];
+          const field = catalogs[hub][2];
+          const label = catalogs[hub][3];
+          const items = await collection(area);
+          const table = items.length ? "<table><thead><tr><th>ID</th><th>Nom</th></tr></thead><tbody>" + items.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item[field] || item.name || item.title || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun enregistrement.</p>";
+          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><input id='new-name' placeholder='" + esc(label) + "' /><button id='create' type='button'>Créer</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            const name = document.getElementById("new-name").value || label;
+            const payload = {};
+            payload[field] = name;
+            payload.name = name;
+            await api("POST", root + "/" + area + "?api-version=7.1", payload);
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_settings") {
+          const areas = await api("GET", "/_apis/resourceAreas?api-version=7.1");
+          view.innerHTML = "<h1>Paramètres</h1><p class='sub'>API REST 7.1. Le jeton se saisit comme mot de passe, avec n'importe quel nom d'utilisateur.</p><ul>" + (areas.value || []).map((area) => "<li><code>" + esc(area.id) + "</code> — " + esc(area.locationUrl) + "</li>").join("") + "</ul>";
+          return;
+        }
+        view.innerHTML = "<h1>Azure DevOps</h1><p class='sub'>Cette page n'a pas encore de vue dédiée. Les API correspondantes répondent sous /_apis.</p>";
+      } catch (error) {
+        view.innerHTML = "<h1>Azure DevOps</h1><p class='error'>" + esc(error.message) + "</p>";
+      }
+    }
+    render();
+  </script>
+</body>
+</html>

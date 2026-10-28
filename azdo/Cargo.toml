@@ -1,0 +1,25 @@
+[package]
+name = "azdo"
+version = "0.1.0"
+edition = "2021"
+description = "Azure DevOps pour Linux : API REST et interface, pour tester des intégrations."
+publish = false
+
+[[bin]]
+name = "azdo"
+path = "src/main.rs"
+
+[dependencies]
+axum = "=0.7.9"
+tokio = { version = "=1.43.1", features = ["macros", "rt-multi-thread", "signal"] }
+hyper = "=1.6.0"
+hyper-util = "=0.1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+http = "1"
+base64 = "0.22"
+tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

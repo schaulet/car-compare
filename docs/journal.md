@@ -1,5 +1,11 @@
 # Journal de suivi
 
+## 2026-10-29 — Azure DevOps en Rust pour Linux
+
+- **Demande**: réimplémenter Azure DevOps en Rust, avec l'ensemble des API et une interface visuelle identique, pour tester des intégrations depuis Linux, puis l'utiliser dans le lab.
+- **Actions**: exécutable `azdo` (connexion PAT, work items JSON Patch, WIQL, commentaires, magasin générique des zones REST, interface des hubs). Le service `azdo` du lab Docker construit cette image. Les tests de contrat Rust couvrent l'auth, le cycle work item, une zone générique et la page de connexion.
+- **Reste à faire**: parité complète avec le catalogue REST Microsoft et avec chaque écran du portail. Le but n'est pas encore atteint.
+
 ## 2026-10-28 — authentification du lab Azure DevOps
 
 - **Demande**: Donner les identifiants des conteneurs et vérifier la configuration, le lab Azure DevOps répondant `{"detail":"PAT refusé"}`.

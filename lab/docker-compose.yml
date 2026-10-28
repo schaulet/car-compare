@@ -3,24 +3,20 @@ name: azurz
 services:
   azdo:
     build:
-      context: ..
-      dockerfile: lab/Dockerfile
-    command: ["azurz-azdo"]
+      context: ../azdo
+      dockerfile: Dockerfile
     environment:
       AZURZ_AZDO_PAT: azurz-lab-pat
       AZURZ_AZDO_ORG: azurz
       AZURZ_AZDO_PROJECT: AzurzDemo
       AZURZ_AZDO_PORT: "8080"
+      AZDO_DATA: /data/azdo.json
     ports:
       - "8081:8080"
+    volumes:
+      - azdo-data:/data
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
-        ]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -91,6 +87,7 @@ services:
       - ignition-supervision:/usr/local/bin/ignition/data
 
 volumes:
+  azdo-data:
   bridge-data:
   ignition-a:
   ignition-b:

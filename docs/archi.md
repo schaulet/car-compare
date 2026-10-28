@@ -50,6 +50,8 @@ Le projet Python publie deux modules dans le même wheel (`car_compare` et `azur
 
 `lab/docker-compose.yml` : services `azdo`, `bridge`, `ignition-ligne-a`, `ignition-ligne-b`, `ignition-supervision`. Les volumes de données Ignition sont les mêmes que la racine lue par le pont, donc le dépôt de projet est visible par la passerelle après redémarrage.
 
+Le service `azdo` est l'exécutable Rust `azdo` (`azdo/`). Il écoute le sous-ensemble REST 7.1 (projets, work items en JSON Patch, WIQL, commentaires, et un magasin générique pour les autres zones : git, build, pipelines, test, wiki, packaging, release, etc.) et sert l'interface : connexion par nom d'utilisateur et PAT, puis les hubs Vue d'ensemble, Boards, Dépôts, Pipelines, Plans de test et Artefacts. Le binaire persiste dans `AZDO_DATA`. L'objectif reste la couverture complète des API publiées et la parité visuelle avec le portail Microsoft.
+
 ## Annexe — Car Compare
 
 # Architecture Technique - Car Compare

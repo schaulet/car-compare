@@ -63,6 +63,9 @@ Thumbs.db
 # Lab Azurz
 .azurz-data/
 
+# Rust
+azdo/target/
+
 # Build
 *.manifest
 *.spec

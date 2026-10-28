@@ -1,0 +1,588 @@
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::response::{Html, IntoResponse, Response};
+use axum::Json;
+use base64::Engine;
+use serde_json::{json, Value};
+
+use crate::store::{apply_wiql, fields_from_patch, Bucket, RESOURCE_AREAS};
+use crate::web::{login_page, shell_page};
+use crate::AppState;
+
+pub async fn dispatch(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+    if path == "/health" {
+        let (org, project) = state.names();
+        return Json(json!({"status": "ok", "organization": org, "project": project})).into_response();
+    }
+    if path == "/_signin" && method == Method::POST {
+        return sign_in(&state, &body);
+    }
+    if path == "/_signout" && method == Method::POST {
+        return sign_out(&state, &headers);
+    }
+
+    let auth = state.identify(&headers);
+    if path_is_api(&path) {
+        if !matches!(auth, Identity::User(_)) {
+            return fail(StatusCode::UNAUTHORIZED, "PAT refusé");
+        }
+        return state.api(method, &path, &query, &body);
+    }
+    match auth {
+        Identity::User(user) => {
+            let (org, project) = scope_from_page(&path, &state);
+            Html(shell_page(&org, &project, &user)).into_response()
+        }
+        Identity::Rejected => (
+            StatusCode::UNAUTHORIZED,
+            Html(login_page(&state.names().0, true)),
+        )
+            .into_response(),
+        Identity::Anonymous => Html(login_page(&state.names().0, false)).into_response(),
+    }
+}
+
+fn sign_in(state: &AppState, body: &Bytes) -> Response {
+    let form = form_pairs(std::str::from_utf8(body).unwrap_or(""));
+    let username = form.get("username").cloned().unwrap_or_default();
+    let password = form.get("password").cloned().unwrap_or_default();
+    if !state.password_ok(&password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html(login_page(&state.names().0, true)),
+        )
+            .into_response();
+    }
+    let token = state.open_session(if username.is_empty() {
+        state.names().0
+    } else {
+        username
+    });
+    let (org, project) = state.names();
+    redirect(
+        &format!("/{org}/{project}"),
+        &format!("azdo_session={token}; HttpOnly; Path=/; SameSite=Lax"),
+    )
+}
+
+fn sign_out(state: &AppState, headers: &HeaderMap) -> Response {
+    if let Some(token) = cookie_token(headers) {
+        state.close_session(&token);
+    }
+    redirect("/", "azdo_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax")
+}
+
+fn redirect(location: &str, cookie: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, location)
+        .header(header::SET_COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
+}
+
+fn path_is_api(path: &str) -> bool {
+    path.split('/').any(|part| part == "_apis")
+}
+
+fn scope_from_page(path: &str, state: &AppState) -> (String, String) {
+    let (default_org, default_project) = state.names();
+    let parts: Vec<String> = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(pct_decode)
+        .collect();
+    let org = parts.first().cloned().unwrap_or(default_org);
+    let project = parts.get(1).cloned().unwrap_or(default_project);
+    if project.starts_with('_') {
+        (org, state.names().1)
+    } else {
+        (org, project)
+    }
+}
+
+pub fn fail(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "message": message,
+            "detail": message,
+            "typeKey": "AzureDevOpsLab",
+            "errorCode": status.as_u16()
+        })),
+    )
+        .into_response()
+}
+
+impl AppState {
+    pub fn api(&self, method: Method, path: &str, query: &str, body: &[u8]) -> Response {
+        let Some((org, project, rest)) = split_api(path) else {
+            return fail(StatusCode::NOT_FOUND, "route inconnue");
+        };
+        if rest.is_empty() {
+            return fail(StatusCode::NOT_FOUND, "ressource absente");
+        }
+        let head = rest[0].to_ascii_lowercase();
+        if head == "resourceareas" {
+            let org_name = org.unwrap_or_else(|| self.names().0);
+            let value: Vec<Value> = RESOURCE_AREAS
+                .iter()
+                .map(|area| {
+                    json!({
+                        "id": area,
+                        "name": area,
+                        "locationUrl": format!("/{org_name}/_apis/{area}")
+                    })
+                })
+                .collect();
+            return Json(json!({"count": value.len(), "value": value})).into_response();
+        }
+        if head == "connectiondata" {
+            return Json(json!({
+                "authenticatedUser": {"providerDisplayName": "azurz", "customDisplayName": "azurz"},
+                "authorizedUser": {"providerDisplayName": "azurz"},
+                "instanceId": "azdo-linux",
+                "deploymentType": "hosted"
+            }))
+            .into_response();
+        }
+        let org = match org {
+            Some(org) => org,
+            None => return fail(StatusCode::NOT_FOUND, "organisation absente"),
+        };
+        if head == "projects" {
+            return self.projects(&method, &org, &rest, body);
+        }
+        let Some(project) = project else {
+            return fail(StatusCode::NOT_FOUND, "projet absent");
+        };
+        if head == "wit" {
+            return self.wit(&method, &org, &project, &rest, query, body);
+        }
+        self.collection(&method, &org, &project, &rest, body)
+    }
+
+    fn projects(&self, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {
+        if rest.len() == 1 && method == Method::GET {
+            let value = self.read(|db| {
+                db.orgs
+                    .get(org)
+                    .map(|organization| {
+                        organization
+                            .projects
+                            .iter()
+                            .map(|(name, project)| project_json(org, name, project))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            return Json(json!({"count": value.len(), "value": value})).into_response();
+        }
+        if rest.len() == 1 && method == Method::POST {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let name = payload
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "nom de projet absent");
+            }
+            let description = payload
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Projet")
+                .to_string();
+            let created = self.write(|db| {
+                db.ensure_project(org, &name);
+                if let Some(project) = db.project_mut(org, &name) {
+                    if !description.is_empty() {
+                        project.description = description;
+                    }
+                }
+                db.project(org, &name)
+                    .map(|project| project_json(org, &name, project))
+                    .unwrap_or(json!({}))
+            });
+            return Json(created).into_response();
+        }
+        if rest.len() >= 2 && method == Method::GET {
+            let key = &rest[1];
+            if rest.len() == 3 && rest[2].eq_ignore_ascii_case("teams") {
+                let value = self.read(|db| {
+                    db.project(org, key)
+                        .and_then(|project| project.buckets.get("core/teams"))
+                        .map(Bucket::list)
+                        .unwrap_or(json!({"count": 0, "value": []}))
+                });
+                return Json(value).into_response();
+            }
+            let found = self.read(|db| {
+                let name = db.project_name(org, key)?;
+                let project = db.project(org, key)?;
+                Some(project_json(org, &name, project))
+            });
+            return match found {
+                Some(project) => Json(project).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+            };
+        }
+        fail(StatusCode::NOT_FOUND, "route projet inconnue")
+    }
+
+    fn wit(
+        &self,
+        method: &Method,
+        org: &str,
+        project: &str,
+        rest: &[String],
+        query: &str,
+        body: &[u8],
+    ) -> Response {
+        let resource = rest.get(1).map(|value| value.to_ascii_lowercase());
+        if resource.as_deref() == Some("wiql") && method == Method::POST {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let text = payload.get("query").and_then(|value| value.as_str()).unwrap_or("");
+            let work_items = self.read(|db| {
+                db.project(org, project)
+                    .map(|stored| apply_wiql(stored.work_items.values(), text))
+                    .unwrap_or_default()
+            });
+            return Json(json!({"queryType": "flat", "workItems": work_items})).into_response();
+        }
+        if resource.as_deref() != Some("workitems") {
+            return self.collection(method, org, project, rest, body);
+        }
+        if rest.len() >= 3 && rest[2].starts_with('$') && method == Method::POST {
+            let kind = rest[2].trim_start_matches('$').replace("%20", " ");
+            let ops = parse_json(body).unwrap_or(json!([]));
+            let ops = ops.as_array().cloned().unwrap_or_default();
+            let fields = match fields_from_patch(&ops) {
+                Ok(fields) => fields,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, &message),
+            };
+            let item = self.write(|db| {
+                db.ensure_project(org, project);
+                db.project_mut(org, project)
+                    .map(|stored| stored.create_work_item(project, &kind, fields))
+            });
+            return match item {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+            };
+        }
+        if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("comments") {
+            let Ok(id) = rest[2].parse::<i64>() else {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            };
+            if method == Method::POST {
+                let payload = parse_json(body).unwrap_or(json!({}));
+                let text = payload.get("text").and_then(|value| value.as_str()).unwrap_or("").to_string();
+                let note = self.write(|db| {
+                    db.project_mut(org, project)
+                        .and_then(|stored| stored.add_comment(id, &text).ok())
+                });
+                return match note {
+                    Some(note) => Json(note).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+                };
+            }
+            let notes = self.read(|db| {
+                db.project(org, project)
+                    .and_then(|stored| stored.comments.get(&id).cloned())
+            });
+            return match notes {
+                Some(notes) => Json(json!({"count": notes.len(), "totalCount": notes.len(), "comments": notes})).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+            };
+        }
+        if rest.len() == 2 && method == Method::GET {
+            let ids = query_param(query, "ids");
+            let value = self.read(|db| {
+                let Some(stored) = db.project(org, project) else {
+                    return Vec::new();
+                };
+                if let Some(ids) = ids {
+                    ids.split(',')
+                        .filter_map(|id| id.parse::<i64>().ok())
+                        .filter_map(|id| stored.work_items.get(&id).cloned())
+                        .collect()
+                } else {
+                    stored.work_items.values().cloned().collect()
+                }
+            });
+            return Json(json!({"count": value.len(), "value": value})).into_response();
+        }
+        if rest.len() >= 3 {
+            let Ok(id) = rest[2].parse::<i64>() else {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            };
+            if method == Method::GET {
+                let found = self.read(|db| db.project(org, project).and_then(|stored| stored.work_items.get(&id).cloned()));
+                return match found {
+                    Some(item) => Json(item).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+                };
+            }
+            if method == Method::PATCH {
+                let ops = parse_json(body).unwrap_or(json!([])).as_array().cloned().unwrap_or_default();
+                let updated = self.write(|db| {
+                    db.project_mut(org, project)
+                        .and_then(|stored| stored.patch_work_item(id, &ops).ok())
+                });
+                return match updated {
+                    Some(item) => Json(item).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+                };
+            }
+        }
+        fail(StatusCode::NOT_FOUND, "route work item inconnue")
+    }
+
+    fn collection(
+        &self,
+        method: &Method,
+        org: &str,
+        project: &str,
+        rest: &[String],
+        body: &[u8],
+    ) -> Response {
+        if rest.len() < 2 {
+            return fail(StatusCode::NOT_FOUND, "ressource absente");
+        }
+        let item_id = item_id(rest);
+        let bucket_key = nested_key(rest).unwrap_or_else(|| collection_key(rest));
+        if method == Method::GET && item_id.is_none() {
+            let value = self.read(|db| {
+                db.project(org, project)
+                    .and_then(|stored| stored.buckets.get(&bucket_key))
+                    .map(Bucket::list)
+                    .unwrap_or(json!({"count": 0, "value": []}))
+            });
+            return Json(value).into_response();
+        }
+        if method == Method::POST && item_id.is_none() {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let created = self.write(|db| {
+                db.ensure_project(org, project);
+                db.project_mut(org, project).map(|stored| {
+                    let bucket = stored
+                        .buckets
+                        .entry(bucket_key.clone())
+                        .or_insert_with(|| Bucket { items: Default::default(), next: 1 });
+                    bucket.create(payload)
+                })
+            });
+            return match created {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+            };
+        }
+        let Some(item_id) = item_id else {
+            return fail(StatusCode::NOT_FOUND, "ressource absente");
+        };
+        if method == Method::GET {
+            let found = self.read(|db| {
+                db.project(org, project)
+                    .and_then(|stored| stored.buckets.get(&bucket_key))
+                    .and_then(|bucket| bucket.get(&item_id))
+            });
+            return match found {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "ressource introuvable"),
+            };
+        }
+        if method == Method::PATCH || method == Method::PUT {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let updated = self.write(|db| {
+                db.project_mut(org, project)
+                    .and_then(|stored| stored.buckets.get_mut(&bucket_key))
+                    .and_then(|bucket| bucket.patch(&item_id, &payload))
+            });
+            return match updated {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "ressource introuvable"),
+            };
+        }
+        if method == Method::DELETE {
+            let removed = self.write(|db| {
+                db.project_mut(org, project)
+                    .and_then(|stored| stored.buckets.get_mut(&bucket_key))
+                    .map(|bucket| bucket.remove(&item_id))
+                    .unwrap_or(false)
+            });
+            return if removed {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "ressource introuvable")
+            };
+        }
+        fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+    }
+}
+
+fn collection_key(rest: &[String]) -> String {
+    format!(
+        "{}/{}",
+        rest[0].to_ascii_lowercase(),
+        rest[1].to_ascii_lowercase()
+    )
+}
+
+fn item_id(rest: &[String]) -> Option<String> {
+    if rest.len() >= 3 && !rest[2].starts_with('$') && rest.len() < 4 {
+        Some(rest[2].clone())
+    } else if rest.len() >= 5 {
+        Some(rest[4..].join("/"))
+    } else {
+        None
+    }
+}
+
+fn nested_key(rest: &[String]) -> Option<String> {
+    if rest.len() >= 4 {
+        Some(format!(
+            "{}/{}/{}/{}",
+            rest[0].to_ascii_lowercase(),
+            rest[1].to_ascii_lowercase(),
+            rest[2],
+            rest[3].to_ascii_lowercase()
+        ))
+    } else {
+        None
+    }
+}
+
+fn project_json(org: &str, name: &str, project: &crate::store::ProjectData) -> Value {
+    json!({
+        "id": project.id,
+        "name": name,
+        "description": project.description,
+        "state": "wellFormed",
+        "visibility": "private",
+        "url": format!("/{org}/_apis/projects/{name}")
+    })
+}
+
+fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Vec<String>)> {
+    let parts: Vec<String> = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(pct_decode)
+        .collect();
+    let index = parts.iter().position(|part| part == "_apis")?;
+    let rest = parts[index + 1..].to_vec();
+    if index == 2 {
+        Some((Some(parts[0].clone()), Some(parts[1].clone()), rest))
+    } else if index == 1 {
+        Some((Some(parts[0].clone()), None, rest))
+    } else if index == 0 {
+        Some((None, None, rest))
+    } else {
+        None
+    }
+}
+
+fn parse_json(body: &[u8]) -> Option<Value> {
+    if body.is_empty() {
+        return Some(Value::Null);
+    }
+    serde_json::from_slice(body).ok()
+}
+
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if pct_decode(name) == key {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
+
+fn form_pairs(body: &str) -> std::collections::BTreeMap<String, String> {
+    body.split('&')
+        .filter_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            Some((pct_decode(name), pct_decode(value).replace('+', " ")))
+        })
+        .collect()
+}
+
+pub fn pct_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let header = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = header
+        .strip_prefix("Basic ")
+        .or_else(|| header.strip_prefix("basic "))?
+        .trim();
+    let mut padded = encoded.to_string();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(padded).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let (user, password) = text.split_once(':')?;
+    Some((user.to_string(), password.to_string()))
+}
+
+pub fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::COOKIE)?.to_str().ok()?;
+    value.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix("azdo_session=")
+            .map(|token| token.to_string())
+    })
+}
+
+pub enum Identity {
+    User(String),
+    Anonymous,
+    Rejected,
+}
+
+impl AppState {
+    pub fn identify(&self, headers: &HeaderMap) -> Identity {
+        if headers.get(header::AUTHORIZATION).is_some() {
+            return match basic_credentials(headers) {
+                Some((user, password)) if self.password_ok(&password) => {
+                    Identity::User(if user.is_empty() { self.names().0 } else { user })
+                }
+                _ => Identity::Rejected,
+            };
+        }
+        if let Some(token) = cookie_token(headers) {
+            if let Some(user) = self.session_user(&token) {
+                return Identity::User(user);
+            }
+        }
+        Identity::Anonymous
+    }
+}

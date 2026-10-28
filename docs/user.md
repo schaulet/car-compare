@@ -11,10 +11,18 @@ docker compose -f lab/docker-compose.yml up --build
 ```
 
 - Pont et écran de suivi : http://localhost:8080
-- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`). Ce n'est pas une page web : sans en-tête, l'API répond `{"detail":"PAT refusé"}`. Le mot de passe Basic est le PAT `azurz-lab-pat` ; le nom d'utilisateur peut être vide ou quelconque.
+- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`). La page d'accueil demande un nom d'utilisateur et un mot de passe. Le mot de passe est le PAT `azurz-lab-pat`. Le nom d'utilisateur peut rester vide ou prendre n'importe quelle valeur, par exemple `azurz`. Après connexion, l'écran reprend les hubs du portail : éléments de travail, tableaux, dépôts, pipelines, plans de test, artefacts.
 
 ```bash
-curl -u :azurz-lab-pat http://localhost:8081/azurz/_apis/projects
+curl -u azurz:azurz-lab-pat http://localhost:8081/azurz/_apis/projects
+```
+
+Sans identifiant, l'API répond encore `PAT refusé`. L'écran de connexion, lui, s'ouvre dans le navigateur.
+
+Hors Docker :
+
+```bash
+cd azdo && cargo run
 ```
 - Ignition Ligne A : http://localhost:8088
 - Ignition Ligne B : http://localhost:8089
