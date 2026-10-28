@@ -1,5 +1,11 @@
 # Journal de suivi
 
+## 2026-10-28 — authentification du lab Azure DevOps
+
+- **Demande**: Donner les identifiants des conteneurs et vérifier la configuration, le lab Azure DevOps répondant `{"detail":"PAT refusé"}`.
+- **Constat**: le PAT configuré est `azurz-lab-pat`. Le contrôle n'acceptait que l'en-tête Basic encodé avec un nom d'utilisateur vide. Un nom saisi (navigateur, `curl -u azurz:…`) produisait ce refus alors que le mot de passe était le bon.
+- **Action**: le lab accepte le PAT comme mot de passe, quel que soit le nom d'utilisateur, comme l'API Azure DevOps. Un mot de passe différent reste refusé.
+
 ## 2026-10-28
 
 ### Pont MCP Dust → Azure DevOps, agents Ignition, lab Docker

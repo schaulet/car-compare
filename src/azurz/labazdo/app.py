@@ -56,13 +56,11 @@ class _Store:
 def create_lab_app(store: _Store | None = None, pat: str = PAT) -> FastAPI:
     app = FastAPI(title="Azurz Azure DevOps Lab", version="1.0.0")
     data = store or _Store()
-    expected = "Basic " + base64.b64encode(f":{pat}".encode()).decode("ascii")
-
     @app.middleware("http")
     async def _auth(request: Request, call_next):
         if request.url.path == "/health":
             return await call_next(request)
-        if request.headers.get("authorization") != expected:
+        if not _pat_matches(request.headers.get("authorization"), pat):
             return JSONResponse({"detail": "PAT refusé"}, status_code=401)
         return await call_next(request)
 
@@ -129,6 +127,24 @@ def create_lab_app(store: _Store | None = None, pat: str = PAT) -> FastAPI:
         return {"count": len(notes), "comments": notes}
 
     return app
+
+
+def _pat_matches(header: str | None, pat: str) -> bool:
+    """Azure DevOps prend le PAT comme mot de passe, quel que soit le nom d'utilisateur."""
+    if not header:
+        return False
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic" or not value.strip():
+        return False
+    encoded = value.strip()
+    encoded += "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if ":" not in decoded:
+        return False
+    return decoded.split(":", 1)[1] == pat
 
 
 def _org(org: str) -> None:

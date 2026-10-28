@@ -22,6 +22,26 @@ def test_lab_rejects_a_missing_pat():
     with TestClient(app) as client:
         response = client.get("/azurz/_apis/projects")
     assert response.status_code == 401
+    assert response.json()["detail"] == "PAT refusé"
+
+
+def test_lab_accepts_the_pat_with_any_username():
+    app = create_lab_app()
+    named = base64.b64encode(b"azurz:azurz-lab-pat").decode()
+    wrong = base64.b64encode(b"azurz:mauvais").decode()
+    with TestClient(app) as client:
+        accepted = client.get(
+            "/azurz/_apis/projects",
+            headers={"Authorization": f"Basic {named}"},
+        )
+        refused = client.get(
+            "/azurz/_apis/projects",
+            headers={"Authorization": f"Basic {wrong}"},
+        )
+    assert accepted.status_code == 200
+    assert accepted.json()["value"][0]["name"] == "AzurzDemo"
+    assert refused.status_code == 401
+    assert refused.json()["detail"] == "PAT refusé"
 
 
 def test_lab_roundtrip_matches_the_client():

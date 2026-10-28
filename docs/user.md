@@ -11,7 +11,11 @@ docker compose -f lab/docker-compose.yml up --build
 ```
 
 - Pont et écran de suivi : http://localhost:8080
-- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`, PAT `azurz-lab-pat`)
+- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`). Ce n'est pas une page web : sans en-tête, l'API répond `{"detail":"PAT refusé"}`. Le mot de passe Basic est le PAT `azurz-lab-pat` ; le nom d'utilisateur peut être vide ou quelconque.
+
+```bash
+curl -u :azurz-lab-pat http://localhost:8081/azurz/_apis/projects
+```
 - Ignition Ligne A : http://localhost:8088
 - Ignition Ligne B : http://localhost:8089
 - Ignition Supervision : http://localhost:8090
