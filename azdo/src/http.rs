@@ -163,10 +163,16 @@ impl AppState {
             return self.projects(&method, &org, &rest, body);
         }
         let Some(project) = project else {
+            if let Some(response) = crate::shapes::org_dispatch(self, &method, &org, &rest, body) {
+                return response;
+            }
             return fail(StatusCode::NOT_FOUND, "projet absent");
         };
         if head == "wit" {
             return self.wit(&method, &org, &project, &rest, query, body);
+        }
+        if let Some(response) = crate::shapes::dispatch(self, &method, &org, &project, &rest, query, body) {
+            return response;
         }
         self.collection(&method, &org, &project, &rest, body)
     }
@@ -249,6 +255,9 @@ impl AppState {
         body: &[u8],
     ) -> Response {
         let resource = rest.get(1).map(|value| value.to_ascii_lowercase());
+        if let Some(response) = crate::shapes::wit_catalog(method, org, project, rest) {
+            return response;
+        }
         if resource.as_deref() == Some("wiql") && method == Method::POST {
             let payload = parse_json(body).unwrap_or(json!({}));
             let text = payload.get("query").and_then(|value| value.as_str()).unwrap_or("");
@@ -279,6 +288,22 @@ impl AppState {
                 Some(item) => Json(item).into_response(),
                 None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
             };
+        }
+        if rest.len() >= 4
+            && (rest[3].eq_ignore_ascii_case("updates") || rest[3].eq_ignore_ascii_case("revisions"))
+        {
+            let Ok(id) = rest[2].parse::<i64>() else {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            };
+            let history = self.read(|db| {
+                db.project(org, project)
+                    .and_then(|stored| stored.history.get(&id).cloned())
+                    .unwrap_or_default()
+            });
+            if history.is_empty() && self.read(|db| db.project(org, project).and_then(|stored| stored.work_items.get(&id).cloned())).is_none() {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            }
+            return Json(json!({"count": history.len(), "value": history})).into_response();
         }
         if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("comments") {
             let Ok(id) = rest[2].parse::<i64>() else {
@@ -492,14 +517,14 @@ fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Vec<String>)
     }
 }
 
-fn parse_json(body: &[u8]) -> Option<Value> {
+pub(crate) fn parse_json(body: &[u8]) -> Option<Value> {
     if body.is_empty() {
         return Some(Value::Null);
     }
     serde_json::from_slice(body).ok()
 }
 
-fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|pair| {
         let (name, value) = pair.split_once('=')?;
         if pct_decode(name) == key {

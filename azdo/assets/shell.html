@@ -258,13 +258,61 @@
           };
           return;
         }
+        if (hub === "/_git") {
+          const repos = await collection("git/repositories");
+          const repo = repos[0];
+          let files = [];
+          if (repo) {
+            const page = await api("GET", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/items?recursionLevel=Full&api-version=7.1");
+            files = page.value || [];
+          }
+          const table = files.length ? "<table><thead><tr><th>Chemin</th><th>Type</th></tr></thead><tbody>" + files.map((item) => "<tr class='file' data-path='" + esc(item.path) + "'><td>" + esc(item.path) + "</td><td>" + esc(item.gitObjectType) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Dépôt vide.</p>";
+          view.innerHTML = "<h1>Fichiers</h1><p class='sub'>" + esc(repo ? repo.name + " · " + (repo.defaultBranch || "") : "Aucun dépôt") + "</p>" + table + "<section id='file' class='panel' hidden></section>";
+          document.querySelectorAll("tr.file").forEach((row) => {
+            row.onclick = async () => {
+              if (!repo || row.dataset.path === "/") return;
+              const item = await api("GET", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/items?path=" + encodeURIComponent(row.dataset.path) + "&api-version=7.1");
+              const panel = document.getElementById("file");
+              panel.hidden = false;
+              panel.innerHTML = "<h2>" + esc(item.path) + "</h2><pre>" + esc(item.content || "") + "</pre>";
+            };
+          });
+          return;
+        }
+        if (hub === "/_git/pulls") {
+          const pulls = await collection("git/pullrequests");
+          const table = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>État</th><th>Source</th><th>Cible</th></tr></thead><tbody>" + pulls.map((item) => "<tr><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title || item.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.sourceRefName) + "</td><td>" + esc(item.targetRefName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
+          view.innerHTML = "<h1>Demandes de tirage</h1><div class='command'><input id='pr-title' placeholder='Titre' /><input id='pr-source' placeholder='refs/heads/feature' /><button id='create' type='button'>Nouvelle demande de tirage</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            const repos = await collection("git/repositories");
+            const repo = repos[0];
+            if (!repo) return;
+            await api("POST", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/pullrequests?api-version=7.1", {
+              title: document.getElementById("pr-title").value || "Demande de tirage",
+              sourceRefName: document.getElementById("pr-source").value || "refs/heads/feature",
+              targetRefName: "refs/heads/main",
+            });
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_build") {
+          const [definitions, builds] = await Promise.all([collection("build/definitions"), collection("build/builds")]);
+          const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Pipeline</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
+          const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs;
+          document.getElementById("queue").onclick = async () => {
+            const definition = definitions[0];
+            if (!definition) return;
+            await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: definition.id }, sourceBranch: "refs/heads/main" });
+            location.reload();
+          };
+          return;
+        }
         const catalogs = {
-          "/_git": ["Dépôts", "git/repositories", "name", "Nouveau dépôt"],
           "/_git/commits": ["Commits", "git/commits", "comment", "Nouveau commit"],
           "/_git/pushes": ["Poussées", "git/pushes", "refName", "Nouvelle poussée"],
           "/_git/branches": ["Branches", "git/refs", "name", "refs/heads/"],
-          "/_git/pulls": ["Demandes de tirage", "git/pullrequests", "title", "Nouvelle demande de tirage"],
-          "/_build": ["Pipelines", "build/definitions", "name", "Nouveau pipeline"],
           "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
           "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
           "/_library": ["Bibliothèque", "distributedtask/variablegroups", "name", "Nouveau groupe de variables"],

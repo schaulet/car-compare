@@ -23,6 +23,8 @@ pub struct ProjectData {
     pub description: String,
     pub work_items: BTreeMap<i64, Value>,
     pub comments: BTreeMap<i64, Vec<Value>>,
+    #[serde(default)]
+    pub history: BTreeMap<i64, Vec<Value>>,
     pub next_work_item: i64,
     pub buckets: BTreeMap<String, Bucket>,
 }
@@ -37,7 +39,12 @@ impl Db {
     pub fn open(path: &Option<PathBuf>, org: &str, project: &str) -> Self {
         if let Some(path) = path {
             if let Ok(text) = fs::read_to_string(path) {
-                if let Ok(db) = serde_json::from_str::<Db>(&text) {
+                if let Ok(mut db) = serde_json::from_str::<Db>(&text) {
+                    db.ensure_project(org, project);
+                    let project_name = project.to_string();
+                    if let Some(stored) = db.project_mut(org, project) {
+                        stored.seed_missing(&project_name);
+                    }
                     return db;
                 }
             }
@@ -48,6 +55,10 @@ impl Db {
         };
         db.ensure_org(org);
         db.ensure_project(org, project);
+        let project_name = project.to_string();
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.seed_missing(&project_name);
+        }
         db
     }
 
@@ -129,34 +140,110 @@ impl ProjectData {
             description: "Projet préconfiguré du lab Azurz".into(),
             work_items: BTreeMap::new(),
             comments: BTreeMap::new(),
+            history: BTreeMap::new(),
             next_work_item: 1,
             buckets: BTreeMap::new(),
         };
-        project.buckets.insert(
-            "git/repositories".into(),
+        project.seed_missing(name);
+        project
+    }
+
+    pub fn seed_missing(&mut self, name: &str) {
+        let repo_id = "11111111-1111-1111-1111-111111111111";
+        self.buckets.entry("git/repositories".into()).or_insert_with(|| {
             Bucket::with(json!({
+                "id": repo_id,
                 "name": name,
                 "defaultBranch": "refs/heads/main",
                 "size": 0,
-                "isDisabled": false
-            })),
-        );
-        project.buckets.insert(
-            "core/teams".into(),
+                "isDisabled": false,
+                "isFork": false
+            }))
+        });
+        self.buckets.entry("core/teams".into()).or_insert_with(|| {
             Bucket::with(json!({
                 "name": format!("{name} Team"),
                 "description": "Équipe par défaut"
-            })),
-        );
-        project.buckets.insert(
-            "work/teamsettings/iterations".into(),
+            }))
+        });
+        self.buckets
+            .entry("work/teamsettings/iterations".into())
+            .or_insert_with(|| {
+                Bucket::with(json!({
+                    "name": "Sprint 1",
+                    "path": format!("{name}\\Sprint 1"),
+                    "attributes": {"startDate": null, "finishDate": null, "timeFrame": "current"}
+                }))
+            });
+        self.buckets.entry("build/definitions".into()).or_insert_with(|| {
             Bucket::with(json!({
-                "name": "Sprint 1",
-                "path": format!("{name}\\Sprint 1"),
-                "attributes": {"startDate": null, "finishDate": null, "timeFrame": "current"}
-            })),
-        );
-        project
+                "id": 1,
+                "name": "CI",
+                "path": "\\",
+                "type": "build",
+                "queueStatus": "enabled",
+                "revision": 1
+            }))
+        });
+        self.buckets.entry("pipelines/pipelines".into()).or_insert_with(|| {
+            Bucket::with(json!({
+                "id": 1,
+                "name": "CI",
+                "folder": "\\",
+                "revision": 1
+            }))
+        });
+        let repo_ids: Vec<String> = self
+            .buckets
+            .get("git/repositories")
+            .map(|bucket| bucket.items.values().map(|item| value_key(&item["id"])).collect())
+            .unwrap_or_default();
+        for id in repo_ids {
+            if id.is_empty() {
+                continue;
+            }
+            let commit = object_id(&format!("{name}:{id}:main"));
+            self.buckets
+                .entry(format!("git/repositories/{id}/refs"))
+                .or_insert_with(|| {
+                    Bucket::with(json!({
+                        "id": "refs/heads/main",
+                        "name": "refs/heads/main",
+                        "objectId": commit,
+                        "success": true
+                    }))
+                });
+            self.buckets
+                .entry(format!("git/repositories/{id}/commits"))
+                .or_insert_with(|| {
+                    Bucket::with(json!({
+                        "id": commit,
+                        "commitId": commit,
+                        "comment": "Initialisation du dépôt",
+                        "author": {"name": "azurz", "date": "2026-10-29T00:00:00Z"}
+                    }))
+                });
+            let readme = format!("# {name}\n");
+            self.buckets
+                .entry(format!("git/repositories/{id}/items"))
+                .or_insert_with(|| {
+                    let mut bucket = Bucket::empty();
+                    bucket.put(json!({
+                        "id": "/",
+                        "path": "/",
+                        "isFolder": true,
+                        "gitObjectType": "tree"
+                    }));
+                    bucket.put(json!({
+                        "id": "/README.md",
+                        "path": "/README.md",
+                        "isFolder": false,
+                        "gitObjectType": "blob",
+                        "content": readme
+                    }));
+                    bucket
+                });
+        }
     }
 
     pub fn create_work_item(&mut self, project: &str, kind: &str, fields: Map<String, Value>) -> Value {
@@ -179,46 +266,51 @@ impl ProjectData {
         });
         self.work_items.insert(id, item.clone());
         self.comments.insert(id, Vec::new());
+        self.history.entry(id).or_default().push(item.clone());
         item
     }
 
     pub fn patch_work_item(&mut self, id: i64, ops: &[Value]) -> Result<Value, String> {
-        let item = self
-            .work_items
-            .get_mut(&id)
-            .ok_or_else(|| format!("work item {id} introuvable"))?;
-        let fields = item
-            .get_mut("fields")
-            .and_then(|value| value.as_object_mut())
-            .ok_or_else(|| "champs absents".to_string())?;
-        for op in ops {
-            let operation = op.get("op").and_then(|value| value.as_str()).unwrap_or("");
-            let path = op.get("path").and_then(|value| value.as_str()).unwrap_or("");
-            if !path.starts_with("/fields/") {
-                continue;
-            }
-            let key = path.trim_start_matches("/fields/");
-            match operation {
-                "test" => {
-                    let current = fields.get(key);
-                    if current != op.get("value") {
-                        return Err(format!("test échoué sur {key}"));
+        let snapshot = {
+            let item = self
+                .work_items
+                .get_mut(&id)
+                .ok_or_else(|| format!("work item {id} introuvable"))?;
+            let fields = item
+                .get_mut("fields")
+                .and_then(|value| value.as_object_mut())
+                .ok_or_else(|| "champs absents".to_string())?;
+            for op in ops {
+                let operation = op.get("op").and_then(|value| value.as_str()).unwrap_or("");
+                let path = op.get("path").and_then(|value| value.as_str()).unwrap_or("");
+                if !path.starts_with("/fields/") {
+                    continue;
+                }
+                let key = path.trim_start_matches("/fields/");
+                match operation {
+                    "test" => {
+                        let current = fields.get(key);
+                        if current != op.get("value") {
+                            return Err(format!("test échoué sur {key}"));
+                        }
                     }
-                }
-                "add" | "replace" => {
-                    if let Some(value) = op.get("value") {
-                        fields.insert(key.to_string(), value.clone());
+                    "add" | "replace" => {
+                        if let Some(value) = op.get("value") {
+                            fields.insert(key.to_string(), value.clone());
+                        }
                     }
+                    "remove" => {
+                        fields.remove(key);
+                    }
+                    _ => {}
                 }
-                "remove" => {
-                    fields.remove(key);
-                }
-                _ => {}
             }
-        }
-        let rev = item.get("rev").and_then(|value| value.as_i64()).unwrap_or(1) + 1;
-        item["rev"] = json!(rev);
-        Ok(item.clone())
+            let rev = item.get("rev").and_then(|value| value.as_i64()).unwrap_or(1) + 1;
+            item["rev"] = json!(rev);
+            item.clone()
+        };
+        self.history.entry(id).or_default().push(snapshot.clone());
+        Ok(snapshot)
     }
 
     pub fn add_comment(&mut self, id: i64, text: &str) -> Result<Value, String> {
@@ -227,13 +319,37 @@ impl ProjectData {
         }
         let notes = self.comments.entry(id).or_default();
         let comment_id = notes.len() as i64 + 1;
-        let note = json!({"id": comment_id, "text": text, "workItemId": id});
+        let note = json!({
+            "id": comment_id,
+            "text": text,
+            "workItemId": id,
+            "createdBy": {"displayName": "azurz", "uniqueName": "azurz"},
+            "createdDate": "2026-10-29T00:00:00Z"
+        });
         notes.push(note.clone());
         Ok(note)
     }
 }
 
 impl Bucket {
+    pub fn empty() -> Self {
+        Bucket { items: BTreeMap::new(), next: 1 }
+    }
+
+    pub fn put(&mut self, body: Value) -> Value {
+        let key = value_key(&body["id"]);
+        if key.is_empty() {
+            return self.create(body);
+        }
+        if let Ok(numeric) = key.parse::<i64>() {
+            if numeric >= self.next {
+                self.next = numeric + 1;
+            }
+        }
+        self.items.insert(key, body.clone());
+        body
+    }
+
     fn with(value: Value) -> Self {
         let mut bucket = Bucket { items: BTreeMap::new(), next: 2 };
         let mut item = value;
@@ -307,6 +423,17 @@ pub fn value_key(value: &Value) -> String {
         Value::Number(number) => number.to_string(),
         _ => String::new(),
     }
+}
+
+pub fn object_id(seed: &str) -> String {
+    let bytes = seed.as_bytes();
+    let mut out = String::with_capacity(40);
+    for index in 0..40 {
+        let byte = bytes.get(index % bytes.len().max(1)).copied().unwrap_or(b'a') as u16;
+        let nibble = (byte + index as u16) % 16;
+        out.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
+    }
+    out
 }
 
 pub fn slug(name: &str) -> String {

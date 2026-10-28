@@ -1,4 +1,5 @@
 mod http;
+mod shapes;
 mod store;
 mod web;
 
