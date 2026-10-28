@@ -941,3 +941,186 @@ async fn pull_request_threads_build_logs_and_dashboards_follow_the_rest_shape() 
     assert!(body.contains("Git"));
     assert!(body.contains("WorkItemTracking"));
 }
+
+#[tokio::test]
+async fn tfvc_search_acls_and_package_protocols_follow_the_rest_shape() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/tfvc/changesets?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"comment":"init tfvc","changes":[{"changeType":"add","item":{"path":"$/README.txt","content":"depot AzurzDemo"}}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let changeset: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let changeset_id = changeset["changesetId"].as_i64().unwrap();
+    assert_eq!(changeset["comment"], "init tfvc");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/tfvc/changesets/{changeset_id}/changes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("$/README.txt"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/tfvc/items?path=$/README.txt&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let item: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(item["path"], "$/README.txt");
+    assert!(item["content"].as_str().unwrap().contains("AzurzDemo"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe recherche"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let work_id = created["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/search/workitemsearchresults?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"searchText":"Pompe","$top":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(found["results"][0]["fields"]["system.title"], "Pompe recherche");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitemsbatch?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"ids":[{work_id}],"fields":["System.Title"]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let batch: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(batch["value"][0]["id"], work_id);
+    assert_eq!(batch["value"][0]["fields"]["System.Title"], "Pompe recherche");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/search/codesearchresults?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"searchText":"AzurzDemo"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("README.md") || body.contains("README.txt"), "{body}");
+
+    let namespace = "2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87";
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/_apis/accesscontrolentries/{namespace}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"token":"repoV2/azurz","merge":true,"accessControlEntries":[{"descriptor":"azurz","allow":4,"deny":0}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/accesscontrollists/{namespace}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let acls: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(acls["value"][0]["token"], "repoV2/azurz");
+    assert_eq!(acls["value"][0]["acesDictionary"]["azurz"]["allow"], 4);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"azurz-packages"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/nuget/v3/index.json",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let index: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(index["version"], "3.0.0");
+    assert!(index["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|resource| resource["@type"].as_str().unwrap_or("").contains("PackageBaseAddress")));
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"oee","versions":{"1.0.0":{"version":"1.0.0"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let package: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(package["name"], "oee");
+    assert_eq!(package["versions"]["1.0.0"]["version"], "1.0.0");
+}

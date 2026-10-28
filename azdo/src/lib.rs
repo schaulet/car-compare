@@ -1,6 +1,7 @@
 mod http;
 mod shapes;
 mod store;
+mod surface;
 mod tracking;
 mod web;
 

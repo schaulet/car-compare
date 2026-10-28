@@ -91,7 +91,7 @@ fn redirect(location: &str, cookie: &str) -> Response {
 }
 
 fn path_is_api(path: &str) -> bool {
-    path.split('/').any(|part| part == "_apis")
+    path.split('/').any(|part| part == "_apis" || part == "_packaging")
 }
 
 fn scope_from_page(path: &str, state: &AppState) -> (String, String) {
@@ -125,6 +125,9 @@ pub fn fail(status: StatusCode, message: &str) -> Response {
 
 impl AppState {
     pub fn api(&self, method: Method, path: &str, query: &str, body: &[u8]) -> Response {
+        if path.split('/').any(|part| part == "_packaging") {
+            return crate::surface::packaging(self, &method, path, body);
+        }
         let Some((org, project, team, rest)) = split_api(path) else {
             return fail(StatusCode::NOT_FOUND, "route inconnue");
         };
@@ -166,10 +169,16 @@ impl AppState {
             if let Some(response) = crate::shapes::org_dispatch(self, &method, &org, &rest, body) {
                 return response;
             }
+            if let Some(response) = crate::surface::org(self, &method, &org, &rest, body) {
+                return response;
+            }
             return fail(StatusCode::NOT_FOUND, "projet absent");
         };
         if head == "wit" {
             return self.wit(&method, &org, &project, &rest, query, body);
+        }
+        if let Some(response) = crate::surface::project(self, &method, &org, &project, &rest, query, body) {
+            return response;
         }
         if let Some(response) = crate::tracking::dispatch(self, &method, &org, &project, team.as_deref(), &rest, body) {
             return response;
@@ -287,6 +296,9 @@ impl AppState {
         }
         if resource.as_deref() == Some("queries") {
             return self.queries(method, org, project, rest, body);
+        }
+        if resource.as_deref() == Some("workitemsbatch") && method == Method::POST {
+            return crate::surface::work_items_batch(self, org, project, body);
         }
         if resource.as_deref() != Some("workitems") {
             return self.collection(method, org, project, rest, body);

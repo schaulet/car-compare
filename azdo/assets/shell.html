@@ -105,6 +105,7 @@
       <a href="/__ORG__/__PROJECT__/_git/pushes">Poussées</a>
       <a href="/__ORG__/__PROJECT__/_git/branches">Branches</a>
       <a href="/__ORG__/__PROJECT__/_git/pulls">Demandes de tirage</a>
+      <a href="/__ORG__/__PROJECT__/_tfvc">TFVC</a>
       <div class="group">Pipelines</div>
       <a href="/__ORG__/__PROJECT__/_build">Pipelines</a>
       <a href="/__ORG__/__PROJECT__/_environments">Environnements</a>
@@ -221,12 +222,17 @@
             workItems(), collection("git/repositories"), collection("build/definitions"),
             collection("testplan/plans"), collection("packaging/feeds"),
           ]);
-          view.innerHTML = "<h1>" + esc(project) + "</h1><p class='sub'>Vue d'ensemble</p><div class='cards'>" +
+          view.innerHTML = "<h1>" + esc(project) + "</h1><p class='sub'>Vue d'ensemble</p><div class='command'><input id='search' placeholder='Rechercher un élément de travail' /><button id='search-go' type='button'>Rechercher</button></div><div id='search-result'></div><div class='cards'>" +
             "<div class='tile'><b>" + items.length + "</b>Éléments de travail</div>" +
             "<div class='tile'><b>" + repos.length + "</b>Dépôts</div>" +
             "<div class='tile'><b>" + builds.length + "</b>Pipelines</div>" +
             "<div class='tile'><b>" + plans.length + "</b>Plans de test</div>" +
             "<div class='tile'><b>" + feeds.length + "</b>Artefacts</div></div>";
+          document.getElementById("search-go").onclick = async () => {
+            const found = await api("POST", root + "/search/workitemsearchresults?api-version=7.1", { searchText: document.getElementById("search").value, $top: 25 });
+            const rows = found.results || [];
+            document.getElementById("search-result").innerHTML = rows.length ? "<ul>" + rows.map((row) => "<li>" + esc(row.fields?.["system.title"]) + "</li>").join("") + "</ul>" : "<p class='sub'>Aucun résultat.</p>";
+          };
           return;
         }
         if (hub === "/_workitems" || hub === "/_backlogs" || hub === "/_sprints") {
@@ -357,6 +363,41 @@
           };
           return;
         }
+        if (hub === "/_tfvc") {
+          const [changesets, items] = await Promise.all([
+            collection("tfvc/changesets"),
+            api("GET", root + "/tfvc/items?path=$/&recursionLevel=Full&api-version=7.1").then((data) => data.value || []),
+          ]);
+          const files = items.length ? "<ul>" + items.map((item) => "<li>" + esc(item.path) + "</li>").join("") + "</ul>" : "<p class='sub'>Aucun fichier.</p>";
+          const table = changesets.length ? "<table><thead><tr><th>ID</th><th>Commentaire</th></tr></thead><tbody>" + changesets.map((item) => "<tr><td>" + esc(item.changesetId || item.id) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun changeset.</p>";
+          view.innerHTML = "<h1>TFVC</h1><div class='command'><input id='cs-comment' placeholder='Commentaire' /><button id='checkin' type='button'>Archiver</button></div>" + files + table;
+          document.getElementById("checkin").onclick = async () => {
+            const comment = document.getElementById("cs-comment").value || "Archivage";
+            await api("POST", root + "/tfvc/changesets?api-version=7.1", { comment, changes: [{ changeType: "add", item: { path: "$/" + comment.replace(/\s+/g, "-") + ".txt", content: comment } }] });
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_testPlans") {
+          const plans = await collection("testplan/plans");
+          const table = plans.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Zone</th></tr></thead><tbody>" + plans.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.areaPath) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun plan.</p>";
+          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Nouveau plan' /><button id='create' type='button'>Créer</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            await api("POST", root + "/testplan/plans?api-version=7.1", { name: document.getElementById("plan-name").value || "Plan" });
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_artifacts") {
+          const feeds = await collection("packaging/feeds");
+          const table = feeds.length ? "<table><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun flux.</p>";
+          view.innerHTML = "<h1>Artefacts</h1><div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            await api("POST", root + "/packaging/feeds?api-version=7.1", { name: document.getElementById("feed-name").value || "flux" });
+            location.reload();
+          };
+          return;
+        }
         const catalogs = {
           "/_git/commits": ["Commits", "git/commits", "comment", "Nouveau commit"],
           "/_git/pushes": ["Poussées", "git/pushes", "refName", "Nouvelle poussée"],
@@ -364,9 +405,7 @@
           "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
           "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
           "/_library": ["Bibliothèque", "distributedtask/variablegroups", "name", "Nouveau groupe de variables"],
-          "/_testPlans": ["Plans de test", "testplan/plans", "name", "Nouveau plan"],
           "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
-          "/_artifacts": ["Artefacts", "packaging/feeds", "name", "Nouveau flux"],
           "/_wiki": ["Wiki", "wiki/wikis", "name", "Nouveau wiki"],
         };
         if (catalogs[hub]) {
