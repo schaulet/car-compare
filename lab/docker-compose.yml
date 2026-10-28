@@ -1,0 +1,97 @@
+name: azurz
+
+services:
+  azdo:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+    command: ["azurz-azdo"]
+    environment:
+      AZURZ_AZDO_PAT: azurz-lab-pat
+      AZURZ_AZDO_ORG: azurz
+      AZURZ_AZDO_PROJECT: AzurzDemo
+      AZURZ_AZDO_PORT: "8080"
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  bridge:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+    environment:
+      AZURZ_AZDO_URL: http://azdo:8080
+      AZURZ_AZDO_PAT: azurz-lab-pat
+      AZURZ_AZDO_ORG: azurz
+      AZURZ_AZDO_PROJECT: AzurzDemo
+      AZURZ_MCP_TOKEN: dust-lab-token
+      AZURZ_DATA: /data
+      AZURZ_IGNITION_ROOT: /ignition
+      AZURZ_PORT: "8080"
+      AZURZ_WORKER: "1"
+      AZURZ_RESTART_GATEWAYS: "1"
+      AZURZ_TARGETS: "ligne-a|Ligne A|http://ignition-ligne-a:8088|http://localhost:8088|azurz-ignition-ligne-a;ligne-b|Ligne B|http://ignition-ligne-b:8088|http://localhost:8089|azurz-ignition-ligne-b;supervision|Supervision|http://ignition-supervision:8088|http://localhost:8090|azurz-ignition-supervision"
+    ports:
+      - "8080:8080"
+    volumes:
+      - bridge-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ignition-a:/ignition/ligne-a
+      - ignition-b:/ignition/ligne-b
+      - ignition-supervision:/ignition/supervision
+    depends_on:
+      azdo:
+        condition: service_healthy
+
+  ignition-ligne-a:
+    image: inductiveautomation/ignition:8.1
+    container_name: azurz-ignition-ligne-a
+    environment: &ignition
+      ACCEPT_IGNITION_EULA: "Y"
+      GATEWAY_ADMIN_USERNAME: admin
+      GATEWAY_ADMIN_PASSWORD: azurz-lab
+      IGNITION_EDITION: standard
+      DISABLE_QUICKSTART: "true"
+      TZ: Europe/Paris
+    command: ["-n", "ligne-a", "-m", "512", "--", "-Dignition.allowunsignedmodules=true"]
+    ports:
+      - "8088:8088"
+    volumes:
+      - ignition-a:/usr/local/bin/ignition/data
+
+  ignition-ligne-b:
+    image: inductiveautomation/ignition:8.1
+    container_name: azurz-ignition-ligne-b
+    environment: *ignition
+    command: ["-n", "ligne-b", "-m", "512", "--", "-Dignition.allowunsignedmodules=true"]
+    ports:
+      - "8089:8088"
+    volumes:
+      - ignition-b:/usr/local/bin/ignition/data
+
+  ignition-supervision:
+    image: inductiveautomation/ignition:8.1
+    container_name: azurz-ignition-supervision
+    environment: *ignition
+    command: ["-n", "supervision", "-m", "512", "--", "-Dignition.allowunsignedmodules=true"]
+    ports:
+      - "8090:8088"
+    volumes:
+      - ignition-supervision:/usr/local/bin/ignition/data
+
+volumes:
+  bridge-data:
+  ignition-a:
+  ignition-b:
+  ignition-supervision:

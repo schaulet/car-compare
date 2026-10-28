@@ -1,3 +1,73 @@
+# Guide utilisateur
+
+## Azurz, pour la démo
+
+### Démarrer le lab
+
+Prérequis : Docker, et assez de mémoire pour trois passerelles Ignition (compter environ 3 Go).
+
+```bash
+docker compose -f lab/docker-compose.yml up --build
+```
+
+- Pont et écran de suivi : http://localhost:8080
+- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`, PAT `azurz-lab-pat`)
+- Ignition Ligne A : http://localhost:8088
+- Ignition Ligne B : http://localhost:8089
+- Ignition Supervision : http://localhost:8090
+
+Compte passerelle : `admin` / `azurz-lab`.
+
+Sans Docker, le pont seul garde les tickets en mémoire :
+
+```bash
+uv sync --extra dev
+uv run azurz
+```
+
+### Scénario à montrer
+
+1. Ouvrir http://localhost:8080. Cliquer **Exemple OEE**, puis **Envoyer**. La carte « OEE Ligne 1 » passe à « prête ».
+2. Pour montrer l'itération : sélectionner la carte (**Enrichir celle-ci**) et ajouter par exemple `Ajoute la fonction rendement(bonnes, total) = bonnes / total et le critère rendement(90, 100) = 0.9`.
+3. Soit cliquer **Traiter** sur la carte, soit cocher **Traitement automatique des demandes prêtes**.
+4. La carte affiche la proposition et le rapport. `compute_oee(0.9, 0.8, 0.95) = 0.684` est la preuve du scénario nominal. Le lien **rapport** ouvre la page HTML, **télécharger** récupère le zip (module, tests, projet).
+5. Cocher Ligne A et Supervision, puis **Déployer la sélection**. Ligne B ne reçoit rien.
+6. Après redémarrage de la passerelle (fait par l'agent dans le lab), le projet `azurz_oee_ligne_1` est dans les données de la passerelle. Le concepteur Ignition le voit dans la bibliothèque de scripts.
+
+Le script `lab/demo.sh` rejoue ce parcours contre le pont déjà démarré.
+
+### Brancher Dust
+
+Dans le workspace Dust : Spaces → Tools → Add Tools.
+
+- URL : `http://<adresse joignable par Dust>:8080/mcp`
+- Authentification : Bearer `dust-lab-token`
+- Laisser l'agent appeler `creer_demande_azure_devops`, puis `enrichir_demande` avec l'identifiant renvoyé, puis `consulter_demande` pour lire la proposition et le rapport.
+
+Dust doit pouvoir ouvrir cette URL. Sur un poste de démo, un tunnel ou une URL publique est nécessaire : le lab, lui, tourne en local.
+
+### Forme d'une demande de module
+
+```
+Je veux un module Ignition nommé « OEE Ligne 1 » qui expose la fonction
+compute_oee(availability, performance, quality) = availability * performance * quality
+et un tag mémoire Plant/Ligne1/OEE.
+```
+
+Si le nom ou la fonction manque, la carte reste « à enrichir » et liste ce qu'il faut préciser. Le ticket existe déjà dans Azure DevOps.
+
+### Ce que l'opérateur voit sur une carte
+
+- l'état et la capacité ;
+- les manques, tant que la demande n'est pas prête ;
+- la proposition d'implémentation ;
+- le rapport de tests, scénario par scénario, avec la preuve ;
+- le bouton Traiter, seulement quand la demande est prête.
+
+La case en haut s'applique à toutes les demandes prêtes. Elle ne déploie pas toute seule : le déploiement part du tableau d'artefacts, vers les cases cochées.
+
+## Annexe — Car Compare
+
 # Guide Utilisateur - Car Compare
 
 ## Introduction

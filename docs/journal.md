@@ -1,4 +1,23 @@
-# Journal de suivi - Car Compare
+# Journal de suivi
+
+## 2026-10-28
+
+### Pont MCP Dust → Azure DevOps, agents Ignition, lab Docker
+- **Demande**: Créer un serveur MCP utilisable depuis Dust pour analyser une demande de chat, produire et enrichir un ticket Azure DevOps, suivre les demandes dans une interface, les traiter manuellement ou via une case globale, générer un module Ignition (proposition, tests Cucumber, rapport, artefact) puis déployer la version choisie vers les instances sélectionnées. Fournir un lab Docker avec Azure DevOps préconfiguré et plusieurs passerelles Ignition.
+- **Actions réalisées**:
+  - Scénarios Cucumber du pont (demandes, traitement, déploiement, registre générique) avant l'implémentation
+  - Hôte de traitement ignorant des métiers, analyseurs / agents / outils enregistrés
+  - Agent module Ignition et agent de déploiement
+  - API et interface web (cartes, case globale, artefacts, cibles)
+  - Serveur MCP Streamable HTTP protégé par jeton Bearer, branchable dans Dust
+  - Lab Azure DevOps compatible REST et composition Docker (3 passerelles Ignition 8.1)
+  - Documentation : doc, spec, archi, user
+- **Résultat**:
+  - 26 tests pytest passants (Car Compare inclus), dont le wheel qui embarque Azurz et l'interface
+  - 17 scénarios behave passants, 93 étapes, dont les parcours Azurz (demande, itération, traitement manuel, case globale, prérogative, API, déploiement ciblé, registre)
+  - lint ruff OK sur le pont
+  - rendu mobile revérifié (colonne unique, tableaux en blocs)
+- **Limite connue**: un `.modl` non signé et sans classe Java du SDK n'est pas chargé comme module binaire par Ignition. Le lab dépose le projet de scripts (le contenu exécutable) dans `data/projects` et le paquet `.modl` dans les artefacts de l'instance. Le redémarrage de la passerelle est demandé par l'agent quand `AZURZ_RESTART_GATEWAYS=1`.
 
 ## 2026-09-09
 

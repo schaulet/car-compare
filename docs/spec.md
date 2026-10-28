@@ -1,3 +1,58 @@
+# Spécifications fonctionnelles
+
+## Azurz
+
+### Acteurs
+
+- **Utilisateur Dust** : décrit et enrichit une demande dans le chat.
+- **Opérateur** : suit les cartes, arme le traitement automatique, choisit les cibles de déploiement.
+- **Agent** : spécialisation enregistrée, avec des capacités et des prérogatives.
+
+### UC1 — Produire une demande
+
+1. Le chat envoie un message.
+2. Les analyseurs enregistrés scorent le texte. Le meilleur produit un titre, une capacité, des manques et, s'il le peut, une spécification.
+3. Un work item Azure DevOps est créé (type User Story). L'état local est `ready` si la spécification est actionnable, sinon `needs_input`.
+4. La réponse indique les manques en français pour que le chat pose la question suivante.
+
+Une demande de module Ignition est actionnable lorsqu'elle a un nom (`nommé « … »`, `s'appelle « … »`) et au moins une fonction `fonction nom(paramètres) = expression`. L'expression est arithmétique (`+ - * / % **`), limitée aux paramètres. Un tag s'écrit `tag mémoire Chemin/Du/Tag`. Une version s'écrit `version 1.2.0` (défaut `1.0.0`). Un critère chiffré s'écrit `nom(1, 2) = 3`.
+
+### UC2 — Enrichir la même demande
+
+1. Le chat fournit l'identifiant et un nouveau message.
+2. L'analyse rejoue **tout** l'historique.
+3. Le même work item est mis à jour (titre, description, critères, tags) et un commentaire est ajouté.
+4. Aucun second ticket n'est créé. Le texte d'origine reste dans l'historique.
+
+### UC3 — Traiter
+
+- Case globale décochée : la demande `ready` attend. Le bouton « Traiter » de la carte lance l'agent.
+- Case cochée : l'horloge (et l'envoi d'un message, si la demande devient prête à cet instant) lance l'agent.
+- L'hôte choisit l'agent qui possède la capacité **et** toutes les prérogatives de la politique enregistrée. Sinon l'état passe à `blocked` et le motif cite la prérogative absente.
+
+L'agent module :
+
+1. rédige une proposition (identifiant, version, fonctions, tags, stratégie) ;
+2. génère `module.xml`, la bibliothèque Python, le projet gateway et un `.feature` Cucumber ;
+3. exécute les scénarios ;
+4. publie un rapport (JSON + HTML) dont les preuves contiennent les valeurs attendues, par exemple `0.684` pour `0.9 * 0.8 * 0.95` ;
+5. publie l'artefact versionné si les tests passent. Une version déjà publiée est incrémentée au patch.
+
+### UC4 — Déployer
+
+1. L'opérateur (ou l'outil `deployer_artefact`) choisit un artefact, sa version et une liste d'instances.
+2. Une demande de capacité `artifact.deploy` est créée puis traitée tout de suite : c'est une action explicite, indépendante de la case globale.
+3. L'agent n'écrit le projet que dans les instances cochées.
+4. Dans le lab, il peut redémarrer la passerelle correspondante et attendre `StatusPing` = RUNNING.
+
+### États
+
+`needs_input`, `ready`, `in_progress`, `done`, `failed`, `blocked`.
+
+Côté Azure DevOps : New, Active, Resolved. Le détail d'état est aussi un tag `azurz:<état>`.
+
+## Annexe — Car Compare
+
 # Spécifications Fonctionnelles - Car Compare
 
 ## 1. Entités métier

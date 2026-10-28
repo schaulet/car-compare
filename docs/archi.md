@@ -1,3 +1,57 @@
+# Architecture technique
+
+## Azurz
+
+```
+Chat Dust ──MCP Streamable HTTP /mcp──┐
+UI web ──── HTTP /api ───────────────┤
+                                      ▼
+                         Plateforme (intake, tick, deploy)
+                                      │
+          ┌───────────────────────────┼───────────────────────────┐
+          ▼                           ▼                           ▼
+   Registre d'analyseurs      Hôte de traitement            Ports
+   (score, pas de switch)     select_agents + politiques     work items
+          │                           │                      artefacts
+          │                           ▼                      passerelles
+          │                    Agent enregistré
+          ▼                     ignition-module
+   IgnitionModuleAnalyzer       deploiement
+   FallbackAnalyzer             (et tout agent ajouté)
+```
+
+L'hôte `azurz.orchestration` ne cite aucun métier. Une capacité nouvelle s'ajoute en enregistrant un analyseur, une politique de prérogatives, un agent et, si le chat doit la voir, une contribution d'outil MCP. Le montage MCP parcourt le catalogue : il ne liste pas les outils un par un.
+
+### Contrats
+
+- `WorkItemPort` : mémoire, ou client REST Azure DevOps (`application/json-patch+json`, PAT Basic). Le lab implémente le sous-ensemble projets, work items, WIQL, commentaires.
+- `ArtifactPort` : répertoire versionné (sources, `module.xml`, `.modl`, `rapport.html`, projet gateway).
+- `GatewayPort` : copie `gateway_project/` vers `{racine}/{instance}/projects/{projet}` et le `.modl` vers `azurz-artifacts/`. Option de redémarrage Docker si l'instance a un nom de conteneur.
+
+### Processus génériques
+
+| Processus | Hôte | Spécialisation |
+| --- | --- | --- |
+| Analyse | `AnalyzerRegistry` | `IgnitionModuleAnalyzer`, repli |
+| Éligibilité | `select_agents` + `PolicyRegistry` | descripteurs d'agents |
+| Exécution | `Platform.trigger` | `execute` de l'agent |
+| Outils chat | `ToolCatalog` → `MCPServer.add_tool` | demandes, livraison |
+| Persistance ticket | `WorkItemPort` | mémoire ou Azure DevOps |
+
+Le domaine (expressions, analyse, sélection) ne fait pas d'I/O. Les tests Cucumber du produit pilotent `Platform` en mémoire. Les tests générés pour chaque module sont un second cycle Cucumber, lancé dans un sous-processus, et voyagent avec l'artefact.
+
+### Interface
+
+FastAPI sert `/`, `/static` et `/api`. Le serveur MCP est monté sur `/mcp`. Les deux partagent la plateforme. Un worker appelle `tick` toutes les deux secondes lorsque le traitement automatique est armé.
+
+Le projet Python publie deux modules dans le même wheel (`car_compare` et `azurz`). Les fichiers de l'interface (`web/static`) voyagent avec le module, y compris dans l'image du lab installée sans mode éditable.
+
+### Lab Docker
+
+`lab/docker-compose.yml` : services `azdo`, `bridge`, `ignition-ligne-a`, `ignition-ligne-b`, `ignition-supervision`. Les volumes de données Ignition sont les mêmes que la racine lue par le pont, donc le dépôt de projet est visible par la passerelle après redémarrage.
+
+## Annexe — Car Compare
+
 # Architecture Technique - Car Compare
 
 ## 1. Vue d'ensemble

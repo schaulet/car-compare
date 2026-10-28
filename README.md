@@ -1,6 +1,16 @@
-# Car Compare
+# Car Compare et Azurz
 
-Outil d'aide à l'achat/location de voiture - Comparateur de véhicules avec calcul du TCO (Total Cost of Ownership).
+Deux outils cohabitent dans ce dépôt.
+
+**Azurz** relie Dust à Azure DevOps et à des agents Ignition : une demande de chat devient un ticket, peut être enrichie, traitée par un agent (module, tests Cucumber, rapport, artefact) puis déployée vers les passerelles choisies. Le lab Docker est décrit dans [le guide utilisateur](docs/user.md).
+
+```bash
+uv sync --extra dev
+uv run azurz
+# UI http://localhost:8080  MCP http://localhost:8080/mcp  jeton dust-lab-token
+```
+
+**Car Compare** est l'outil d'aide à l'achat ou à la location : comparateur de véhicules et calcul du TCO (Total Cost of Ownership).
 
 ## Fonctionnalités
 
@@ -60,12 +70,40 @@ uv sync --all-extras
 
 ### dev
 
-Démarre le serveur de développement.
+Démarre le serveur de développement Car Compare.
 
 Requires: setup
 
 ```bash
 uv run uvicorn car_compare.main:app --reload
+```
+
+### azurz
+
+Démarre le pont Dust / Azure DevOps (interface et MCP).
+
+Requires: setup
+
+```bash
+uv run azurz
+```
+
+### azurz-azdo
+
+Démarre l'Azure DevOps de laboratoire.
+
+Requires: setup
+
+```bash
+uv run azurz-azdo
+```
+
+### lab
+
+Construit et démarre le lab Docker (pont, Azure DevOps, trois Ignition).
+
+```bash
+docker compose -f lab/docker-compose.yml up --build
 ```
 
 ### test

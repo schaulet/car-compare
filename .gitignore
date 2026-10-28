@@ -60,6 +60,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Lab Azurz
+.azurz-data/
+
 # Build
 *.manifest
 *.spec
