@@ -18,6 +18,13 @@ docker compose -f lab/docker-compose.yml up --build
 
 Compte passerelle : `admin` / `azurz-lab`.
 
+Si le pont répond et que la création de ticket expire, le noyau filtre le trafic entre conteneurs du même réseau. Sur l'hôte Linux :
+
+```bash
+sudo sysctl -w net.bridge.bridge-nf-call-iptables=0
+sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=0
+```
+
 Sans Docker, le pont seul garde les tickets en mémoire :
 
 ```bash

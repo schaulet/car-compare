@@ -17,6 +17,7 @@
   - 17 scénarios behave passants, 93 étapes, dont les parcours Azurz (demande, itération, traitement manuel, case globale, prérogative, API, déploiement ciblé, registre)
   - lint ruff OK sur le pont
   - rendu mobile revérifié (colonne unique, tableaux en blocs)
+  - lab Docker démarré : Azure DevOps, pont, trois passerelles Ignition 8.1 en état RUNNING. `lab/demo.sh` crée le ticket 1 « OEE Ligne 1 », le passe à Resolved, publie l'artefact 1.0.0 et le déploie sur Ligne A et Supervision (projet `azurz_oee_ligne_1` présent, absent de Ligne B). Handshake MCP `initialize` en 200 avec le jeton, 401 sans jeton.
 - **Limite connue**: un `.modl` non signé et sans classe Java du SDK n'est pas chargé comme module binaire par Ignition. Le lab dépose le projet de scripts (le contenu exécutable) dans `data/projects` et le paquet `.modl` dans les artefacts de l'instance. Le redémarrage de la passerelle est demandé par l'agent quand `AZURZ_RESTART_GATEWAYS=1`.
 
 ## 2026-09-09
