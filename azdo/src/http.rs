@@ -125,7 +125,7 @@ pub fn fail(status: StatusCode, message: &str) -> Response {
 
 impl AppState {
     pub fn api(&self, method: Method, path: &str, query: &str, body: &[u8]) -> Response {
-        let Some((org, project, rest)) = split_api(path) else {
+        let Some((org, project, team, rest)) = split_api(path) else {
             return fail(StatusCode::NOT_FOUND, "route inconnue");
         };
         if rest.is_empty() {
@@ -170,6 +170,9 @@ impl AppState {
         };
         if head == "wit" {
             return self.wit(&method, &org, &project, &rest, query, body);
+        }
+        if let Some(response) = crate::tracking::dispatch(self, &method, &org, &project, team.as_deref(), &rest, body) {
+            return response;
         }
         if let Some(response) = crate::shapes::dispatch(self, &method, &org, &project, &rest, query, body) {
             return response;
@@ -260,13 +263,30 @@ impl AppState {
         }
         if resource.as_deref() == Some("wiql") && method == Method::POST {
             let payload = parse_json(body).unwrap_or(json!({}));
-            let text = payload.get("query").and_then(|value| value.as_str()).unwrap_or("");
+            let mut text = payload.get("query").and_then(|value| value.as_str()).unwrap_or("").to_string();
+            if text.is_empty() {
+                if let Some(id) = rest.get(2) {
+                    text = self
+                        .read(|db| {
+                            db.project(org, project)
+                                .and_then(|stored| stored.get_bucket("wit/queries", id))
+                                .and_then(|query| query.get("wiql").and_then(|value| value.as_str()).map(str::to_string))
+                        })
+                        .unwrap_or_default();
+                }
+            }
             let work_items = self.read(|db| {
                 db.project(org, project)
-                    .map(|stored| apply_wiql(stored.work_items.values(), text))
+                    .map(|stored| apply_wiql(stored.work_items.values(), &text))
                     .unwrap_or_default()
             });
             return Json(json!({"queryType": "flat", "workItems": work_items})).into_response();
+        }
+        if resource.as_deref() == Some("attachments") {
+            return self.attachments(method, org, project, rest, query, body);
+        }
+        if resource.as_deref() == Some("queries") {
+            return self.queries(method, org, project, rest, body);
         }
         if resource.as_deref() != Some("workitems") {
             return self.collection(method, org, project, rest, body);
@@ -371,6 +391,90 @@ impl AppState {
             }
         }
         fail(StatusCode::NOT_FOUND, "route work item inconnue")
+    }
+
+    fn attachments(
+        &self,
+        method: &Method,
+        org: &str,
+        project: &str,
+        rest: &[String],
+        query: &str,
+        body: &[u8],
+    ) -> Response {
+        if rest.len() == 2 && method == Method::POST {
+            let name = query_param(query, "fileName")
+                .map(pct_decode)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "fichier".into());
+            let created = self.write(|db| {
+                db.ensure_project(org, project);
+                db.project_mut(org, project).map(|stored| stored.add_attachment(&name, body))
+            });
+            return match created {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+            };
+        }
+        if rest.len() >= 3 && method == Method::GET {
+            let id = &rest[2];
+            let found = self.read(|db| db.project(org, project).and_then(|stored| stored.attachment(id).cloned()));
+            return match found {
+                Some(file) => Response::builder()
+                    .header(header::CONTENT_TYPE, file.content_type)
+                    .body(axum::body::Body::from(file.bytes))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+                None => fail(StatusCode::NOT_FOUND, "pièce jointe introuvable"),
+            };
+        }
+        fail(StatusCode::NOT_FOUND, "pièce jointe introuvable")
+    }
+
+    fn queries(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+        if rest.len() == 2 && method == Method::GET {
+            let value = self.read(|db| {
+                db.project(org, project)
+                    .map(|stored| stored.list_bucket("wit/queries"))
+                    .unwrap_or_default()
+            });
+            return Json(json!({"count": value.len(), "value": value})).into_response();
+        }
+        if rest.len() == 2 && method == Method::POST {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("Requête").to_string();
+            let wiql = payload
+                .get("wiql")
+                .and_then(|value| value.as_str())
+                .unwrap_or("SELECT [System.Id] FROM WorkItems")
+                .to_string();
+            let created = self.write(|db| {
+                db.ensure_project(org, project);
+                let stored = db.project_mut(org, project)?;
+                let next = stored.list_bucket("wit/queries").len() as i64 + 1;
+                let item = json!({
+                    "id": format!("query-{next}"),
+                    "name": name,
+                    "wiql": wiql,
+                    "path": format!("Shared Queries/{name}"),
+                    "isPublic": true,
+                    "queryType": "flat"
+                });
+                Some(stored.put_bucket("wit/queries", item))
+            });
+            return match created {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+            };
+        }
+        if method == Method::GET {
+            let id = rest.get(2).map(String::as_str).unwrap_or("");
+            let found = self.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket("wit/queries", id)));
+            return match found {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "requête introuvable"),
+            };
+        }
+        fail(StatusCode::NOT_FOUND, "requête introuvable")
     }
 
     fn collection(
@@ -498,7 +602,7 @@ fn project_json(org: &str, name: &str, project: &crate::store::ProjectData) -> V
     })
 }
 
-fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Vec<String>)> {
+fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
     let parts: Vec<String> = path
         .split('/')
         .filter(|part| !part.is_empty())
@@ -506,12 +610,14 @@ fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Vec<String>)
         .collect();
     let index = parts.iter().position(|part| part == "_apis")?;
     let rest = parts[index + 1..].to_vec();
-    if index == 2 {
-        Some((Some(parts[0].clone()), Some(parts[1].clone()), rest))
+    if index == 3 {
+        Some((Some(parts[0].clone()), Some(parts[1].clone()), Some(parts[2].clone()), rest))
+    } else if index == 2 {
+        Some((Some(parts[0].clone()), Some(parts[1].clone()), None, rest))
     } else if index == 1 {
-        Some((Some(parts[0].clone()), None, rest))
+        Some((Some(parts[0].clone()), None, None, rest))
     } else if index == 0 {
-        Some((None, None, rest))
+        Some((None, None, None, rest))
     } else {
         None
     }

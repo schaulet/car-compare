@@ -1,6 +1,7 @@
 mod http;
 mod shapes;
 mod store;
+mod tracking;
 mod web;
 
 use std::path::PathBuf;

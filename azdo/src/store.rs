@@ -25,6 +25,8 @@ pub struct ProjectData {
     pub comments: BTreeMap<i64, Vec<Value>>,
     #[serde(default)]
     pub history: BTreeMap<i64, Vec<Value>>,
+    #[serde(default)]
+    pub attachments: BTreeMap<String, Attachment>,
     pub next_work_item: i64,
     pub buckets: BTreeMap<String, Bucket>,
 }
@@ -141,6 +143,7 @@ impl ProjectData {
             work_items: BTreeMap::new(),
             comments: BTreeMap::new(),
             history: BTreeMap::new(),
+            attachments: BTreeMap::new(),
             next_work_item: 1,
             buckets: BTreeMap::new(),
         };
@@ -276,17 +279,25 @@ impl ProjectData {
                 .work_items
                 .get_mut(&id)
                 .ok_or_else(|| format!("work item {id} introuvable"))?;
-            let fields = item
-                .get_mut("fields")
-                .and_then(|value| value.as_object_mut())
-                .ok_or_else(|| "champs absents".to_string())?;
             for op in ops {
                 let operation = op.get("op").and_then(|value| value.as_str()).unwrap_or("");
                 let path = op.get("path").and_then(|value| value.as_str()).unwrap_or("");
-                if !path.starts_with("/fields/") {
+                if operation == "add" && (path == "/relations/-" || path == "/relations") {
+                    let value = op.get("value").cloned().unwrap_or(json!({}));
+                    if !item.get("relations").map(|relations| relations.is_array()).unwrap_or(false) {
+                        item["relations"] = json!([]);
+                    }
+                    if let Some(relations) = item.get_mut("relations").and_then(|relations| relations.as_array_mut()) {
+                        relations.push(value);
+                    }
                     continue;
                 }
-                let key = path.trim_start_matches("/fields/");
+                let Some(key) = path.strip_prefix("/fields/") else {
+                    continue;
+                };
+                let Some(fields) = item.get_mut("fields").and_then(|value| value.as_object_mut()) else {
+                    continue;
+                };
                 match operation {
                     "test" => {
                         let current = fields.get(key);
@@ -329,6 +340,46 @@ impl ProjectData {
         notes.push(note.clone());
         Ok(note)
     }
+
+    pub fn add_attachment(&mut self, name: &str, bytes: &[u8]) -> Value {
+        let id = format!("att-{:08x}", self.attachments.len() + 1);
+        self.attachments.insert(
+            id.clone(),
+            Attachment {
+                name: name.to_string(),
+                content_type: "application/octet-stream".into(),
+                bytes: bytes.to_vec(),
+            },
+        );
+        json!({"id": id, "url": format!("_apis/wit/attachments/{id}?fileName={name}")})
+    }
+
+    pub fn attachment(&self, id: &str) -> Option<&Attachment> {
+        self.attachments.get(id)
+    }
+
+    pub fn list_bucket(&self, key: &str) -> Vec<Value> {
+        self.buckets
+            .get(key)
+            .map(|bucket| bucket.items.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn put_bucket(&mut self, key: &str, item: Value) -> Value {
+        let bucket = self.buckets.entry(key.to_string()).or_insert_with(Bucket::empty);
+        bucket.put(item)
+    }
+
+    pub fn get_bucket(&self, key: &str, id: &str) -> Option<Value> {
+        self.buckets.get(key).and_then(|bucket| bucket.get(id))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Bucket {

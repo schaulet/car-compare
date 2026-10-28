@@ -1,4 +1,4 @@
-use axum::http::{Method, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -41,6 +41,9 @@ pub fn dispatch(
 
 pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Option<Response> {
     let area = rest.first()?.to_ascii_lowercase();
+    if area == "securitynamespaces" && method == Method::GET {
+        return Some(Json(security_namespaces(org)).into_response());
+    }
     let resource = rest.get(1)?.to_ascii_lowercase();
     let response = match (area.as_str(), resource.as_str()) {
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
@@ -260,7 +263,11 @@ fn pull_requests(
     body: &[u8],
 ) -> Response {
     let key = "git/pullrequests";
-    if method == Method::GET && rest.len() <= 4 {
+    if let Some((kind, pull_id)) = pull_child(rest) {
+        return pull_child_resource(state, method, org, project, &kind, &pull_id, body);
+    }
+    let listing = method == Method::GET && rest.last().is_some_and(|part| part.eq_ignore_ascii_case("pullrequests"));
+    if listing {
         let repo_filter = repo_id.map(str::to_string);
         let value = list(state, org, project, key)
             .into_iter()
@@ -321,6 +328,112 @@ fn pull_requests(
     });
     put_item(state, org, project, key, item.clone());
     Json(item).into_response()
+}
+
+fn pull_child(rest: &[String]) -> Option<(String, String)> {
+    let index = rest.iter().position(|part| {
+        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations")
+    })?;
+    let id = rest.get(index.checked_sub(1)?)?.clone();
+    if id.eq_ignore_ascii_case("pullrequests") || id.eq_ignore_ascii_case("repositories") {
+        return None;
+    }
+    Some((rest[index].to_ascii_lowercase(), id))
+}
+
+fn pull_child_resource(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    kind: &str,
+    pull_id: &str,
+    body: &[u8],
+) -> Response {
+    let key = format!("git/pullrequests/{pull_id}/{kind}");
+    if kind == "iterations" && method == Method::GET {
+        let pull = get_item(state, org, project, "git/pullrequests", pull_id);
+        let source = pull.as_ref().and_then(|item| text_of(item, "sourceRefName")).unwrap_or_else(|| "refs/heads/feature".into());
+        let target = pull.as_ref().and_then(|item| text_of(item, "targetRefName")).unwrap_or_else(|| "refs/heads/main".into());
+        return Json(page(vec![json!({
+            "id": 1,
+            "sourceRefName": source,
+            "targetRefName": target,
+            "description": "Iteration 1"
+        })]))
+        .into_response();
+    }
+    if method == Method::GET {
+        return Json(page(list(state, org, project, &key))).into_response();
+    }
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let next = list(state, org, project, &key).len() as i64 + 1;
+    let item = if kind == "threads" {
+        let comments = payload
+            .get("comments")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"content": text_of(&payload, "content").unwrap_or_default()})]);
+        let comments: Vec<Value> = comments
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut comment)| {
+                if let Some(object) = comment.as_object_mut() {
+                    object.entry("id").or_insert(json!(index as i64 + 1));
+                    object.entry("commentType").or_insert(json!("text"));
+                    object.entry("author").or_insert(json!({"displayName": "azurz", "uniqueName": "azurz"}));
+                }
+                comment
+            })
+            .collect();
+        json!({
+            "id": next,
+            "publishedDate": "2026-10-29T00:00:00Z",
+            "lastUpdatedDate": "2026-10-29T00:00:00Z",
+            "status": payload.get("status").cloned().unwrap_or(json!("active")),
+            "comments": comments
+        })
+    } else {
+        json!({
+            "id": next,
+            "state": payload.get("state").cloned().unwrap_or(json!("succeeded")),
+            "description": text_of(&payload, "description").unwrap_or_default(),
+            "context": payload.get("context").cloned().unwrap_or(json!({"name": "azurz", "genre": "continuous-integration"})),
+            "creationDate": "2026-10-29T00:00:00Z",
+            "updatedDate": "2026-10-29T00:00:00Z"
+        })
+    };
+    put_item(state, org, project, &key, item.clone());
+    Json(item).into_response()
+}
+
+fn security_namespaces(org: &str) -> Value {
+    let rows = [
+        ("Git", "Git Repositories", "2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87"),
+        ("WorkItemTracking", "Work Item Tracking", "73e71c45-d483-40d5-bdba-1a9ccc132849"),
+        ("Build", "Build", "33344d9c-fc72-4d6f-aba5-fa317101a7e9"),
+        ("ReleaseManagement", "Release Management", "c788c23e-1b46-4162-8f5e-d7585343b5de"),
+        ("Identity", "Identity", "5a27515b-ccd7-42c9-84f1-54c998f03866"),
+    ];
+    let value: Vec<Value> = rows
+        .iter()
+        .map(|(name, display, id)| {
+            json!({
+                "namespaceId": id,
+                "name": name,
+                "displayName": display,
+                "separatorValue": "/",
+                "writePermission": 1,
+                "readPermission": 1,
+                "dataspaceCategory": name,
+                "url": format!("/{org}/_apis/securitynamespaces/{id}")
+            })
+        })
+        .collect();
+    page(value)
 }
 
 fn definitions(state: &AppState, method: &Method, org: &str, project: &str, body: &[u8]) -> Response {
@@ -394,8 +507,34 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
         }))
         .into_response();
     }
+    if rest.len() >= 5 && rest[3].eq_ignore_ascii_case("logs") && method == Method::GET {
+        let log_id = rest.get(4).map(String::as_str).unwrap_or("1");
+        let text = format!("Build {id} log {log_id}\n##[section]Build succeeded\n");
+        return (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            text,
+        )
+            .into_response();
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("logs") && method == Method::GET {
-        return Json(page(vec![json!({"id": 1, "type": "Container", "lineCount": 1, "url": format!("/{org}/{project}/_apis/build/builds/{id}/logs/1")})])).into_response();
+        return Json(page(vec![json!({"id": 1, "type": "Container", "lineCount": 2, "url": format!("/{org}/{project}/_apis/build/builds/{id}/logs/1")})])).into_response();
+    }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("artifacts") {
+        let artifacts = format!("build/builds/{id}/artifacts");
+        if method == Method::GET && rest.len() == 4 {
+            return Json(page(list(state, org, project, &artifacts))).into_response();
+        }
+        if method == Method::POST {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let name = text_of(&payload, "name").unwrap_or_else(|| "drop".into());
+            let item = json!({
+                "id": list(state, org, project, &artifacts).len() + 1,
+                "name": name,
+                "resource": payload.get("resource").cloned().unwrap_or(json!({"type": "PipelineArtifact"}))
+            });
+            put_item(state, org, project, &artifacts, item.clone());
+            return Json(item).into_response();
+        }
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, id) {

@@ -633,3 +633,311 @@ async fn work_item_catalog_wiki_pages_and_service_hooks_are_addressable() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("workitem.updated"));
 }
+
+#[tokio::test]
+async fn relations_queries_and_boards_follow_the_rest_shape() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Parent"},{"op":"add","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let parent_id = parent["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Enfant"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let child_id = child["id"].as_i64().unwrap();
+    let patch = format!(
+        r#"[{{"op":"add","path":"/relations/-","value":{{"rel":"System.LinkTypes.Hierarchy-Forward","url":"/{child_id}","attributes":{{"comment":"enfant"}}}}}}]"#
+    );
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{parent_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let linked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(linked["relations"][0]["rel"], "System.LinkTypes.Hierarchy-Forward");
+    assert!(linked["relations"][0]["url"].as_str().unwrap().contains(&child_id.to_string()));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/attachments?fileName=preuve.txt&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("preuve-lab"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let attachment: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let attachment_id = attachment["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/attachments/{attachment_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "preuve-lab");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Actifs","wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let query: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(query["name"], "Actifs");
+    let query_id = query["id"].to_string().trim_matches('"').to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/wiql/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ids: Vec<i64> = found["workItems"].as_array().unwrap().iter().filter_map(|item| item["id"].as_i64()).collect();
+    assert!(ids.contains(&parent_id), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let boards: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(boards["value"][0]["name"], "Stories");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Active"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(&parent_id.to_string()), "{body}");
+}
+
+#[tokio::test]
+async fn pull_request_threads_build_logs_and_dashboards_follow_the_rest_shape() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Fil de revue","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/threads?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"comments":[{"content":"vu sur la ligne OEE"}],"status":"active"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let thread: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(thread["comments"][0]["content"], "vu sur la ligne OEE");
+    assert_eq!(thread["status"], "active");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/threads?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("vu sur la ligne OEE"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/statuses?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded","description":"lab","context":{"name":"azurz","genre":"continuous-integration"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let status_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status_doc["state"], "succeeded");
+    assert_eq!(status_doc["context"]["name"], "azurz");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = build["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/logs/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Build succeeded"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/artifacts?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"drop","resource":{"type":"PipelineArtifact","data":"azurz"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/artifacts?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("drop"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Vue lab","widgets":[{"name":"Work items"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let dashboard: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dashboard["name"], "Vue lab");
+    assert_eq!(dashboard["widgets"][0]["name"], "Work items");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ignition","type":"generic","url":"http://ignition:8088"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let endpoint: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(endpoint["name"], "ignition");
+    assert_eq!(endpoint["type"], "generic");
+    assert_eq!(endpoint["url"], "http://ignition:8088");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/securitynamespaces?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Git"));
+    assert!(body.contains("WorkItemTracking"));
+}

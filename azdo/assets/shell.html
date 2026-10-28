@@ -62,7 +62,10 @@
     .board { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; align-items: start; }
     .col { background: var(--page); border: 1px solid var(--line); min-height: 240px; }
     .col h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--line); }
-    .card { margin: 8px; background: #fff; border: 1px solid var(--line); padding: 8px 10px; cursor: pointer; }
+    .form { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
+    .form h3 { margin: 0 0 8px; font-size: 16px; }
+    .card { margin: 8px; background: #fff; border: 1px solid var(--line); padding: 8px 10px; cursor: grab; }
+    .col.drop { outline: 2px solid var(--blue); }
     .card:hover { border-color: var(--blue); }
     .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
     .tile { border: 1px solid var(--line); padding: 14px 16px; background: #fff; text-decoration: none; color: inherit; }
@@ -76,6 +79,7 @@
       nav .group { display: none; }
       nav a { white-space: nowrap; }
       .board { grid-template-columns: 1fr; }
+      .form { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -173,13 +177,15 @@
       panel.className = "panel";
       const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
       const notes = (comments.comments || []).map((note) => "<li>" + esc(note.text) + "</li>").join("") || "<li>Aucun commentaire.</li>";
-      panel.innerHTML = "<h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
+      const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
+      panel.innerHTML = "<div class='form'><div><h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
         "<div class='row'><input id='wi-title' value='" + esc(fields["System.Title"] || "") + "' style='flex:1' />" +
         "<select id='wi-state'>" + states + "</select></div>" +
-        "<textarea id='wi-desc' rows='4'>" + esc(fields["System.Description"] || "") + "</textarea>" +
+        "<textarea id='wi-desc' rows='6'>" + esc(fields["System.Description"] || "") + "</textarea>" +
         "<div class='command'><button id='wi-save' type='button'>Enregistrer</button></div>" +
-        "<h3>Discussion</h3><ul>" + notes + "</ul>" +
-        "<div class='row'><input id='wi-note' placeholder='Commentaire' style='flex:1' /><button id='wi-comment' type='button'>Ajouter</button></div>";
+        "<h3>Liens</h3><ul>" + links + "</ul></div>" +
+        "<aside><h3>Discussion</h3><ul>" + notes + "</ul>" +
+        "<div class='row'><input id='wi-note' placeholder='Commentaire' style='flex:1' /><button id='wi-comment' type='button'>Ajouter</button></div></aside></div>";
       document.getElementById("view").appendChild(panel);
       panel.querySelector("#wi-save").onclick = async () => {
         const patch = JSON.stringify([
@@ -240,11 +246,30 @@
         if (hub === "/_boards") {
           const items = await workItems();
           const columns = ["New", "Active", "Resolved", "Closed"];
-          view.innerHTML = "<h1>Tableaux</h1><div class='board'>" + columns.map((state) => {
-            const cards = items.filter((item) => (item.fields?.["System.State"] || "New") === state).map((item) => "<article class='card' data-id='" + item.id + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub'>Vide</p>";
-            return "<section class='col'><h2>" + state + "</h2>" + cards + "</section>";
+          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état, comme sur un board.</p><div class='board'>" + columns.map((state) => {
+            const cards = items.filter((item) => (item.fields?.["System.State"] || "New") === state).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
+            return "<section class='col' data-state='" + state + "'><h2>" + state + "</h2>" + cards + "</section>";
           }).join("") + "</div>";
-          document.querySelectorAll(".card").forEach((card) => { card.onclick = () => openItem(card.dataset.id); });
+          document.querySelectorAll(".card").forEach((card) => {
+            card.ondragstart = (event) => event.dataTransfer.setData("text/plain", card.dataset.id);
+            card.onclick = () => openItem(card.dataset.id);
+          });
+          document.querySelectorAll(".col").forEach((column) => {
+            column.ondragover = (event) => { event.preventDefault(); column.classList.add("drop"); };
+            column.ondragleave = () => column.classList.remove("drop");
+            column.ondrop = async (event) => {
+              event.preventDefault();
+              column.classList.remove("drop");
+              const id = event.dataTransfer.getData("text/plain");
+              const card = document.querySelector(".card[data-id='" + id + "']");
+              if (!card) return;
+              const patch = JSON.stringify([{ op: "replace", path: "/fields/System.State", value: column.dataset.state }]);
+              await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+              const empty = column.querySelector(".empty");
+              if (empty) empty.remove();
+              column.appendChild(card);
+            };
+          });
           return;
         }
         if (hub === "/_queries") {
@@ -281,8 +306,23 @@
         }
         if (hub === "/_git/pulls") {
           const pulls = await collection("git/pullrequests");
-          const table = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>État</th><th>Source</th><th>Cible</th></tr></thead><tbody>" + pulls.map((item) => "<tr><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title || item.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.sourceRefName) + "</td><td>" + esc(item.targetRefName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
-          view.innerHTML = "<h1>Demandes de tirage</h1><div class='command'><input id='pr-title' placeholder='Titre' /><input id='pr-source' placeholder='refs/heads/feature' /><button id='create' type='button'>Nouvelle demande de tirage</button></div>" + table;
+          const table = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>État</th><th>Source</th><th>Cible</th></tr></thead><tbody>" + pulls.map((item) => "<tr class='click pr' data-id='" + esc(item.pullRequestId || item.id) + "' data-repo='" + esc(item.repository?.id || "") + "'><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title || item.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.sourceRefName) + "</td><td>" + esc(item.targetRefName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
+          view.innerHTML = "<h1>Demandes de tirage</h1><div class='command'><input id='pr-title' placeholder='Titre' /><input id='pr-source' placeholder='refs/heads/feature' /><button id='create' type='button'>Nouvelle demande de tirage</button></div>" + table + "<section id='thread' class='panel' hidden></section>";
+          document.querySelectorAll("tr.pr").forEach((row) => {
+            row.onclick = async () => {
+              const repos = await collection("git/repositories");
+              const repoId = row.dataset.repo || (repos[0] && repos[0].id);
+              const threads = await api("GET", root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id + "/threads?api-version=7.1");
+              const panel = document.getElementById("thread");
+              panel.hidden = false;
+              const notes = (threads.value || []).flatMap((thread) => thread.comments || []).map((note) => "<li>" + esc(note.content) + "</li>").join("") || "<li>Aucun commentaire.</li>";
+              panel.innerHTML = "<h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div>";
+              panel.querySelector("#thread-add").onclick = async () => {
+                await api("POST", root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
+                row.click();
+              };
+            };
+          });
           document.getElementById("create").onclick = async () => {
             const repos = await collection("git/repositories");
             const repo = repos[0];
@@ -299,8 +339,16 @@
         if (hub === "/_build") {
           const [definitions, builds] = await Promise.all([collection("build/definitions"), collection("build/builds")]);
           const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Pipeline</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
-          const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs;
+          const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<pre id='log' class='panel' hidden></pre>";
+          document.querySelectorAll("tr.build").forEach((row) => {
+            row.onclick = async () => {
+              const response = await fetch(root + "/build/builds/" + row.dataset.id + "/logs/1?api-version=7.1");
+              const log = document.getElementById("log");
+              log.hidden = false;
+              log.textContent = await response.text();
+            };
+          });
           document.getElementById("queue").onclick = async () => {
             const definition = definitions[0];
             if (!definition) return;
