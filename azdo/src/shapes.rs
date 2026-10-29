@@ -5878,8 +5878,10 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
             let payload = parse_json(body).unwrap_or(json!({}));
             let name = text_of(&payload, "name").unwrap_or_else(|| "package".into());
             let version = text_of(&payload, "version").unwrap_or_else(|| "1.0.0".into());
+            let recycle = format!("packaging/feeds/{stored_feed}/recyclebin");
             let next = list(state, org, project, &packages)
                 .into_iter()
+                .chain(list(state, org, project, &recycle))
                 .filter_map(|item| text_of(&item, "id"))
                 .filter_map(|id| id.strip_prefix("pkg-").and_then(|suffix| suffix.parse::<i64>().ok()))
                 .max()
@@ -5898,16 +5900,15 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
                 return Json(found).into_response();
             }
             let stored_id = text_of(&found, "id").unwrap_or_default();
-            state.write(|db| {
-                if let Some(stored) = db.project_mut(org, project) {
-                    if let Some(bucket) = stored.buckets.get_mut(&packages) {
-                        bucket.remove(&stored_id);
-                    }
-                }
-            });
+            let recycle = format!("packaging/feeds/{stored_feed}/recyclebin");
+            put_item(state, org, project, &recycle, found);
+            delete_item(state, org, project, &packages, &stored_id);
             return StatusCode::NO_CONTENT.into_response();
         }
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+    }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("recyclebin") {
+        return feed_recycle(state, method, org, project, feed_id, rest, body);
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("retentionpolicies") {
         return feed_retention(state, method, org, project, feed_id, rest, body);
@@ -5951,6 +5952,96 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "flux introuvable")
+}
+
+fn feed_recycle(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(feed) = get_item(state, org, project, "packaging/feeds", feed_id) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let stored_feed = text_of(&feed, "id").unwrap_or_default();
+    let key = format!("packaging/feeds/{stored_feed}/recyclebin");
+    let packages = format!("packaging/feeds/{stored_feed}/packages");
+    let on_packages = rest.get(4).is_some_and(|part| part.eq_ignore_ascii_case("packages"));
+    if !on_packages {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+    }
+    if rest.len() == 5 {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_recycled_package(org, project, &stored_feed, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 6 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+    }
+    let package_id = rest[5].as_str();
+    if method == Method::GET {
+        return match get_item(state, org, project, &key, package_id) {
+            Some(item) => Json(dress_recycled_package(org, project, &stored_feed, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "paquet introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = get_item(state, org, project, &key, package_id) else {
+            return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+        };
+        let stored_id = text_of(&found, "id").unwrap_or_default();
+        return if delete_item(state, org, project, &key, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "paquet introuvable")
+        };
+    }
+    if method == Method::PATCH {
+        let Some(found) = get_item(state, org, project, &key, package_id) else {
+            return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+        };
+        if let Err(message) = recycle_restore(body) {
+            return fail(StatusCode::BAD_REQUEST, message);
+        }
+        let stored_id = text_of(&found, "id").unwrap_or_default();
+        put_item(state, org, project, &packages, found.clone());
+        delete_item(state, org, project, &key, &stored_id);
+        return Json(found).into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn recycle_restore(body: &[u8]) -> Result<(), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("restauration absente");
+    };
+    match object.get("deleted") {
+        Some(Value::Bool(false)) => Ok(()),
+        _ => Err("restauration absente"),
+    }
+}
+
+fn dress_recycled_package(org: &str, project: &str, feed_id: &str, mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        let id = value_key(&object["id"]);
+        object.insert("isDeleted".into(), json!(true));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/packaging/feeds/{feed_id}/recyclebin/packages/{id}")),
+        );
+    }
+    item
 }
 
 fn feed_retention(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {

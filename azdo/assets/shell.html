@@ -1899,6 +1899,15 @@
             });
           });
           const viewTable = viewRows.length ? "<table id='feed-views'><thead><tr><th></th><th>Vue</th><th>Flux</th></tr></thead><tbody>" + viewRows.map((item) => "<tr><td><button type='button' class='fview-remove' data-id='" + esc(item.id) + "' data-feed='" + esc(item.feedId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.feedName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feed-view-empty'>Aucune vue.</p>";
+          const binLists = await Promise.all(feeds.map((feed) => api("GET", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/recyclebin/packages?api-version=7.1").catch(() => ({ value: [] }))));
+          const binRows = [];
+          feeds.forEach((feed, index) => {
+            (binLists[index].value || []).forEach((item) => {
+              const version = item.versions && item.versions[0] ? item.versions[0].version : "";
+              binRows.push({ id: item.id, name: item.name, version: version, feedId: feed.id, feedName: feed.name });
+            });
+          });
+          const binTable = binRows.length ? "<table id='feed-recycle'><thead><tr><th></th><th>Paquet</th><th>Version</th><th>Flux</th></tr></thead><tbody>" + binRows.map((item) => "<tr><td><button type='button' class='bin-remove' data-id='" + esc(item.id) + "' data-feed='" + esc(item.feedId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.feedName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='bin-empty'>Corbeille vide.</p>";
           const retainLists = await Promise.all(feeds.map((feed) => api("GET", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/retentionpolicies?api-version=7.1").catch(() => null)));
           const retainRows = [];
           feeds.forEach((feed, index) => {
@@ -1927,12 +1936,45 @@
           const table = feeds.length ? "<table id='feeds'><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th><th></th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI, Universel</td><td><button type='button' class='feed-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feeds-empty'>Aucun flux.</p>";
           const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th><th></th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.label || item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td><td><button type='button' class='pkg-remove' data-feed='" + esc(item.feed) + "' data-protocol='" + esc(item.protocol) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "' data-version='" + esc(item.version) + "' data-filename='" + esc(item.filename) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='packages-empty'>Aucun paquet.</p>";
           const options = feeds.map((item) => "<option value='" + esc(item.name) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Artefacts</h1><h2>Politique de conservation</h2><div class='command'><input id='retain-feed' placeholder='pompe' /><input id='retain-count' placeholder='10' /><input id='retain-days' placeholder='30' /><button id='retain-add' type='button'>Ajouter</button></div>" + retainTable + "<p id='retain-error' class='sub'></p><h2>Permissions</h2><div class='command'><input id='perm-feed' placeholder='pompe' /><input id='perm-identity' placeholder='ada' /><select id='perm-role'><option value='reader'>Lecteur</option><option value='contributor'>Contributeur</option><option value='collaborator'>Collaborateur</option><option value='administrator'>Administrateur</option></select><button id='perm-add' type='button'>Ajouter</button></div>" + permTable + "<p id='perm-error' class='sub'></p><h2>Sources amont</h2><div class='command'><input id='upstream-feed' placeholder='pompe' /><input id='upstream-name' placeholder='npmjs' /><input id='upstream-location' placeholder='https://registry.npmjs.org/' /><select id='upstream-protocol'><option value='npm'>npm</option><option value='nuget'>NuGet</option><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='upack'>Universel</option></select><button id='upstream-add' type='button'>Ajouter</button></div>" + upstreamTable + "<p id='upstream-error' class='sub'></p><h2>Vues</h2><div class='command'><input id='fview-feed' placeholder='pompe' /><input id='fview-name' placeholder='release' /><button id='fview-add' type='button'>Ajouter</button></div>" + viewTable + "<p id='fview-error' class='sub'></p><h2>Paquets du flux</h2><div class='command'><select id='gen-feed'>" + genOptions + "</select><input id='gen-name' placeholder='Pompe' /><input id='gen-version' placeholder='1.0.0' value='1.0.0' /><button id='gen-create' type='button'>Ajouter</button></div><p id='gen-error' class='sub'></p>" + genTable + "<div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option><option value='upack'>Universel</option><option value='nuget'>NuGet</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
+          view.innerHTML = "<h1>Artefacts</h1><h2>Corbeille</h2><div class='command'><input id='bin-feed' placeholder='pompe' /><input id='bin-name' placeholder='Pompe' /><input id='bin-version' placeholder='1.0.0' /><button id='bin-add' type='button'>Ajouter</button></div>" + binTable + "<p id='bin-error' class='sub'></p><h2>Politique de conservation</h2><div class='command'><input id='retain-feed' placeholder='pompe' /><input id='retain-count' placeholder='10' /><input id='retain-days' placeholder='30' /><button id='retain-add' type='button'>Ajouter</button></div>" + retainTable + "<p id='retain-error' class='sub'></p><h2>Permissions</h2><div class='command'><input id='perm-feed' placeholder='pompe' /><input id='perm-identity' placeholder='ada' /><select id='perm-role'><option value='reader'>Lecteur</option><option value='contributor'>Contributeur</option><option value='collaborator'>Collaborateur</option><option value='administrator'>Administrateur</option></select><button id='perm-add' type='button'>Ajouter</button></div>" + permTable + "<p id='perm-error' class='sub'></p><h2>Sources amont</h2><div class='command'><input id='upstream-feed' placeholder='pompe' /><input id='upstream-name' placeholder='npmjs' /><input id='upstream-location' placeholder='https://registry.npmjs.org/' /><select id='upstream-protocol'><option value='npm'>npm</option><option value='nuget'>NuGet</option><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='upack'>Universel</option></select><button id='upstream-add' type='button'>Ajouter</button></div>" + upstreamTable + "<p id='upstream-error' class='sub'></p><h2>Vues</h2><div class='command'><input id='fview-feed' placeholder='pompe' /><input id='fview-name' placeholder='release' /><button id='fview-add' type='button'>Ajouter</button></div>" + viewTable + "<p id='fview-error' class='sub'></p><h2>Paquets du flux</h2><div class='command'><select id='gen-feed'>" + genOptions + "</select><input id='gen-name' placeholder='Pompe' /><input id='gen-version' placeholder='1.0.0' value='1.0.0' /><button id='gen-create' type='button'>Ajouter</button></div><p id='gen-error' class='sub'></p>" + genTable + "<div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option><option value='upack'>Universel</option><option value='nuget'>NuGet</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
           function showPkgError(error) {
             const note = document.getElementById("pkg-error");
             note.hidden = false;
             note.textContent = error.message;
           }
+          document.getElementById("bin-add").onclick = async () => {
+            const error = document.getElementById("bin-error");
+            error.textContent = "";
+            const feedName = document.getElementById("bin-feed").value.trim() || "pompe";
+            const name = document.getElementById("bin-name").value.trim() || "Pompe";
+            const version = document.getElementById("bin-version").value.trim() || "1.0.0";
+            try {
+              const listed = await api("GET", root + "/packaging/feeds?api-version=7.1");
+              let feed = (listed.value || []).find((item) => item.name === feedName);
+              if (!feed) {
+                feed = await api("POST", root + "/packaging/feeds?api-version=7.1", { name: feedName });
+              }
+              const created = await api("POST", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/packages?api-version=7.1", { name: name, version: version });
+              await api("DELETE", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/packages/" + encodeURIComponent(created.id) + "?api-version=7.1");
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.bin-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("bin-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/packaging/feeds/" + encodeURIComponent(button.dataset.feed) + "/recyclebin/packages/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("retain-add").onclick = async () => {
             const error = document.getElementById("retain-error");
             error.textContent = "";

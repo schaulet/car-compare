@@ -23616,3 +23616,309 @@ async fn removing_one_feed_retention_policy_keeps_the_sibling_and_the_other_proj
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("politique introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_recycled_package_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn open_feed(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    async fn publish(app: &axum::Router, auth: &str, project: &str, feed: &str, name: &str, version: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds/{feed}/packages?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","version":"{version}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        assert_eq!(created["versions"][0]["version"], version);
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let pompe = open_feed(&app, &auth, "AzurzDemo", "pompe").await;
+    let ada = open_feed(&app, &auth, "AzurzDemo", "ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = open_feed(&app, &auth, "Atelier", "pompe").await;
+    let pompe_pkg = publish(&app, &auth, "AzurzDemo", &pompe, "Pompe", "1.0.0").await;
+    let relais = publish(&app, &auth, "AzurzDemo", &pompe, "Relais", "3.0.0").await;
+    let live = publish(&app, &auth, "AzurzDemo", &pompe, "Ada", "2.0.0").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/","protocol":"npm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling_pkg = publish(&app, &auth, "AzurzDemo", &ada, "Voisine", "5.0.0").await;
+    let other_pkg = publish(&app, &auth, "Atelier", &atelier, "Atelier", "7.0.0").await;
+
+    let bin = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin/packages?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &bin, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", &bin, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", &bin, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/feed-missing/recyclebin/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin/packages/absent?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin/packages/{pompe_pkg}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let restore = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/recyclebin/packages/{pompe_pkg}?api-version=7.1");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+
+    async fn shelve(app: &axum::Router, auth: &str, project: &str, feed: &str, package: &str) {
+        let (status, body, _) = call(
+            app,
+            "DELETE",
+            &format!("/azurz/{project}/_apis/packaging/feeds/{feed}/packages/{package}?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert!(body.is_empty(), "{body}");
+    }
+
+    shelve(&app, &auth, "AzurzDemo", &pompe, &pompe_pkg).await;
+    shelve(&app, &auth, "AzurzDemo", &pompe, &relais).await;
+    shelve(&app, &auth, "AzurzDemo", &ada, &sibling_pkg).await;
+    shelve(&app, &auth, "Atelier", &atelier, &other_pkg).await;
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages/{pompe_pkg}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", &bin, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Pompe").unwrap();
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(pompe_row["id"], pompe_pkg);
+    assert_eq!(pompe_row["versions"][0]["version"], "1.0.0");
+    assert_eq!(pompe_row["isDeleted"], true);
+    assert!(pompe_row["url"].as_str().unwrap().ends_with(&format!("/feeds/{pompe}/recyclebin/packages/{pompe_pkg}")), "{pompe_row}");
+    assert_eq!(relais_row["versions"][0]["version"], "3.0.0");
+
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("restauration absente"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some("null")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("restauration absente"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("restauration absente"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some(r#"{"deleted":true}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("restauration absente"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some(r#"{"deleted":"false"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("restauration absente"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", &restore, Some(&auth), None, "application/json", Some(r#"{"deleted":false}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let restored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(restored["name"], "Pompe");
+    assert_eq!(restored["versions"][0]["version"], "1.0.0");
+    assert!(restored.get("isDeleted").is_none(), "{restored}");
+    assert!(restored.get("url").is_none(), "{restored}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages/{pompe_pkg}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    shelve(&app, &auth, "AzurzDemo", &pompe, "Pompe").await;
+
+    let (status, body, _) = call(&app, "DELETE", &restore, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &restore, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", &bin, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert_eq!(kept["value"][0]["name"], "Relais");
+    assert_eq!(kept["value"][0]["id"], relais);
+    assert_eq!(kept["value"][0]["versions"][0]["version"], "3.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/recyclebin/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_bin: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_bin["count"], 1);
+    assert_eq!(ada_bin["value"][0]["name"], "Voisine");
+    assert_eq!(ada_bin["value"][0]["versions"][0]["version"], "5.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier}/recyclebin/packages/{other_pkg}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["name"], "Atelier");
+    assert_eq!(other["versions"][0]["version"], "7.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages/{live}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_live: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_live["name"], "Ada");
+    assert_eq!(still_live["versions"][0]["version"], "2.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_feed["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sources: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sources["value"][0]["name"], "npmjs");
+    let (status, body, _) = call(&app, "DELETE", &restore, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+}
