@@ -1090,13 +1090,14 @@
             const resource = item.resource || {};
             const title = resource.fields && resource.fields["System.Title"];
             if (title) return title;
+            if (resource.title) return resource.title;
             const commit = resource.commits && resource.commits[0] && resource.commits[0].comment;
             if (commit) return commit;
             if (resource.buildNumber) return resource.buildNumber + " " + (resource.result || "");
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='git.push'>git.push</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1121,6 +1122,22 @@
                 refUpdates: [{ name: "refs/heads/main", oldObjectId: main ? main.objectId : "" }],
                 commits: [{ comment: title, changes: [{ changeType: "add", item: { path: "/hooks/" + Date.now() + ".txt" }, newContent: { content: title, contentType: "rawtext" } }] }],
               });
+            } else if (event === "git.pullrequest.created" || event === "git.pullrequest.updated" || event === "git.pullrequest.merged") {
+              const repos = await collection("git/repositories");
+              const repo = repos[0];
+              if (!repo) return;
+              const pull = await api("POST", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/pullrequests?api-version=7.1", {
+                title: title,
+                sourceRefName: "refs/heads/feature",
+                targetRefName: "refs/heads/main",
+              });
+              const pullPath = root + "/git/repositories/" + encodeURIComponent(repo.id) + "/pullrequests/" + encodeURIComponent(pull.pullRequestId);
+              if (event === "git.pullrequest.updated") {
+                await api("PATCH", pullPath + "?api-version=7.1", { title: title + " bis" });
+              }
+              if (event === "git.pullrequest.merged") {
+                await api("PATCH", pullPath + "?api-version=7.1", { status: "completed" });
+              }
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
               await api("GET", root + "/build/builds/" + encodeURIComponent(queued.id) + "?api-version=7.1");

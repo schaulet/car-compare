@@ -889,13 +889,21 @@ fn pull_requests(
         if method == Method::PATCH || method == Method::PUT {
             let id = rest.last().cloned().unwrap_or_default();
             let payload = parse_json(body).unwrap_or(json!({}));
+            let previous = get_item(state, org, project, key, &id).and_then(|item| text_of(&item, "status"));
             return match patch_item(state, org, project, key, &id, &payload) {
                 Some(item) => {
-                    if text_of(&item, "status").as_deref() == Some("completed") {
-                        Json(finish_pull(state, org, project, &id).unwrap_or(item)).into_response()
+                    let completed = text_of(&item, "status").as_deref() == Some("completed");
+                    let item = if completed {
+                        finish_pull(state, org, project, &id).unwrap_or(item)
                     } else {
-                        Json(item).into_response()
+                        item
+                    };
+                    if completed && previous.as_deref() != Some("completed") {
+                        deliver_work_item(state, org, project, "git.pullrequest.merged", &item);
+                    } else if !completed {
+                        deliver_work_item(state, org, project, "git.pullrequest.updated", &item);
                     }
+                    Json(item).into_response()
                 }
                 None => fail(StatusCode::NOT_FOUND, "demande de tirage introuvable"),
             };
@@ -933,6 +941,7 @@ fn pull_requests(
         "url": format!("/{org}/{project}/_apis/git/repositories/{repository_id}/pullrequests/{next}")
     });
     put_item(state, org, project, key, item.clone());
+    deliver_work_item(state, org, project, "git.pullrequest.created", &item);
     Json(item).into_response()
 }
 
@@ -1306,6 +1315,11 @@ fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_i
         });
         put_item(state, org, project, &key, item.clone());
         stored.push(item);
+    }
+    if let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) {
+        if text_of(&pull, "status").as_deref() != Some("completed") {
+            deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+        }
     }
     if stored.len() == 1 {
         Json(stored.pop().unwrap_or(json!({}))).into_response()

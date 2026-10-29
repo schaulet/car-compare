@@ -4472,3 +4472,173 @@ async fn commit_ids_stay_distinct_when_comments_share_a_prefix() {
     assert_eq!(first_tag["name"], "v1.0.0");
     assert_eq!(first_tag["taggedObject"]["objectId"], ids[2]);
 }
+
+#[tokio::test]
+async fn pull_request_lifecycle_delivers_service_hooks() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let subscribe = |event: &str, repository: &str| {
+        format!(
+            r#"{{"publisherId":"tfs","eventType":"{event}","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{{"url":"/_hooks/inbox"}},"publisherInputs":{{"projectId":"AzurzDemo","repository":"{repository}"}}}}"#
+        )
+    };
+    let mut ids = std::collections::BTreeMap::new();
+    for (event, repository) in [
+        ("git.pullrequest.created", "AzurzDemo"),
+        ("git.pullrequest.created", "autre-repo"),
+        ("git.pullrequest.updated", "AzurzDemo"),
+        ("git.pullrequest.merged", "AzurzDemo"),
+        ("workitem.created", "AzurzDemo"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&subscribe(event, repository)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+        ids.insert(format!("{event}:{repository}"), hook["id"].as_str().unwrap().to_string());
+    }
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue sonde","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let notes = |app: &axum::Router, id: &str| {
+        let app = app.clone();
+        let id = id.to_string();
+        let auth = auth.clone();
+        async move {
+            let (status, body, _) = call(
+                &app,
+                "GET",
+                &format!("/azurz/_apis/hooks/subscriptions/{id}/notifications?api-version=7.1"),
+                Some(&auth),
+                None,
+                "application/json",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    let created = notes(&app, &ids["git.pullrequest.created:AzurzDemo"]).await;
+    assert_eq!(created["count"], 1);
+    assert_eq!(created["value"][0]["eventType"], "git.pullrequest.created");
+    assert_eq!(created["value"][0]["resource"]["title"], "Revue sonde");
+    let foreign = notes(&app, &ids["git.pullrequest.created:autre-repo"]).await;
+    assert_eq!(foreign["count"], 0);
+    let updated = notes(&app, &ids["git.pullrequest.updated:AzurzDemo"]).await;
+    assert_eq!(updated["count"], 0);
+    let merged = notes(&app, &ids["git.pullrequest.merged:AzurzDemo"]).await;
+    assert_eq!(merged["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue sonde bis"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated = notes(&app, &ids["git.pullrequest.updated:AzurzDemo"]).await;
+    assert_eq!(updated["count"], 1);
+    assert_eq!(updated["value"][0]["resource"]["title"], "Revue sonde bis");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Nadia","vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated = notes(&app, &ids["git.pullrequest.updated:AzurzDemo"]).await;
+    assert_eq!(updated["count"], 2);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"completed"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(done["status"], "completed");
+    let merged = notes(&app, &ids["git.pullrequest.merged:AzurzDemo"]).await;
+    assert_eq!(merged["count"], 1);
+    assert_eq!(merged["value"][0]["eventType"], "git.pullrequest.merged");
+    assert_eq!(merged["value"][0]["resource"]["status"], "completed");
+    assert!(merged["value"][0]["resource"]["lastMergeCommit"]["commitId"].as_str().unwrap().len() == 40);
+    let updated = notes(&app, &ids["git.pullrequest.updated:AzurzDemo"]).await;
+    assert_eq!(updated["count"], 2);
+    let created = notes(&app, &ids["git.pullrequest.created:AzurzDemo"]).await;
+    assert_eq!(created["count"], 1);
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Encore"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let merged = notes(&app, &ids["git.pullrequest.merged:AzurzDemo"]).await;
+    assert_eq!(merged["count"], 1);
+    let updated = notes(&app, &ids["git.pullrequest.updated:AzurzDemo"]).await;
+    assert_eq!(updated["count"], 2);
+    let silent = notes(&app, &ids["workitem.created:AzurzDemo"]).await;
+    assert_eq!(silent["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/inbox?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("git.pullrequest.created"), "{body}");
+    assert!(body.contains("Revue sonde"), "{body}");
+    assert!(body.contains("git.pullrequest.updated"), "{body}");
+    assert!(body.contains("Revue sonde bis"), "{body}");
+    assert!(body.contains("git.pullrequest.merged"), "{body}");
+}
