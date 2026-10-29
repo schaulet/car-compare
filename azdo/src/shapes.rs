@@ -6924,6 +6924,9 @@ fn secure_files(
         put_item(state, org, project, key, item.clone());
         return Json(dress_secure_file(&item)).into_response();
     }
+    if method == Method::DELETE && rest.len() != 3 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
     if id.is_empty() {
         return fail(StatusCode::NOT_FOUND, "fichier sécurisé introuvable");
@@ -6948,11 +6951,15 @@ fn secure_files(
         return Json(dress_secure_file(&item)).into_response();
     }
     if method == Method::DELETE {
-        return if delete_item(state, org, project, key, id) {
-            StatusCode::NO_CONTENT.into_response()
-        } else {
-            fail(StatusCode::NOT_FOUND, "fichier sécurisé introuvable")
-        };
+        let stored_id = value_key(&item["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }

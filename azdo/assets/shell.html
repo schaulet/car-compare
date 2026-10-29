@@ -1744,8 +1744,8 @@
             return "<tr class='vg click' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(shown) + "</td><td><button type='button' class='vg-remove' data-id='" + esc(item.id) + "'>Retirer</button></td></tr>";
           }).join("") + "</tbody></table>" : "<p id='vg-empty' class='sub'>Aucun groupe de variables.</p>";
           const files = await collection("distributedtask/securefiles");
-          const secure = files.length ? "<table id='secure-files'><thead><tr><th>Nom</th><th></th></tr></thead><tbody>" + files.map((item) => "<tr class='secure'><td>" + esc(item.name) + "</td><td><button type='button' class='secure-read' data-id='" + esc(item.id) + "'>Lire</button> <button type='button' class='secure-remove' data-id='" + esc(item.id) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='secure-empty' class='sub'>Aucun fichier sécurisé.</p>";
-          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<p id='vg-error' class='sub'></p><section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Nom du fichier' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
+          const secure = files.length ? "<table id='secure-files'><thead><tr><th></th><th>Nom</th><th></th></tr></thead><tbody>" + files.map((item) => "<tr class='secure'><td><button type='button' class='secure-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td><button type='button' class='secure-read' data-id='" + esc(item.id) + "'>Lire</button></td></tr>").join("") + "</tbody></table>" : "<p id='secure-empty' class='sub'>Aucun fichier sécurisé.</p>";
+          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<p id='vg-error' class='sub'></p><section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Pompe' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div><p id='secure-error' class='sub'></p>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
           const selected = new URLSearchParams(location.search).get("group") || "";
           async function openGroup(id) {
             const item = await api("GET", root + "/distributedtask/variablegroups/" + encodeURIComponent(id) + "?api-version=7.1");
@@ -1796,10 +1796,17 @@
             location.href = location.pathname;
           };
           document.getElementById("secure-add").onclick = async () => {
-            await api("POST", root + "/distributedtask/securefiles?api-version=7.1-preview.1", {
-              name: document.getElementById("secure-name").value || "secret.txt",
-              content: document.getElementById("secure-content").value || "",
-            });
+            const error = document.getElementById("secure-error");
+            error.textContent = "";
+            try {
+              await api("POST", root + "/distributedtask/securefiles?api-version=7.1-preview.1", {
+                name: document.getElementById("secure-name").value || "Pompe",
+                content: document.getElementById("secure-content").value || "",
+              });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
             location.reload();
           };
           document.querySelectorAll("button.secure-read").forEach((button) => {
@@ -1812,7 +1819,14 @@
           });
           document.querySelectorAll("button.secure-remove").forEach((button) => {
             button.onclick = async () => {
-              await api("DELETE", root + "/distributedtask/securefiles/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1-preview.1");
+              const error = document.getElementById("secure-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/distributedtask/securefiles/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1-preview.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
               location.reload();
             };
           });
