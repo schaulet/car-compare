@@ -1481,7 +1481,36 @@
           const configs = await api("GET", root + "/test/configurations?api-version=7.1").catch(() => ({ value: [] }));
           const configRows = configs.value || [];
           const configTable = configRows.length ? "<table id='test-configs'><thead><tr><th></th><th>Nom</th><th>Valeur</th></tr></thead><tbody>" + configRows.map((item) => "<tr><td><button type='button' class='tcfg-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc((item.values && item.values[0] && item.values[0].value) || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='test-config-empty' class='sub'>Aucune configuration.</p>";
-          view.innerHTML = "<h1>Plans de test</h1><h2>Configurations</h2><div class='command'><input id='tcfg-name' placeholder='pompe' /><input id='tcfg-value' placeholder='Linux' /><button id='tcfg-add' type='button'>Ajouter</button></div>" + configTable + "<div class='command'><input id='plan-name' placeholder='Pompe' /><button id='create' type='button'>Créer</button></div>" + table + detail + "<p id='plan-error' class='sub'></p>";
+          const testVariables = await api("GET", root + "/testplan/variables?api-version=7.1").catch(() => ({ value: [] }));
+          const variableRows = testVariables.value || [];
+          const variableTable = variableRows.length ? "<table id='test-variables'><thead><tr><th></th><th>Nom</th><th>Valeur</th></tr></thead><tbody>" + variableRows.map((item) => "<tr><td><button type='button' class='tvar-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc((item.values && item.values[0]) || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='test-var-empty' class='sub'>Aucune variable.</p>";
+          view.innerHTML = "<h1>Plans de test</h1><h2>Variables</h2><div class='command'><input id='tvar-name' placeholder='pompe' /><input id='tvar-value' placeholder='Linux' /><button id='tvar-add' type='button'>Ajouter</button></div>" + variableTable + "<p id='tvar-error' class='sub'></p><h2>Configurations</h2><div class='command'><input id='tcfg-name' placeholder='pompe' /><input id='tcfg-value' placeholder='Linux' /><button id='tcfg-add' type='button'>Ajouter</button></div>" + configTable + "<div class='command'><input id='plan-name' placeholder='Pompe' /><button id='create' type='button'>Créer</button></div>" + table + detail + "<p id='plan-error' class='sub'></p>";
+          document.getElementById("tvar-add").onclick = async () => {
+            const error = document.getElementById("tvar-error");
+            error.textContent = "";
+            const name = document.getElementById("tvar-name").value.trim() || "pompe";
+            const value = document.getElementById("tvar-value").value.trim() || "Linux";
+            try {
+              await api("POST", root + "/testplan/variables?api-version=7.1", { name, values: [value] });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.tvar-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("tvar-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/testplan/variables/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("tcfg-add").onclick = async () => {
             const error = document.getElementById("plan-error");
             error.textContent = "";

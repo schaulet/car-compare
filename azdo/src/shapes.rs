@@ -47,6 +47,7 @@ pub fn dispatch(
         ("pipelines", "approvals") => pipeline_approvals(state, method, org, project, rest, query, body),
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
         ("test", "configurations") | ("testplan", "configurations") => test_configurations(state, method, org, project, rest, body),
+        ("testplan", "variables") => test_variables(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
@@ -4274,6 +4275,117 @@ fn pipeline_runs(state: &AppState, method: &Method, org: &str, project: &str, re
         Some(item) => Json(promote_pipeline(state, org, project, item)).into_response(),
         None => fail(StatusCode::NOT_FOUND, "exécution introuvable"),
     }
+}
+
+fn test_variables(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "testplan/variables";
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by_key(|item| item.get("id").and_then(json_i64).unwrap_or(0));
+            let value = rows.into_iter().map(|item| dress_test_variable(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_test_variable(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "variable introuvable");
+    }
+    let id = pct_decode(&rest[2]).trim().to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "variable introuvable");
+    }
+    if method == &Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_test_variable(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "variable introuvable"),
+        };
+    }
+    if method == &Method::DELETE {
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "variable introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_test_variable(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    let values = match test_variable_values(object.get("values")) {
+        Ok(values) => values,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let description = object
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let next = list(state, org, project, "testplan/variables")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(json_i64))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let item = json!({
+        "id": next,
+        "name": name,
+        "description": description,
+        "values": values
+    });
+    put_item(state, org, project, "testplan/variables", item.clone());
+    Json(dress_test_variable(org, project, item)).into_response()
+}
+
+fn test_variable_values(value: Option<&Value>) -> Result<Vec<String>, &'static str> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(rows) = value.as_array() else {
+        return Err("valeur absente");
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(text) = row.as_str().map(str::trim) else {
+            return Err("valeur absente");
+        };
+        if text.is_empty() {
+            return Err("valeur absente");
+        }
+        out.push(text.to_string());
+    }
+    Ok(out)
+}
+
+fn dress_test_variable(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.entry("description").or_insert(json!(""));
+        object.entry("values").or_insert(json!([]));
+        object.insert("project".into(), json!({"name": project}));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testplan/variables/{id}")),
+        );
+    }
+    item
 }
 
 fn test_configurations(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
