@@ -1785,6 +1785,7 @@ const PROCESSES: &str = "work/processes";
 const WORK_ITEM_TYPES: &str = "work/processes/workitemtypes";
 const WORK_ITEM_STATES: &str = "work/processes/states";
 const WORK_ITEM_RULES: &str = "work/processes/rules";
+const WORK_ITEM_TYPE_FIELDS: &str = "work/processes/typefields";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1895,6 +1896,7 @@ pub fn work_processes(
             };
             drop_work_item_states(stored, &stored_id, None);
             drop_work_item_rules(stored, &stored_id, None);
+            drop_work_item_type_fields(stored, &stored_id, None);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -2147,6 +2149,9 @@ fn work_item_types(
     if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("rules")) {
         return work_item_rules(state, method, org, project, process_key.trim(), type_tail, body);
     }
+    if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("fields")) {
+        return work_item_type_fields(state, method, org, project, process_key.trim(), type_tail, body);
+    }
     if type_tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -2204,6 +2209,7 @@ fn work_item_types(
             };
             drop_work_item_states(stored, &process_id, Some(reference.as_str()));
             drop_work_item_rules(stored, &process_id, Some(reference.as_str()));
+            drop_work_item_type_fields(stored, &process_id, Some(reference.as_str()));
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -2978,6 +2984,358 @@ fn dress_rule(org: &str, project: &str, mut item: Value) -> Value {
 
 fn drop_work_item_rules(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>) {
     let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_RULES) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            item_text(item, "processId").is_some_and(|process| process == process_id)
+                && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
+}
+
+struct SystemTypeField {
+    reference: &'static str,
+    name: &'static str,
+    kind: &'static str,
+    required: bool,
+    read_only: bool,
+}
+
+const SYSTEM_TYPE_FIELDS: &[SystemTypeField] = &[
+    SystemTypeField { reference: "System.Id", name: "Identifiant", kind: "integer", required: false, read_only: true },
+    SystemTypeField { reference: "System.Title", name: "Titre", kind: "string", required: true, read_only: false },
+    SystemTypeField { reference: "System.State", name: "État", kind: "string", required: true, read_only: false },
+    SystemTypeField { reference: "System.Description", name: "Description", kind: "html", required: false, read_only: false },
+    SystemTypeField { reference: "System.WorkItemType", name: "Type", kind: "string", required: false, read_only: false },
+    SystemTypeField { reference: "System.Tags", name: "Tags", kind: "string", required: false, read_only: false },
+    SystemTypeField { reference: "System.AssignedTo", name: "Assigné à", kind: "identity", required: false, read_only: false },
+    SystemTypeField { reference: "System.AreaPath", name: "Chemin de zone", kind: "treePath", required: true, read_only: false },
+    SystemTypeField { reference: "System.IterationPath", name: "Chemin d'itération", kind: "treePath", required: false, read_only: false },
+    SystemTypeField { reference: "System.TeamProject", name: "Projet", kind: "string", required: false, read_only: false },
+    SystemTypeField { reference: "System.CreatedBy", name: "Créé par", kind: "identity", required: false, read_only: true },
+    SystemTypeField { reference: "System.ChangedDate", name: "Modifié le", kind: "dateTime", required: false, read_only: true },
+];
+
+fn work_item_type_fields(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    process_key: &str,
+    type_tail: &[String],
+    body: &[u8],
+) -> Response {
+    let field_tail = &type_tail[2..];
+    if field_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ introuvable")
+        };
+    }
+    let Some((owner, process_id, reference, system_type)) = resolve_state_type(state, org, project, process_key, type_tail[0].trim()) else {
+        return if system_process(process_key).is_none() && locate_process(state, org, project, process_key).is_none() {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    };
+    if field_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows: Vec<Value> = SYSTEM_TYPE_FIELDS
+                .iter()
+                .map(|item| dress_system_type_field(org, &owner, &process_id, &reference, item))
+                .collect();
+            rows.extend(list_type_fields(state, org, &owner, &process_id, &reference).into_iter().map(|item| dress_type_field(org, &owner, item)));
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match type_field_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_type {
+                return fail(StatusCode::BAD_REQUEST, "type système");
+            }
+            return match type_field_create(state, org, &owner, &process_id, &reference, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&field_tail[0]);
+    if let Some(system) = SYSTEM_TYPE_FIELDS.iter().find(|item| type_field_matches_system(item, key.trim())) {
+        if method == Method::GET {
+            return Json(dress_system_type_field(org, &owner, &process_id, &reference, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "champ système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if system_type {
+        return if method == Method::DELETE || method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "champ introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    if method == Method::GET {
+        return match locate_type_field(state, org, &owner, &process_id, &reference, key.trim()) {
+            Some(found) => Json(dress_type_field(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "champ introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_type_field(state, org, &owner, &process_id, &reference, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "champ introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_TYPE_FIELDS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn type_field_matches_system(item: &SystemTypeField, key: &str) -> bool {
+    item.reference.eq_ignore_ascii_case(key) || item.name.eq_ignore_ascii_case(key)
+}
+
+fn list_type_fields(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(WORK_ITEM_TYPE_FIELDS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                item_text(item, "processId").is_some_and(|stored| stored == process_id)
+                    && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+            })
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_type_field(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, key: &str) -> Option<Value> {
+    list_type_fields(state, org, project, process_id, reference).into_iter().find(|item| {
+        item_id(item) == key
+            || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+            || item_text(item, "referenceName").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_type_field_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_TYPE_FIELDS) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("wfield-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn type_field_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    reference: &str,
+    parsed: (String, String, String, String, Option<String>, bool, bool, bool),
+) -> Result<Value, &'static str> {
+    let (name, field_reference, kind, description, default_value, required, read_only, allow_groups) = parsed;
+    if system_type_field_conflict(&name, &field_reference) {
+        return Err("champ existant");
+    }
+    let id = format!("wfield-{}", next_type_field_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "referenceName": field_reference,
+        "type": kind,
+        "description": description,
+        "defaultValue": default_value,
+        "allowGroups": allow_groups,
+        "required": required,
+        "readOnly": read_only,
+        "customizationType": "custom",
+        "processId": process_id,
+        "workItemType": reference
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("champ introuvable");
+        };
+        let existing = stored.list_bucket(WORK_ITEM_TYPE_FIELDS);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                && (item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+                    || item_text(stored, "referenceName").is_some_and(|current| current.eq_ignore_ascii_case(&field_reference)))
+        }) {
+            return Err("champ existant");
+        }
+        stored.put_bucket(WORK_ITEM_TYPE_FIELDS, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_type_field(org, project, item))
+}
+
+fn system_type_field_conflict(name: &str, reference: &str) -> bool {
+    SYSTEM_TYPE_FIELDS.iter().any(|item| {
+        item.name.eq_ignore_ascii_case(name)
+            || item.name.eq_ignore_ascii_case(reference)
+            || item.reference.eq_ignore_ascii_case(name)
+            || item.reference.eq_ignore_ascii_case(reference)
+    })
+}
+
+fn type_field_payload(body: &[u8]) -> Result<(String, String, String, String, Option<String>, bool, bool, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("champ illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string) else {
+        return Err("nom absent");
+    };
+    let field_reference = match object.get("referenceName") {
+        None => {
+            let tail: String = name.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+            let reference = format!("Custom.{tail}");
+            if !type_field_reference_ok(&reference) {
+                return Err("référence absente");
+            }
+            reference
+        }
+        Some(Value::String(value)) => {
+            let reference = value.trim().to_string();
+            if !type_field_reference_ok(&reference) {
+                return Err("référence absente");
+            }
+            reference
+        }
+        Some(_) => return Err("référence absente"),
+    };
+    let kind = match object.get("type") {
+        None => "string".to_string(),
+        Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                "string" | "integer" | "double" | "dateTime" | "html" | "boolean" | "identity" | "treePath"
+            ) =>
+        {
+            value.clone()
+        }
+        Some(_) => return Err("type absent"),
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        Some(_) => return Err("description absente"),
+    };
+    let default_value = match object.get("defaultValue") {
+        None => None,
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return Err("valeur absente"),
+    };
+    let required = match object.get("required") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("obligation absente"),
+    };
+    let read_only = match object.get("readOnly") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("lecture absente"),
+    };
+    let allow_groups = match object.get("allowGroups") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("groupes absents"),
+    };
+    Ok((name, field_reference, kind, description, default_value, required, read_only, allow_groups))
+}
+
+fn type_field_reference_ok(value: &str) -> bool {
+    let Some((head, tail)) = value.split_once('.') else {
+        return false;
+    };
+    if head.contains('.') || tail.contains('.') || head.is_empty() || tail.is_empty() {
+        return false;
+    }
+    let ident = |text: &str| {
+        let mut chars = text.chars();
+        chars.next().is_some_and(|first| first.is_ascii_alphabetic()) && chars.all(|ch| ch.is_ascii_alphanumeric())
+    };
+    ident(head) && ident(tail)
+}
+
+fn dress_system_type_field(org: &str, project: &str, process_id: &str, reference: &str, item: &SystemTypeField) -> Value {
+    json!({
+        "id": item.reference,
+        "name": item.name,
+        "referenceName": item.reference,
+        "type": item.kind,
+        "description": "",
+        "defaultValue": null,
+        "allowGroups": false,
+        "required": item.required,
+        "readOnly": item.read_only,
+        "customizationType": "system",
+        "processId": process_id,
+        "workItemType": reference,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/fields/{}", item.reference)
+    })
+}
+
+fn dress_type_field(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "workItemType").unwrap_or_default();
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/fields/{id}")),
+        );
+    }
+    item
+}
+
+fn drop_work_item_type_fields(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPE_FIELDS) else {
         return;
     };
     let stale: Vec<String> = bucket
