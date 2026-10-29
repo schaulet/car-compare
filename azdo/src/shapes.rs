@@ -92,6 +92,13 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
                 None => crate::tracking::picklists_org(state, method, org, rest, body),
             }
         }
+        ("wit", "fields") => {
+            let project = query_param(query, "project")
+                .map(pct_decode)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            custom_fields(state, method, org, project.as_deref(), rest, body)
+        }
         _ => return None,
     };
     Some(response)
@@ -8309,7 +8316,7 @@ fn mapped_work_item_states(state: &AppState, org: &str, project: &str, kind: &st
     })
 }
 
-fn wit_fields() -> Value {
+fn catalog_fields() -> Vec<Value> {
     let fields = [
         ("System.Id", "integer", "Identifiant"),
         ("System.Title", "string", "Titre"),
@@ -8324,11 +8331,332 @@ fn wit_fields() -> Value {
         ("System.CreatedBy", "identity", "Créé par"),
         ("System.ChangedDate", "dateTime", "Modifié le"),
     ];
-    let value: Vec<Value> = fields
+    fields
         .iter()
         .map(|(reference, kind, name)| json!({"referenceName": reference, "name": name, "type": kind, "readOnly": false}))
-        .collect();
-    page(value)
+        .collect()
+}
+
+fn wit_fields() -> Value {
+    page(catalog_fields())
+}
+
+const CUSTOM_FIELDS: &str = "wit/fields";
+
+pub fn custom_fields(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(tail) = fields_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ introuvable")
+        };
+    };
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = match project {
+                Some(project) => project_fields(state, org, project),
+                None => org_fields(state, org),
+            };
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let project = project.map(str::to_string).unwrap_or_else(|| state.names().1);
+            return match field_create(state, org, &project, body) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if tail.len() != 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ introuvable")
+        };
+    }
+    let id = tail[0].as_str();
+    if method == Method::GET {
+        if let Some((owner, found)) = locate_field(state, org, project, id) {
+            return Json(dress_field(org, &owner, found)).into_response();
+        }
+        if let Some(found) = catalog_field(id) {
+            return Json(found).into_response();
+        }
+        return fail(StatusCode::NOT_FOUND, "champ introuvable");
+    }
+    if method == Method::DELETE {
+        if let Some((owner, found)) = locate_field(state, org, project, id) {
+            let stored_id = field_id(&found);
+            let removed = state.write(|db| -> bool {
+                db.project_mut(org, &owner)
+                    .and_then(|stored| stored.buckets.get_mut(CUSTOM_FIELDS))
+                    .is_some_and(|bucket| bucket.remove(&stored_id))
+            });
+            return if removed {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "champ introuvable")
+            };
+        }
+        if catalog_field(id).is_some() {
+            return fail(StatusCode::BAD_REQUEST, "champ système");
+        }
+        return fail(StatusCode::NOT_FOUND, "champ introuvable");
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn fields_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().position(|part| part.eq_ignore_ascii_case("fields"))?;
+    Some(&rest[index + 1..])
+}
+
+fn project_fields(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut value = catalog_fields();
+    let mut custom = list_fields(state, org, project);
+    custom.sort_by(|left, right| field_id(left).cmp(&field_id(right)));
+    value.extend(custom.into_iter().map(|item| dress_field(org, project, item)));
+    value
+}
+
+fn org_fields(state: &AppState, org: &str) -> Vec<Value> {
+    let mut value = catalog_fields();
+    let mut rows = all_fields(state, org);
+    rows.sort_by(|left, right| field_id(&left.1).cmp(&field_id(&right.1)));
+    value.extend(rows.into_iter().map(|(project, item)| dress_field(org, &project, item)));
+    value
+}
+
+fn list_fields(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(CUSTOM_FIELDS)).unwrap_or_default())
+}
+
+fn all_fields(state: &AppState, org: &str) -> Vec<(String, Value)> {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (name, project) in &organization.projects {
+            if let Some(bucket) = project.buckets.get(CUSTOM_FIELDS) {
+                for item in bucket.items.values() {
+                    rows.push((name.clone(), item.clone()));
+                }
+            }
+        }
+        rows
+    })
+}
+
+fn locate_field(state: &AppState, org: &str, project: Option<&str>, id: &str) -> Option<(String, Value)> {
+    state.read(|db| {
+        let organization = db.orgs.get(org)?;
+        for (name, stored) in &organization.projects {
+            if let Some(project) = project {
+                if !name.eq_ignore_ascii_case(project) && stored.id != project {
+                    continue;
+                }
+            }
+            if let Some(item) = stored
+                .buckets
+                .get(CUSTOM_FIELDS)
+                .and_then(|bucket| bucket.items.values().find(|item| field_matches(item, id)))
+            {
+                return Some((name.clone(), item.clone()));
+            }
+        }
+        None
+    })
+}
+
+fn field_matches(item: &Value, id: &str) -> bool {
+    field_id(item) == id
+        || item.get("name").and_then(|value| value.as_str()).is_some_and(|name| name.eq_ignore_ascii_case(id))
+        || item
+            .get("referenceName")
+            .and_then(|value| value.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(id))
+}
+
+fn field_id(item: &Value) -> String {
+    value_key(&item["id"])
+}
+
+fn catalog_field(id: &str) -> Option<Value> {
+    catalog_fields().into_iter().find(|item| {
+        item["referenceName"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(id))
+            || item["name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(id))
+    })
+}
+
+fn next_field_id(state: &AppState, org: &str) -> i64 {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return 1;
+        };
+        organization
+            .projects
+            .values()
+            .filter_map(|project| project.buckets.get(CUSTOM_FIELDS))
+            .flat_map(|bucket| bucket.items.values())
+            .filter_map(|item| field_id(item).strip_prefix("field-")?.parse::<i64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1
+    })
+}
+
+fn field_create(state: &AppState, org: &str, project: &str, body: &[u8]) -> Result<Value, &'static str> {
+    let (name, reference, kind, description, read_only) = field_payload(body)?;
+    if catalog_conflict(&name, &reference) {
+        return Err("champ existant");
+    }
+    let id = format!("field-{}", next_field_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "referenceName": reference,
+        "type": kind,
+        "description": description,
+        "readOnly": read_only
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("champ introuvable");
+        };
+        let existing: Vec<Value> = stored
+            .buckets
+            .get(CUSTOM_FIELDS)
+            .map(|bucket| bucket.items.values().cloned().collect())
+            .unwrap_or_default();
+        if custom_conflict(&existing, &name, &reference) {
+            return Err("champ existant");
+        }
+        let bucket = stored.buckets.entry(CUSTOM_FIELDS.to_string()).or_insert_with(Bucket::empty);
+        bucket.put(item.clone());
+        Ok(())
+    })?;
+    Ok(dress_field(org, project, item))
+}
+
+fn field_payload(body: &[u8]) -> Result<(String, String, String, String, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("champ illisible");
+    };
+    let Some(name) = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let reference = match object.get("referenceName") {
+        None => {
+            let tail: String = name.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+            let reference = format!("Custom.{tail}");
+            if !valid_reference(&reference) {
+                return Err("référence absente");
+            }
+            reference
+        }
+        Some(Value::String(value)) => {
+            let reference = value.trim().to_string();
+            if !valid_reference(&reference) {
+                return Err("référence absente");
+            }
+            reference
+        }
+        Some(_) => return Err("référence absente"),
+    };
+    let kind = match object.get("type") {
+        None => "string".to_string(),
+        Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                "string" | "integer" | "double" | "dateTime" | "html" | "boolean" | "identity" | "treePath"
+            ) =>
+        {
+            value.clone()
+        }
+        Some(_) => return Err("type absent"),
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        Some(_) => return Err("description absente"),
+    };
+    let read_only = match object.get("readOnly") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("lecture absente"),
+    };
+    Ok((name, reference, kind, description, read_only))
+}
+
+fn valid_reference(value: &str) -> bool {
+    let Some((head, tail)) = value.split_once('.') else {
+        return false;
+    };
+    if head.contains('.') || tail.contains('.') {
+        return false;
+    }
+    reference_ident(head, false) && reference_ident(tail, true)
+}
+
+fn reference_ident(value: &str, allow_underscore: bool) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || (allow_underscore && ch == '_'))
+}
+
+fn catalog_conflict(name: &str, reference: &str) -> bool {
+    catalog_fields().iter().any(|item| {
+        let catalog_name = item["name"].as_str().unwrap_or("");
+        let catalog_reference = item["referenceName"].as_str().unwrap_or("");
+        catalog_name.eq_ignore_ascii_case(name)
+            || catalog_name.eq_ignore_ascii_case(reference)
+            || catalog_reference.eq_ignore_ascii_case(name)
+            || catalog_reference.eq_ignore_ascii_case(reference)
+    })
+}
+
+fn custom_conflict(items: &[Value], name: &str, reference: &str) -> bool {
+    items.iter().any(|item| {
+        let existing_name = item["name"].as_str().unwrap_or("");
+        let existing_reference = item["referenceName"].as_str().unwrap_or("");
+        existing_name.eq_ignore_ascii_case(name)
+            || existing_name.eq_ignore_ascii_case(reference)
+            || existing_reference.eq_ignore_ascii_case(name)
+            || existing_reference.eq_ignore_ascii_case(reference)
+    })
+}
+
+fn dress_field(org: &str, project: &str, mut item: Value) -> Value {
+    let id = field_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/wit/fields/{id}")));
+    }
+    item
 }
 
 pub fn classification_nodes(

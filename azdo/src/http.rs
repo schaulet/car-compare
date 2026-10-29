@@ -358,6 +358,9 @@ impl AppState {
         if resource.as_deref() == Some("tags") {
             return crate::shapes::work_item_tags(self, method, org, project, rest, body);
         }
+        if resource.as_deref() == Some("fields") {
+            return crate::shapes::custom_fields(self, method, org, Some(project), rest, body);
+        }
         if let Some(response) = crate::shapes::wit_catalog(self, method, org, project, rest) {
             return response;
         }
