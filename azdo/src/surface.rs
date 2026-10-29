@@ -303,13 +303,17 @@ fn nuget(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &
 }
 
 fn upack(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
-    if rest.len() < 8 || !rest[4].eq_ignore_ascii_case("packages") || !rest[6].eq_ignore_ascii_case("versions") {
-        return fail(StatusCode::NOT_FOUND, "paquet universel introuvable");
-    }
     let Some(feed) = find_feed(state, org, project, &rest[2]) else {
         return fail(StatusCode::NOT_FOUND, "flux introuvable");
     };
     let key = format!("packaging/feeds/{}/upack", value_text(&feed["id"]));
+    if rest.get(4).is_some_and(|value| value.eq_ignore_ascii_case("packages")) && rest.len() == 5 && method == Method::GET {
+        let value = list_project(state, org, project, &key).into_iter().map(without_content).collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() < 8 || !rest[4].eq_ignore_ascii_case("packages") || !rest[6].eq_ignore_ascii_case("versions") {
+        return fail(StatusCode::NOT_FOUND, "paquet universel introuvable");
+    }
     let stored_id = format!("{}/{}", rest[5], rest[7]);
     if method == Method::PUT {
         let content = String::from_utf8_lossy(body).into_owned();
@@ -327,6 +331,9 @@ fn upack(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
             Some(item) => octets(&text(&item, "content").unwrap_or_default()),
             None => fail(StatusCode::NOT_FOUND, "paquet universel introuvable"),
         };
+    }
+    if method == Method::DELETE {
+        return remove_package(state, org, project, &key, &stored_id, "upack", "paquet universel introuvable");
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }

@@ -12545,3 +12545,183 @@ async fn work_item_type_transitions_refuse_a_hop_between_mapped_states() {
     let back: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(back["fields"]["System.State"], "Active");
 }
+
+#[tokio::test]
+async fn universal_package_version_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/absent/upack/packages/module/versions/1.0.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    for name in ["ligne-upack", "autre-upack"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let publish = |feed: &'static str, name: &'static str, version: &'static str, content: &'static str| {
+        let app = app.clone();
+        let auth = auth.clone();
+        async move {
+            call(
+                &app,
+                "PUT",
+                &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed}/upack/packages/{name}/versions/{version}?api-version=7.1"),
+                Some(&auth),
+                None,
+                "application/octet-stream",
+                Some(content),
+            )
+            .await
+        }
+    };
+    let (status, body, _) = publish("ligne-upack", "module", "1.0.0", "secret-module").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-module");
+    let (status, body, _) = publish("ligne-upack", "module", "1.1.0", "secret-voisin").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = publish("ligne-upack", "pompe", "1.0.0", "secret-pompe").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = publish("autre-upack", "module", "1.0.0", "secret-autre").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-module"), "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3);
+    assert!(listed["value"].as_array().unwrap().iter().all(|item| item.get("content").is_none()));
+    assert!(listed["value"].as_array().unwrap().iter().any(|item| item["name"] == "module" && item["version"] == "1.0.0"));
+    assert!(listed["value"].as_array().unwrap().iter().any(|item| item["name"] == "module" && item["version"] == "1.1.0"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"packaging.package.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages/module/versions/1.0.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages/module/versions/1.0.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet universel introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages/module/versions/1.1.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-voisin");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-"), "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 2);
+    assert!(left["value"].as_array().unwrap().iter().all(|item| item["version"] != "1.0.0" || item["name"] != "module"));
+    assert!(left["value"].as_array().unwrap().iter().any(|item| item["name"] == "module" && item["version"] == "1.1.0"));
+    assert!(left["value"].as_array().unwrap().iter().any(|item| item["name"] == "pompe" && item["version"] == "1.0.0"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/autre-upack/upack/packages/module/versions/1.0.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-autre");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-upack/upack/packages/module/versions/1.0.0?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet universel introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-module"), "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "packaging.package.deleted").collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["resource"]["protocol"], "upack");
+    assert_eq!(notes[0]["resource"]["name"], "module");
+    assert_eq!(notes[0]["resource"]["version"], "1.0.0");
+    assert!(notes[0]["resource"].get("content").is_none());
+}

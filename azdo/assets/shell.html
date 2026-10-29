@@ -1299,10 +1299,20 @@
           const feeds = await collection("packaging/feeds");
           const packages = [];
           for (const feed of feeds) {
-            for (const protocol of ["maven", "pypi", "npm"]) {
+            for (const protocol of ["maven", "pypi", "npm", "upack"]) {
               const rows = await collection("packaging/feeds/" + encodeURIComponent(feed.id) + "/" + protocol + "/packages");
               rows.forEach((item) => {
-                if (protocol === "npm") {
+                if (protocol === "upack") {
+                  packages.push({
+                    feed: feed.name,
+                    protocol: "upack",
+                    label: "Universel",
+                    groupId: "",
+                    name: item.name,
+                    version: item.version,
+                    filename: item.name + "-" + item.version + ".upack",
+                  });
+                } else if (protocol === "npm") {
                   const versions = item.versions && typeof item.versions === "object" ? Object.keys(item.versions) : [];
                   versions.forEach((version) => packages.push({
                     feed: feed.name,
@@ -1316,6 +1326,7 @@
                   packages.push({
                     feed: feed.name,
                     protocol: protocol,
+                    label: protocol,
                     groupId: item.groupId || "",
                     name: item.artifactId || item.name,
                     version: item.version,
@@ -1325,10 +1336,10 @@
               });
             }
           }
-          const table = feeds.length ? "<table id='feeds'><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feeds-empty'>Aucun flux.</p>";
-          const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th><th></th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td><td><button type='button' class='pkg-remove' data-feed='" + esc(item.feed) + "' data-protocol='" + esc(item.protocol) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "' data-version='" + esc(item.version) + "' data-filename='" + esc(item.filename) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='packages-empty'>Aucun paquet.</p>";
+          const table = feeds.length ? "<table id='feeds'><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI, Universel</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feeds-empty'>Aucun flux.</p>";
+          const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th><th></th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.label || item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td><td><button type='button' class='pkg-remove' data-feed='" + esc(item.feed) + "' data-protocol='" + esc(item.protocol) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "' data-version='" + esc(item.version) + "' data-filename='" + esc(item.filename) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='packages-empty'>Aucun paquet.</p>";
           const options = feeds.map((item) => "<option value='" + esc(item.name) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Artefacts</h1><div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
+          view.innerHTML = "<h1>Artefacts</h1><div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option><option value='upack'>Universel</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
           function showPkgError(error) {
             const note = document.getElementById("pkg-error");
             note.hidden = false;
@@ -1356,6 +1367,8 @@
                 const filename = name + "-" + version + ".pom";
                 const pom = "<project><groupId>" + group + "</groupId><artifactId>" + name + "</artifactId><version>" + version + "</version></project>";
                 await api("PUT", "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/maven/v1/" + path + "/" + encodeURIComponent(name) + "/" + encodeURIComponent(version) + "/" + encodeURIComponent(filename), pom, "application/xml");
+              } else if (protocol === "upack") {
+                await api("PUT", "/" + org + "/" + project + "/_apis/packaging/feeds/" + encodeURIComponent(feed) + "/upack/packages/" + encodeURIComponent(name) + "/versions/" + encodeURIComponent(version), "paquet " + name + " " + version, "application/octet-stream");
               } else if (protocol === "npm") {
                 const base = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/npm/" + encodeURIComponent(name);
                 let document = { name: name, versions: {} };
@@ -1387,6 +1400,8 @@
                 path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/maven/v1/" + group + "/" + encodeURIComponent(button.dataset.name) + "/" + encodeURIComponent(button.dataset.version) + "/" + encodeURIComponent(button.dataset.filename);
               } else if (button.dataset.protocol === "npm") {
                 path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/npm/" + encodeURIComponent(button.dataset.name) + "/" + encodeURIComponent(button.dataset.version);
+              } else if (button.dataset.protocol === "upack") {
+                path = "/" + org + "/" + project + "/_apis/packaging/feeds/" + encodeURIComponent(feed) + "/upack/packages/" + encodeURIComponent(button.dataset.name) + "/versions/" + encodeURIComponent(button.dataset.version);
               } else {
                 path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/pypi/simple/" + encodeURIComponent(button.dataset.name) + "/" + encodeURIComponent(button.dataset.filename);
               }
