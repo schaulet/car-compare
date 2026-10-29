@@ -13892,3 +13892,248 @@ async fn removing_one_team_iteration_keeps_the_sibling_and_the_current() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("Pompe"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_saved_query_keeps_the_sibling_and_the_root_folders() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/queries?$depth=2&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tree: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = tree["value"].as_array().unwrap().iter().filter_map(|item| item["name"].as_str()).collect();
+    assert!(names.contains(&"Shared Queries"), "{body}");
+    assert!(names.contains(&"My Queries"), "{body}");
+
+    for root in ["shared-queries", "my-queries"] {
+        let (status, body, _) = call(
+            &app,
+            "DELETE",
+            &format!("/azurz/AzurzDemo/_apis/wit/queries/{root}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("dossier racine"), "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wit/queries/query-999?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("requête introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.Title] = 'Pompe'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ada","wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.Title] = 'Ada'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_id = ada["id"].as_str().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("requête introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Ada"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","isFolder":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ligne: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ligne_id = ligne["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{ligne_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Cave","isFolder":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cave: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let cave_id = cave["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{cave_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Goutte","wiql":"SELECT [System.Id] FROM WorkItems"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let goutte: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let goutte_id = goutte["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","isFolder":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_id = atelier["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{atelier_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Bruit","wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.Title] = 'Bruit'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bruit: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let bruit_id = bruit["id"].as_str().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{ligne_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    for gone in [ligne_id, cave_id, goutte_id] {
+        let (status, body, _) = call(
+            &app,
+            "GET",
+            &format!("/azurz/AzurzDemo/_apis/wit/queries/{gone}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{gone} {body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{ligne_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("requête introuvable"), "{body}");
+
+    for kept in [ada_id, atelier_id, bruit_id, "shared-queries", "my-queries"] {
+        let (status, body, _) = call(
+            &app,
+            "GET",
+            &format!("/azurz/AzurzDemo/_apis/wit/queries/{kept}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kept} {body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/queries?$depth=3&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Ada"), "{body}");
+    assert!(body.contains("Atelier"), "{body}");
+    assert!(body.contains("Bruit"), "{body}");
+    assert!(!body.contains("Pompe"), "{body}");
+    assert!(!body.contains("Ligne"), "{body}");
+    assert!(!body.contains("Goutte"), "{body}");
+}

@@ -842,11 +842,25 @@ impl AppState {
             if id == "shared-queries" || id == "my-queries" {
                 return fail(StatusCode::BAD_REQUEST, "dossier racine");
             }
+            let path = item.get("path").and_then(|value| value.as_str()).unwrap_or("").to_string();
+            let folder = item.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false);
             let removed = self.write(|db| {
-                db.project_mut(org, project)
-                    .and_then(|stored| stored.buckets.get_mut("wit/queries"))
-                    .map(|bucket| bucket.remove(&id))
-                    .unwrap_or(false)
+                let Some(bucket) = db.project_mut(org, project).and_then(|stored| stored.buckets.get_mut("wit/queries")) else {
+                    return false;
+                };
+                let mut ids = vec![id.clone()];
+                if folder {
+                    let prefix = format!("{path}/");
+                    ids.extend(bucket.items.iter().filter_map(|(key, value)| {
+                        let child = value.get("path").and_then(|item| item.as_str()).unwrap_or("");
+                        child.starts_with(&prefix).then(|| key.clone())
+                    }));
+                }
+                let mut gone = false;
+                for key in ids {
+                    gone |= bucket.remove(&key);
+                }
+                gone
             });
             return if removed {
                 StatusCode::NO_CONTENT.into_response()

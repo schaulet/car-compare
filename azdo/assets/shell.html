@@ -766,19 +766,28 @@
         if (hub === "/_queries") {
           const tree = await api("GET", root + "/wit/queries?$depth=2&api-version=7.1");
           const folders = tree.value || [];
+          function queryRow(query, label) {
+            return "<li><button type='button' class='page query-open' data-id='" + esc(query.id) + "' data-wiql='" + esc(query.wiql || "") + "'>" + label + "</button> <button type='button' class='query-remove' data-id='" + esc(query.id) + "'>Retirer</button></li>";
+          }
           const lines = [];
+          let removable = 0;
           folders.forEach((folder) => {
             lines.push("<li class='folder'>" + esc(folder.name) + "</li>");
             (folder.children || []).forEach((query) => {
+              removable += 1;
               if (query.isFolder) {
-                lines.push("<li class='folder'>" + esc(query.path) + "</li>");
-                (query.children || []).forEach((child) => lines.push("<li><button type='button' class='page query-open' data-id='" + esc(child.id) + "' data-wiql='" + esc(child.wiql || "") + "'>" + esc(child.name) + "</button></li>"));
+                lines.push("<li class='folder'>" + esc(query.path) + " <button type='button' class='query-remove' data-id='" + esc(query.id) + "'>Retirer</button></li>");
+                (query.children || []).forEach((child) => {
+                  removable += 1;
+                  lines.push(queryRow(child, esc(child.name)));
+                });
               } else {
-                lines.push("<li><button type='button' class='page query-open' data-id='" + esc(query.id) + "' data-wiql='" + esc(query.wiql || "") + "'>" + esc(folder.name) + " / " + esc(query.name) + "</button></li>");
+                lines.push(queryRow(query, esc(folder.name) + " / " + esc(query.name)));
               }
             });
           });
-          const list = lines.length ? "<ul id='query-tree'>" + lines.join("") + "</ul>" : "<p class='sub'>Aucune requête.</p>";
+          const empty = removable ? "" : "<p id='query-empty' class='sub'>Aucune requête.</p>";
+          const list = (lines.length ? "<ul id='query-tree'>" + lines.join("") + "</ul>" : "") + empty;
           view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'</textarea><div class='command'><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><div id='result'></div>";
           let currentId = "";
           async function runQuery(text) {
@@ -811,6 +820,12 @@
             }
             location.reload();
           };
+          document.querySelectorAll("button.query-remove").forEach((button) => {
+            button.onclick = async () => {
+              await api("DELETE", root + "/wit/queries/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              location.reload();
+            };
+          });
           return;
         }
         if (hub === "/_git") {
