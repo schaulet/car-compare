@@ -4166,6 +4166,9 @@ fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest:
         );
         return Json(item).into_response();
     }
+    if rest.len() == 2 && method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let plan_id = rest.get(2).map(String::as_str).unwrap_or("");
     if rest.len() == 3 && method == Method::GET {
         return match get_item(state, org, project, key, plan_id) {
@@ -4173,8 +4176,31 @@ fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest:
             None => fail(StatusCode::NOT_FOUND, "plan introuvable"),
         };
     }
+    if rest.len() == 3 && method == Method::DELETE {
+        let Some(found) = get_item(state, org, project, key, plan_id) else {
+            return fail(StatusCode::NOT_FOUND, "plan introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let prefix = format!("testplan/plans/{stored_id}/");
+        state.write(|db| {
+            let Some(stored) = db.project_mut(org, project) else {
+                return;
+            };
+            if let Some(bucket) = stored.buckets.get_mut(key) {
+                bucket.remove(&stored_id);
+            }
+            let nested: Vec<String> = stored.buckets.keys().filter(|name| name.starts_with(&prefix)).cloned().collect();
+            for name in nested {
+                stored.buckets.remove(&name);
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("suites") {
         return plan_suites(state, method, org, project, plan_id, rest, body);
+    }
+    if method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     fail(StatusCode::NOT_FOUND, "plan introuvable")
 }

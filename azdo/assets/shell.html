@@ -1271,7 +1271,7 @@
           const planId = params.get("plan");
           const suiteId = params.get("suite");
           const plans = await collection("testplan/plans");
-          const table = plans.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Zone</th></tr></thead><tbody>" + plans.map((item) => "<tr class='plan' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.areaPath) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun plan.</p>";
+          const table = plans.length ? "<table id='plans'><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Zone</th><th></th></tr></thead><tbody>" + plans.map((item) => "<tr class='plan' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.areaPath) + "</td><td><button type='button' class='plan-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='plan-empty' class='sub'>Aucun plan.</p>";
           let detail = "";
           if (planId) {
             const suites = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites");
@@ -1281,15 +1281,29 @@
               const rows = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testpoint");
               const current = suites.find((item) => String(item.id) === String(suiteId));
               const removeSuite = String(suiteId) === String(planId) ? "" : "<button id='suite-delete' type='button'>Supprimer</button>";
-              points = "<h2>" + esc(current ? current.name : "Suite") + "</h2><div class='command'><input id='suite-rename' placeholder='Nouveau nom' /><button id='suite-rename-save' type='button'>Renommer</button>" + removeSuite + "</div><h2>Points</h2><div class='command'><input id='case-title' placeholder='Nouveau cas' /><button id='add-case' type='button'>Ajouter le cas</button><button id='run-suite' type='button'>Exécuter</button></div>" + (rows.length ? "<table id='points'><thead><tr><th>Cas</th><th>Résultat</th><th></th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(item.testCase?.name || item.testCase?.id) + "</td><td>" + esc(item.outcome) + "</td><td><button type='button' class='case-remove' data-id='" + esc(item.testCase?.id) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='points-empty' class='sub'>Aucun cas.</p>") + "<p id='plan-error' class='sub'></p>";
+              points = "<h2>" + esc(current ? current.name : "Suite") + "</h2><div class='command'><input id='suite-rename' placeholder='Nouveau nom' /><button id='suite-rename-save' type='button'>Renommer</button>" + removeSuite + "</div><h2>Points</h2><div class='command'><input id='case-title' placeholder='Nouveau cas' /><button id='add-case' type='button'>Ajouter le cas</button><button id='run-suite' type='button'>Exécuter</button></div>" + (rows.length ? "<table id='points'><thead><tr><th>Cas</th><th>Résultat</th><th></th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(item.testCase?.name || item.testCase?.id) + "</td><td>" + esc(item.outcome) + "</td><td><button type='button' class='case-remove' data-id='" + esc(item.testCase?.id) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='points-empty' class='sub'>Aucun cas.</p>");
             }
             detail = "<h2>Suites</h2><div class='command'><input id='suite-name' placeholder='Nouvelle suite' /><button id='add-suite' type='button'>Créer la suite</button></div>" + suiteRows + points;
           }
-          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Nouveau plan' /><button id='create' type='button'>Créer</button></div>" + table + detail;
+          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Pompe' /><button id='create' type='button'>Créer</button></div>" + table + detail + "<p id='plan-error' class='sub'></p>";
           document.getElementById("create").onclick = async () => {
             await api("POST", root + "/testplan/plans?api-version=7.1", { name: document.getElementById("plan-name").value || "Plan" });
-            location.href = location.pathname;
+            location.reload();
           };
+          document.querySelectorAll("button.plan-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              const error = document.getElementById("plan-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.querySelectorAll("tr.plan").forEach((row) => {
             row.onclick = () => { location.href = location.pathname + "?plan=" + encodeURIComponent(row.dataset.id); };
           });
