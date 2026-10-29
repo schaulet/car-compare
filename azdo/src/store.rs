@@ -26,6 +26,8 @@ pub struct ProjectData {
     #[serde(default)]
     pub history: BTreeMap<i64, Vec<Value>>,
     #[serde(default)]
+    pub recycle_bin: BTreeMap<i64, Value>,
+    #[serde(default)]
     pub attachments: BTreeMap<String, Attachment>,
     pub next_work_item: i64,
     pub buckets: BTreeMap<String, Bucket>,
@@ -156,6 +158,7 @@ impl ProjectData {
             work_items: BTreeMap::new(),
             comments: BTreeMap::new(),
             history: BTreeMap::new(),
+            recycle_bin: BTreeMap::new(),
             attachments: BTreeMap::new(),
             next_work_item: 1,
             buckets: BTreeMap::new(),
@@ -377,6 +380,33 @@ impl ProjectData {
         };
         self.history.entry(id).or_default().push(snapshot.clone());
         Ok(snapshot)
+    }
+
+    pub fn delete_work_item(&mut self, project: &str, id: i64, destroy: bool) -> Result<Value, ()> {
+        let item = self.work_items.remove(&id).ok_or(())?;
+        let record = deleted_work_item(project, id, &item);
+        if destroy {
+            self.comments.remove(&id);
+            self.history.remove(&id);
+            self.recycle_bin.remove(&id);
+        } else {
+            self.recycle_bin.insert(id, record.clone());
+        }
+        Ok(record)
+    }
+
+    pub fn restore_work_item(&mut self, id: i64) -> Result<Value, ()> {
+        let record = self.recycle_bin.remove(&id).ok_or(())?;
+        let item = record.get("resource").cloned().unwrap_or(json!({}));
+        self.work_items.insert(id, item.clone());
+        Ok(item)
+    }
+
+    pub fn destroy_recycled(&mut self, id: i64) -> Result<(), ()> {
+        self.recycle_bin.remove(&id).ok_or(())?;
+        self.comments.remove(&id);
+        self.history.remove(&id);
+        Ok(())
     }
 
     pub fn add_comment(&mut self, id: i64, text: &str) -> Result<Value, String> {
@@ -624,6 +654,37 @@ fn clause_value<'a>(query: &'a str, field: &str, operator: &str) -> Option<&'a s
     let tail = tail.trim_start_matches('\'').trim_start_matches('"');
     let end = tail.find(['\'', '"']).unwrap_or(tail.len());
     Some(tail[..end].trim())
+}
+
+fn deleted_work_item(project: &str, id: i64, item: &Value) -> Value {
+    let fields = item.get("fields");
+    let name = fields
+        .and_then(|value| value.get("System.Title"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let kind = fields
+        .and_then(|value| value.get("System.WorkItemType"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    json!({
+        "id": id,
+        "code": 200,
+        "deletedBy": "azurz",
+        "deletedDate": "2026-10-29T00:00:00Z",
+        "name": name,
+        "project": project,
+        "type": kind,
+        "url": format!("_apis/wit/recyclebin/{id}"),
+        "resource": item
+    })
+}
+
+pub fn recycle_reference(record: &Value) -> Value {
+    let mut copy = record.clone();
+    if let Some(object) = copy.as_object_mut() {
+        object.remove("resource");
+    }
+    copy
 }
 
 pub fn fields_from_patch(ops: &[Value]) -> Result<Map<String, Value>, String> {

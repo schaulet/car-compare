@@ -253,7 +253,7 @@
         "<div class='row'><input id='wi-assigned' placeholder='Assigné à' value='" + esc(assigned) + "' /><input id='wi-tags' placeholder='Étiquettes' value='" + esc(fields["System.Tags"] || "") + "' /></div>" +
         "<textarea id='wi-desc' rows='6'>" + esc(fields["System.Description"] || "") + "</textarea>" +
         "<p id='wi-error' class='error' hidden></p>" +
-        "<div class='command'><button id='wi-save' type='button'>Enregistrer</button></div>" +
+        "<div class='command'><button id='wi-save' type='button'>Enregistrer</button><button id='wi-delete' type='button'>Supprimer</button></div>" +
         "<h3>Liens</h3><ul>" + links + "</ul>" +
         "<h3>Historique</h3><ul id='wi-updates'>" + history + "</ul></div>" +
         "<aside><h3>Discussion</h3><ul>" + notes + "</ul>" +
@@ -278,6 +278,17 @@
           return;
         }
         location.reload();
+      };
+      panel.querySelector("#wi-delete").onclick = async () => {
+        try {
+          await api("DELETE", root + "/wit/workitems/" + id + "?api-version=7.1");
+        } catch (error) {
+          const note = panel.querySelector("#wi-error");
+          note.hidden = false;
+          note.textContent = error.message;
+          return;
+        }
+        location.href = location.pathname;
       };
       panel.querySelector("#wi-comment").onclick = async () => {
         await api("POST", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3", { text: panel.querySelector("#wi-note").value });
@@ -403,7 +414,12 @@
         if (hub === "/_workitems" || hub === "/_backlogs") {
           const items = await workItems();
           const heading = hub === "/_backlogs" ? "Backlogs" : "Éléments de travail";
-          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items);
+          const deleted = await api("GET", root + "/wit/recyclebin?api-version=7.1");
+          const binItems = deleted.value || [];
+          const bin = binItems.length
+            ? "<table id='bin'><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th></th></tr></thead><tbody>" + binItems.map((item) => "<tr data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(item.name || "") + "</td><td>" + esc(item.type || "") + "</td><td><button class='bin-restore' type='button'>Restaurer</button><button class='bin-destroy' type='button'>Détruire</button></td></tr>").join("") + "</tbody></table>"
+            : "<p class='sub' id='bin-empty'>Corbeille vide.</p>";
+          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items) + "<h2>Corbeille</h2>" + bin;
           bindRows();
           document.getElementById("create").onclick = async () => {
             const kind = document.getElementById("kind").value;
@@ -412,6 +428,20 @@
             await api("POST", root + "/wit/workitems/$" + encodeURIComponent(kind) + "?api-version=7.1", patch, "application/json-patch+json");
             location.reload();
           };
+          document.querySelectorAll("button.bin-restore").forEach((button) => {
+            button.onclick = async () => {
+              const id = button.closest("tr").dataset.id;
+              await api("PATCH", root + "/wit/recyclebin/" + id + "?api-version=7.1", { isDeleted: false });
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.bin-destroy").forEach((button) => {
+            button.onclick = async () => {
+              const id = button.closest("tr").dataset.id;
+              await api("DELETE", root + "/wit/recyclebin/" + id + "?api-version=7.1");
+              location.reload();
+            };
+          });
           return;
         }
         if (hub === "/_boards") {
@@ -1571,7 +1601,7 @@
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1611,6 +1641,12 @@
               }
               if (event === "git.pullrequest.merged") {
                 await api("PATCH", pullPath + "?api-version=7.1", { status: "completed" });
+              }
+            } else if (event === "workitem.deleted" || event === "workitem.restored") {
+              const created = await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [{ op: "add", path: "/fields/System.Title", value: title }], "application/json-patch+json");
+              await api("DELETE", root + "/wit/workitems/" + created.id + "?api-version=7.1");
+              if (event === "workitem.restored") {
+                await api("PATCH", root + "/wit/recyclebin/" + created.id + "?api-version=7.1", { isDeleted: false });
               }
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });

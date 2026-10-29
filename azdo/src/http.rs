@@ -388,6 +388,9 @@ impl AppState {
         if resource.as_deref() == Some("workitemsbatch") && method == Method::POST {
             return crate::surface::work_items_batch(self, org, project, body);
         }
+        if resource.as_deref() == Some("recyclebin") {
+            return self.recycle_bin(method, org, project, rest, body);
+        }
         if resource.as_deref() != Some("workitems") {
             return self.collection(method, org, project, rest, body);
         }
@@ -504,6 +507,23 @@ impl AppState {
                     None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
                 };
             }
+            if method == Method::DELETE {
+                let destroy = query_param(query, "destroy")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+                let removed = self.write(|db| {
+                    db.project_mut(org, project)
+                        .and_then(|stored| stored.delete_work_item(project, id, destroy).ok())
+                });
+                return match removed {
+                    Some(record) => {
+                        if let Some(item) = record.get("resource") {
+                            crate::shapes::deliver_work_item(self, org, project, "workitem.deleted", item);
+                        }
+                        Json(record).into_response()
+                    }
+                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+                };
+            }
             if method == Method::PATCH {
                 let exists = self.read(|db| {
                     db.project(org, project)
@@ -532,6 +552,73 @@ impl AppState {
             }
         }
         fail(StatusCode::NOT_FOUND, "route work item inconnue")
+    }
+
+    fn recycle_bin(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+        if rest.len() == 2 && method == Method::GET {
+            let value = self.read(|db| {
+                db.project(org, project)
+                    .map(|stored| {
+                        stored
+                            .recycle_bin
+                            .values()
+                            .map(crate::store::recycle_reference)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            return Json(json!({"count": value.len(), "value": value})).into_response();
+        }
+        if rest.len() != 3 {
+            return fail(StatusCode::NOT_FOUND, "élément supprimé introuvable");
+        }
+        let Ok(id) = rest[2].parse::<i64>() else {
+            return fail(StatusCode::NOT_FOUND, "élément supprimé introuvable");
+        };
+        let present = self.read(|db| {
+            db.project(org, project)
+                .and_then(|stored| stored.recycle_bin.get(&id).cloned())
+        });
+        if method == Method::GET {
+            return match present {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "élément supprimé introuvable"),
+            };
+        }
+        if present.is_none() {
+            return fail(StatusCode::NOT_FOUND, "élément supprimé introuvable");
+        }
+        if method == Method::PATCH {
+            let payload = parse_json(body).unwrap_or(Value::Null);
+            let Some(object) = payload.as_object() else {
+                return fail(StatusCode::BAD_REQUEST, "restauration illisible");
+            };
+            if object.get("isDeleted").and_then(|value| value.as_bool()) != Some(false) {
+                return fail(StatusCode::BAD_REQUEST, "restauration refusée");
+            }
+            let restored = self.write(|db| {
+                db.project_mut(org, project)
+                    .and_then(|stored| stored.restore_work_item(id).ok())
+            });
+            return match restored {
+                Some(item) => {
+                    crate::shapes::deliver_work_item(self, org, project, "workitem.restored", &item);
+                    Json(item).into_response()
+                }
+                None => fail(StatusCode::NOT_FOUND, "élément supprimé introuvable"),
+            };
+        }
+        if method == Method::DELETE {
+            let removed = self.write(|db| {
+                db.project_mut(org, project)
+                    .and_then(|stored| stored.destroy_recycled(id).ok())
+            });
+            return match removed {
+                Some(()) => StatusCode::NO_CONTENT.into_response(),
+                None => fail(StatusCode::NOT_FOUND, "élément supprimé introuvable"),
+            };
+        }
+        fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
     }
 
     fn attachments(
