@@ -2851,7 +2851,7 @@ fn definition_triggers(incoming: Option<&Value>) -> Result<Vec<Value>, &'static 
             "batchChanges": row.get("batchChanges").and_then(|value| value.as_bool()).unwrap_or(false)
         });
         if kind == "schedule" {
-            trigger["schedules"] = row.get("schedules").cloned().filter(|value| value.is_array()).unwrap_or(json!([]));
+            trigger["schedules"] = json!(schedule_entries(row)?);
         }
         stored.push(trigger);
     }
@@ -2867,6 +2867,135 @@ fn canonical_trigger(name: &str) -> Option<&'static str> {
         Some("schedule")
     } else {
         None
+    }
+}
+
+fn canonical_day(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "monday" => Some("monday"),
+        "tuesday" => Some("tuesday"),
+        "wednesday" => Some("wednesday"),
+        "thursday" => Some("thursday"),
+        "friday" => Some("friday"),
+        "saturday" => Some("saturday"),
+        "sunday" => Some("sunday"),
+        _ => None,
+    }
+}
+
+fn schedule_entries(row: &Value) -> Result<Vec<Value>, &'static str> {
+    let Some(raw) = row.get("schedules") else {
+        return Err("horaire absent");
+    };
+    let Some(rows) = raw.as_array() else {
+        return Err("horaire illisible");
+    };
+    if rows.is_empty() {
+        return Err("horaire absent");
+    }
+    let mut stored = Vec::new();
+    for entry in rows {
+        let Some(entry) = entry.as_object() else {
+            return Err("horaire illisible");
+        };
+        let Some(days) = entry.get("daysToBuild") else {
+            return Err("jour absent");
+        };
+        let Some(days) = days.as_array() else {
+            return Err("horaire illisible");
+        };
+        if days.is_empty() {
+            return Err("jour absent");
+        }
+        let mut canonical_days = Vec::new();
+        for day in days {
+            let Some(text) = day.as_str() else {
+                return Err("horaire illisible");
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("jour absent");
+            }
+            let Some(day) = canonical_day(text) else {
+                return Err("jour inconnu");
+            };
+            canonical_days.push(day);
+        }
+        let hours = match entry.get("startHours") {
+            None => 0,
+            Some(value) => match value.as_i64() {
+                Some(hour) if (0..24).contains(&hour) => hour,
+                _ => return Err("heure inconnue"),
+            },
+        };
+        let minutes = match entry.get("startMinutes") {
+            None => 0,
+            Some(value) => match value.as_i64() {
+                Some(minute) if (0..60).contains(&minute) => minute,
+                _ => return Err("minute inconnue"),
+            },
+        };
+        let branch_filters = filter_list(
+            entry.get("branchFilters"),
+            "filtre de branche absent",
+            "filtre de branche illisible",
+        )?;
+        let only_changes = entry
+            .get("scheduleOnlyWithChanges")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        stored.push(json!({
+            "branchFilters": branch_filters,
+            "daysToBuild": canonical_days,
+            "startHours": hours,
+            "startMinutes": minutes,
+            "scheduleOnlyWithChanges": only_changes,
+            "timeZoneId": entry.get("timeZoneId").and_then(|value| value.as_str()).filter(|value| !value.is_empty()).unwrap_or("UTC")
+        }));
+    }
+    Ok(stored)
+}
+
+fn evaluate_schedules(state: &AppState, org: &str, project: &str) {
+    let definitions = list(state, org, project, "build/definitions");
+    for definition in definitions {
+        let status = text_of(&definition, "queueStatus").unwrap_or_else(|| "enabled".into());
+        if status.eq_ignore_ascii_case("disabled") || status.eq_ignore_ascii_case("paused") {
+            continue;
+        }
+        let Some(triggers) = definition.get("triggers").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        let definition_id = definition.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+        for trigger in triggers {
+            if text_of(trigger, "triggerType").as_deref() != Some("schedule") {
+                continue;
+            }
+            let Some(schedules) = trigger.get("schedules").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for schedule in schedules {
+                let days = schedule.get("daysToBuild").and_then(|value| value.as_array());
+                let thursday = days.is_some_and(|rows| rows.iter().any(|day| day.as_str() == Some("thursday")));
+                let hours = schedule.get("startHours").and_then(|value| value.as_i64()).unwrap_or(0);
+                let minutes = schedule.get("startMinutes").and_then(|value| value.as_i64()).unwrap_or(0);
+                if !thursday || hours != 0 || minutes != 0 {
+                    continue;
+                }
+                let branch = "refs/heads/main";
+                if !filter_selected(schedule.get("branchFilters"), branch) {
+                    continue;
+                }
+                let slot = format!("{definition_id}|{branch}|thursday|0|0");
+                if get_item(state, org, project, "build/schedule-slots", &slot).is_some() {
+                    continue;
+                }
+                if enqueue_build(state, org, project, Some(&definition), definition_id, branch, "schedule", &json!({})).is_err() {
+                    continue;
+                }
+                put_item(state, org, project, "build/schedule-slots", json!({"id": slot}));
+            }
+        }
     }
 }
 
@@ -3408,6 +3537,7 @@ fn query_encode(value: &str) -> String {
 fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
     let key = "build/builds";
     if rest.len() == 2 && method == Method::GET {
+        evaluate_schedules(state, org, project);
         let value = list(state, org, project, key)
             .into_iter()
             .map(|item| promote_build(state, org, project, item))

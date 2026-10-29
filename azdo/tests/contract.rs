@@ -11826,3 +11826,195 @@ async fn variable_group_can_be_removed() {
     assert!(!body.contains("ligne-clef"));
     assert!(!body.contains("voisin-clef"));
 }
+
+#[tokio::test]
+async fn schedule_trigger_queues_one_build_at_the_lab_clock() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let put = |body: &'static str| {
+        let app = app.clone();
+        let auth = auth.clone();
+        async move {
+            call(
+                &app,
+                "PUT",
+                "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+                Some(&auth),
+                None,
+                "application/json",
+                Some(body),
+            )
+            .await
+        }
+    };
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[]}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("horaire absent"));
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":"jeudi"}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("horaire illisible"));
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":[""]}]}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("jour absent"));
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["funday"]}]}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("jour inconnu"));
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["thursday"],"startHours":25}]}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("heure inconnue"));
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["thursday"],"startMinutes":60}]}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("minute inconnue"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["triggers"], serde_json::json!([]));
+
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["Thursday"],"startHours":6,"startMinutes":0,"branchFilters":["+refs/heads/main"],"scheduleOnlyWithChanges":false}]}]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let morning: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(morning["triggers"][0]["schedules"][0]["daysToBuild"][0], "thursday");
+    assert_eq!(morning["triggers"][0]["schedules"][0]["startHours"], 6);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let quiet: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(quiet["count"], 0);
+
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["monday"],"startHours":0,"startMinutes":0,"branchFilters":["+refs/heads/main"]}]}]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let monday: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(monday["count"], 0);
+
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["thursday"],"startHours":0,"startMinutes":0,"branchFilters":["+refs/heads/wip"]}]}]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other_branch: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other_branch["count"], 0);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"build.complete","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = put(r#"{"triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["thursday"],"startHours":0,"startMinutes":0,"branchFilters":["+refs/heads/main"],"scheduleOnlyWithChanges":true}]}]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let armed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(armed["triggers"][0]["schedules"][0]["scheduleOnlyWithChanges"], true);
+    assert_eq!(armed["triggers"][0]["schedules"][0]["timeZoneId"], "UTC");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queued["count"], 1);
+    assert_eq!(queued["value"][0]["reason"], "schedule");
+    assert_eq!(queued["value"][0]["sourceBranch"], "refs/heads/main");
+    assert_eq!(queued["value"][0]["definition"]["id"], 1);
+    assert_eq!(queued["value"][0]["definition"]["name"], "CI");
+    assert_eq!(queued["value"][0]["status"], "completed");
+    assert_eq!(queued["value"][0]["result"], "succeeded");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["count"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Nuit","queueStatus":"disabled","triggers":[{"triggerType":"schedule","schedules":[{"daysToBuild":["thursday"],"startHours":0,"startMinutes":0,"branchFilters":["+refs/heads/main"]}]}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let night: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(night["queueStatus"], "disabled");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let held: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(held["count"], 1);
+    assert!(held["value"].as_array().unwrap().iter().all(|item| item["definition"]["id"] != night["id"]));
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "build.complete").collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["resource"]["reason"], "schedule");
+    assert_eq!(notes[0]["resource"]["definition"]["name"], "CI");
+}
