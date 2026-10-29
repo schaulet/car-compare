@@ -7680,3 +7680,202 @@ async fn build_receives_variables_from_its_group() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("groupe introuvable"));
 }
+
+#[tokio::test]
+async fn merge_commit_keeps_source_files_after_the_target_moves() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heads: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let main = heads["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/heads/fusion-file","oldObjectId":"0000000000000000000000000000000000000000","newObjectId":"{main}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/fusion-file","oldObjectId":"{main}"}}],"commits":[{{"comment":"F01 Pompe","changes":[{{"changeType":"add","item":{{"path":"/src/fusion-pompe.txt"}},"newContent":{{"content":"debit-fusion","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let source_tip = push["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{main}"}}],"commits":[{{"comment":"Cible vanne","changes":[{{"changeType":"add","item":{{"path":"/src/fusion-cible.txt"}},"newContent":{{"content":"cible","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let target_push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let target_tip = target_push["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue fusion fichiers","sourceRefName":"refs/heads/fusion-file","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"completed","completionOptions":{"mergeStrategy":"noFastForward","deleteSourceBranch":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(done["status"], "completed");
+    assert_eq!(done["lastMergeSourceCommit"]["commitId"], source_tip);
+    assert_eq!(done["lastMergeTargetCommit"]["commitId"], target_tip);
+    let merge = done["lastMergeCommit"]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{merge}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let commit: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(commit["comment"], "Fusion de refs/heads/fusion-file dans refs/heads/main");
+    assert_eq!(commit["parents"].as_array().unwrap().len(), 2);
+    assert_eq!(commit["parents"][0], target_tip);
+    assert_eq!(commit["parents"][1], source_tip);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{merge}/changes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let changes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entry = changes["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["item"]["path"] == "/src/fusion-pompe.txt")
+        .unwrap();
+    assert_eq!(entry["changeType"], "add");
+    assert_eq!(entry["newContent"]["content"], "debit-fusion");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/fusion-pompe.txt&versionDescriptor.version={merge}&versionDescriptor.versionType=commit&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let at_merge: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(at_merge["content"], "debit-fusion");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/fusion-cible.txt&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cible: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cible["content"], "cible");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/fusion-pompe.txt&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let current: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(current["content"], "debit-fusion");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("refs/heads/fusion-file"), "{body}");
+}

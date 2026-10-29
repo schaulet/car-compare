@@ -1200,7 +1200,7 @@ fn pull_requests(
                         } else if rebase_requested(&item) {
                             Some(Prepared::Rebase(prepare_rebase(state, org, project, &item)))
                         } else {
-                            None
+                            Some(Prepared::Merge(prepare_merge(state, org, project, &item)))
                         };
                         finish_pull(state, org, project, &id, prepared).unwrap_or(item)
                     } else if completed {
@@ -1907,7 +1907,7 @@ fn try_autocomplete(state: &AppState, org: &str, project: &str, pull_id: &str) -
     } else if rebase_requested(&patched) {
         Some(Prepared::Rebase(prepare_rebase(state, org, project, &patched)))
     } else {
-        None
+        Some(Prepared::Merge(prepare_merge(state, org, project, &patched)))
     };
     let item = finish_pull(state, org, project, pull_id, prepared).unwrap_or(patched);
     deliver_work_item(state, org, project, "git.pullrequest.merged", &item);
@@ -1921,6 +1921,7 @@ fn try_autocomplete(state: &AppState, org: &str, project: &str, pull_id: &str) -
 
 enum Prepared {
     Squash(SquashPrep),
+    Merge(SquashPrep),
     Rebase(RebasePrep),
 }
 
@@ -1971,6 +1972,73 @@ fn blob_content(state: &AppState, org: &str, project: &str, repo_id: &str, commi
         path,
     )
     .and_then(|item| text_of(&item, "content"))
+}
+
+fn prepare_merge(state: &AppState, org: &str, project: &str, pull: &Value) -> SquashPrep {
+    let mut prep = prepare_squash(state, org, project, pull);
+    let explicit = text_of(&pull["completionOptions"], "mergeCommitMessage").filter(|text| !text.is_empty());
+    if explicit.is_none() {
+        let source = text_of(pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
+        let target = text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+        prep.message = format!("Fusion de {source} dans {target}");
+    }
+    prep
+}
+
+fn install_tree(
+    stored: &mut crate::store::ProjectData,
+    items_key: &str,
+    blob_key: &str,
+    target_blobs: &[Value],
+    changes: &[Value],
+) {
+    let mut tree: BTreeMap<String, Value> = BTreeMap::new();
+    for blob in target_blobs {
+        let path = text_of(blob, "path").or_else(|| text_of(blob, "id")).unwrap_or_default();
+        if !path.is_empty() {
+            tree.insert(path, blob.clone());
+        }
+    }
+    for change in changes {
+        let path = change
+            .get("item")
+            .and_then(|item| text_of(item, "path"))
+            .unwrap_or_else(|| value_key(&change["id"]));
+        if path.is_empty() {
+            continue;
+        }
+        let kind = text_of(change, "changeType").unwrap_or_else(|| "add".into());
+        if kind.eq_ignore_ascii_case("delete") {
+            tree.remove(&path);
+            continue;
+        }
+        let content = change
+            .get("newContent")
+            .and_then(|value| text_of(value, "content"))
+            .unwrap_or_default();
+        tree.insert(
+            path.clone(),
+            json!({
+                "id": path,
+                "path": path,
+                "isFolder": false,
+                "gitObjectType": "blob",
+                "content": content
+            }),
+        );
+    }
+    if let Some(bucket) = stored.buckets.get_mut(items_key) {
+        bucket.items.clear();
+    }
+    let paths: Vec<String> = tree.keys().cloned().collect();
+    for blob in tree.values() {
+        stored.put_bucket(items_key, blob.clone());
+        stored.put_bucket(blob_key, blob.clone());
+    }
+    for path in &paths {
+        ensure_tree(stored, items_key, path);
+        ensure_tree(stored, blob_key, path);
+    }
 }
 
 fn prepare_squash(state: &AppState, org: &str, project: &str, pull: &Value) -> SquashPrep {
@@ -2151,25 +2219,46 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepar
             pull["lastMergeTargetCommit"] = json!({"commitId": base});
             return Some(stored.put_bucket("git/pullrequests", pull));
         }
-        let squash_prep = match prepared {
-            Some(Prepared::Squash(prep)) => Some(prep),
-            _ => None,
-        };
-        let squash = squash_prep.is_some();
-        let delete_source = squash_prep.as_ref().is_some_and(|prep| prep.delete_source);
-        let (commit_id, comment, parents, changes) = if let Some(prep) = squash_prep {
-            let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
-            let commit_id = object_id(&format!(
-                "squash:{pull_id}:{}:{}:{}",
-                source_id.clone().unwrap_or_default(),
-                parent.clone().unwrap_or_default(),
-                prep.message
-            ));
-            (commit_id, prep.message, parents, prep.changes)
-        } else {
-            let commit_id = object_id(&format!("merge:{pull_id}:{}", parent.clone().unwrap_or_default()));
-            let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
-            (commit_id, format!("Fusion de {source} dans {target}"), parents, Vec::new())
+        let (squash, delete_source, comment, changes, parents, commit_id, merged_tree) = match prepared {
+            Some(Prepared::Squash(prep)) => {
+                let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+                let commit_id = object_id(&format!(
+                    "squash:{pull_id}:{}:{}:{}",
+                    source_id.clone().unwrap_or_default(),
+                    parent.clone().unwrap_or_default(),
+                    prep.message
+                ));
+                (true, prep.delete_source, prep.message, prep.changes, parents, commit_id, false)
+            }
+            Some(Prepared::Merge(prep)) => {
+                let mut parents = Vec::new();
+                if let Some(id) = parent.clone() {
+                    parents.push(json!(id));
+                }
+                if let Some(id) = source_id.clone() {
+                    parents.push(json!(id));
+                }
+                let commit_id = object_id(&format!(
+                    "merge:{pull_id}:{}:{}:{}",
+                    parent.clone().unwrap_or_default(),
+                    source_id.clone().unwrap_or_default(),
+                    prep.message
+                ));
+                (false, prep.delete_source, prep.message, prep.changes, parents, commit_id, true)
+            }
+            _ => {
+                let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+                let commit_id = object_id(&format!("merge:{pull_id}:{}", parent.clone().unwrap_or_default()));
+                (
+                    false,
+                    false,
+                    format!("Fusion de {source} dans {target}"),
+                    Vec::new(),
+                    parents,
+                    commit_id,
+                    false,
+                )
+            }
         };
         stored.put_bucket(
             &commits_key,
@@ -2187,9 +2276,19 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepar
         for change in &changes {
             stored.put_bucket(&format!("{commits_key}/{commit_id}/changes"), change.clone());
         }
-        let snapshot = stored.list_bucket(&format!("git/repositories/{repo_id}/items"));
-        for blob in snapshot {
-            stored.put_bucket(&format!("{commits_key}/{commit_id}/blobs"), blob);
+        let items_key = format!("git/repositories/{repo_id}/items");
+        let blob_key = format!("{commits_key}/{commit_id}/blobs");
+        if merged_tree {
+            let target_blobs = parent
+                .as_ref()
+                .map(|id| stored.list_bucket(&format!("{commits_key}/{id}/blobs")))
+                .unwrap_or_default();
+            install_tree(stored, &items_key, &blob_key, &target_blobs, &changes);
+        } else {
+            let snapshot = stored.list_bucket(&items_key);
+            for blob in snapshot {
+                stored.put_bucket(&blob_key, blob);
+            }
         }
         stored.put_bucket(
             &refs_key,
