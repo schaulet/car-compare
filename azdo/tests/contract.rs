@@ -6547,3 +6547,189 @@ async fn pipeline_run_waits_for_an_environment_approval() {
     assert_eq!(free["state"], "completed");
     assert_eq!(free["result"], "succeeded");
 }
+
+#[tokio::test]
+async fn secure_file_hides_its_bytes_until_download() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?name=%20&api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("secret"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de fichier"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?name=kubeconfig&api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("cluster: ligne-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("cluster: ligne-a"));
+    assert!(!body.contains("content"));
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["id"], 1);
+    assert_eq!(created["name"], "kubeconfig");
+    assert_eq!(created["createdBy"]["displayName"], "azurz");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?name=Kubeconfig&api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("autre"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("déjà"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/1?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("cluster: ligne-a"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/1/download?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "cluster: ligne-a");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/1?download=true&api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "cluster: ligne-a");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/9/download?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"jeton","content":"secret-lab"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json_file: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json_file["name"], "jeton");
+    assert!(!body.contains("secret-lab"));
+    let file_id = json_file["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/securefiles/{file_id}/download?api-version=7.1-preview.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "secret-lab");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["count"], 2);
+    assert!(!body.contains("secret-lab"));
+    assert!(!body.contains("cluster: ligne-a"));
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/1?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles/1?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/securefiles?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["name"], "jeton");
+}

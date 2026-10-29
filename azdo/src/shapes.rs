@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::Engine;
 use serde_json::{json, Map, Value};
 
 use crate::http::{fail, parse_json, pct_decode, query_param};
@@ -31,6 +32,7 @@ pub fn dispatch(
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
         }
+        ("distributedtask", "securefiles") => secure_files(state, method, org, project, rest, query, body),
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
         ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
@@ -4212,6 +4214,108 @@ fn dress_policy(org: &str, project: &str, mut item: Value) -> Value {
         object.insert("type".into(), json!({"id": type_id, "displayName": display}));
     }
     item
+}
+
+fn secure_files(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let key = "distributedtask/securefiles";
+    if rest.len() == 2 && method == Method::GET {
+        let value = list(state, org, project, key).iter().map(dress_secure_file).collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 2 && method == Method::POST {
+        let (name, bytes) = match secure_upload(query, body) {
+            Ok(upload) => upload,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let duplicate = list(state, org, project, key)
+            .iter()
+            .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)));
+        if duplicate {
+            return fail(StatusCode::BAD_REQUEST, "fichier déjà présent");
+        }
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let item = json!({
+            "id": next,
+            "name": name,
+            "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "url": format!("/{org}/{project}/_apis/distributedtask/securefiles/{next}")
+        });
+        put_item(state, org, project, key, item.clone());
+        return Json(dress_secure_file(&item)).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "fichier sécurisé introuvable");
+    }
+    let Some(item) = get_item(state, org, project, key, id) else {
+        return fail(StatusCode::NOT_FOUND, "fichier sécurisé introuvable");
+    };
+    let download = rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("download"))
+        || query_param(query, "download").is_some_and(|value| pct_decode(value).eq_ignore_ascii_case("true"));
+    if method == Method::GET && download {
+        let encoded = text_of(&item, "content").unwrap_or_default();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .unwrap_or_default();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"));
+    }
+    if method == Method::GET {
+        return Json(dress_secure_file(&item)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, key, id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "fichier sécurisé introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn secure_upload(query: &str, body: &[u8]) -> Result<(String, Vec<u8>), &'static str> {
+    if let Some(raw) = query_param(query, "name") {
+        let name = pct_decode(raw).trim().to_string();
+        if name.is_empty() {
+            return Err("nom de fichier absent");
+        }
+        return Ok((name, body.to_vec()));
+    }
+    let payload = parse_json(body).unwrap_or(Value::Null);
+    let name = text_of(&payload, "name").unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Err("nom de fichier absent");
+    }
+    Ok((name, text_of(&payload, "content").unwrap_or_default().into_bytes()))
+}
+
+fn dress_secure_file(item: &Value) -> Value {
+    let id = value_key(&item["id"]);
+    json!({
+        "id": item["id"],
+        "name": item["name"],
+        "createdBy": {"displayName": "azurz", "uniqueName": "azurz"},
+        "createdOn": "2026-10-29T00:00:00Z",
+        "modifiedBy": {"displayName": "azurz", "uniqueName": "azurz"},
+        "modifiedOn": "2026-10-29T00:00:00Z",
+        "url": item.get("url").cloned().unwrap_or(json!(format!("_apis/distributedtask/securefiles/{id}")))
+    })
 }
 
 fn task_agents(
