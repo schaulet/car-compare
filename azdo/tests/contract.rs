@@ -6033,3 +6033,249 @@ async fn work_item_updates_record_field_and_relation_changes() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+#[tokio::test]
+async fn environment_checks_require_a_known_type_and_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Production","description":"Ligne A"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let environment: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let env_id = environment["id"].as_i64().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"type":{"id":"00000000-0000-0000-0000-000000000000"},"resource":{"type":"environment","id":"1"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type de contr"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"8c6f20a7-a545-4486-9777-f762fafe0d4d"}},"resource":{{"type":"environment","id":"{env_id}"}},"settings":{{"approvers":[]}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("approbateur"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"type":{"id":"8c6f20a7-a545-4486-9777-f762fafe0d4d"},"resource":{"type":"environment","id":"9"},"settings":{"approvers":[{"displayName":"azurz"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("environnement"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"type":{"id":"8c6f20a7-a545-4486-9777-f762fafe0d4d"},"resource":{"type":"widget","id":"1"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type de ressource"));
+    let approval = format!(
+        r#"{{"type":{{"id":"8C6F20A7-A545-4486-9777-F762FAFE0D4D","name":"Approval"}},"settings":{{"approvers":[{{"displayName":"azurz"}}]}},"resource":{{"type":"environment","id":"{env_id}","name":"Production"}},"timeout":1440}}"#
+    );
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&approval),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let check: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(check["id"], 1);
+    assert_eq!(check["type"]["name"], "Approval");
+    assert_eq!(check["type"]["id"], "8c6f20a7-a545-4486-9777-f762fafe0d4d");
+    assert_eq!(check["resource"]["name"], "Production");
+    assert_eq!(check["resource"]["id"], env_id);
+    assert_eq!(check["settings"]["approvers"][0]["displayName"], "azurz");
+    assert_eq!(check["settings"]["minRequiredApprovers"], 1);
+    assert_eq!(check["timeout"], 1440);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&approval),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("déjà"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"fe1de3ee-a436-41b4-bb20-f6eb4cb879a7"}},"settings":{{"displayName":"Branch control","inputs":{{"allowedBranches":" "}}}},"resource":{{"type":"environment","id":"{env_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("branches"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"fe1de3ee-a436-41b4-bb20-f6eb4cb879a7","name":"Task Check"}},"settings":{{"displayName":"Branch control","inputs":{{"allowedBranches":"refs/heads/main"}}}},"resource":{{"type":"environment","id":"{env_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let branch: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(branch["id"], 2);
+    assert_eq!(branch["type"]["name"], "Task Check");
+    assert_eq!(branch["settings"]["inputs"]["allowedBranches"], "refs/heads/main");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"2ef31ad6-baa0-403a-8b45-2cbc9b4e5563"}},"settings":{{}},"resource":{{"type":"environment","id":"{env_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lock: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(lock["type"]["name"], "ExclusiveLock");
+    assert_eq!(lock["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/checks/configurations?resourceType=environment&resourceId={env_id}&api-version=7.1-preview.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["count"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?resourceType=environment&resourceId=2&api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations/2?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(one["settings"]["inputs"]["allowedBranches"], "refs/heads/main");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations/9?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations/1?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/checks/configurations?resourceType=environment&resourceId={env_id}&api-version=7.1-preview.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 2);
+    let names: Vec<&str> = left["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["type"]["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"Approval"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/checktypes?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("8c6f20a7-a545-4486-9777-f762fafe0d4d"));
+    assert!(body.contains("ExclusiveLock"));
+}

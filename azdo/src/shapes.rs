@@ -33,6 +33,7 @@ pub fn dispatch(
         }
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
+        ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
@@ -2304,6 +2305,181 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         };
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn check_configurations(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let kind = rest.get(2).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
+    if kind == "checktypes" && method == Method::GET {
+        return Json(page(check_types())).into_response();
+    }
+    if kind != "configurations" {
+        return fail(StatusCode::NOT_FOUND, "contrôle introuvable");
+    }
+    let key = "pipelines/checks/configurations";
+    if rest.len() == 3 && method == Method::GET {
+        let resource_type = query_param(query, "resourceType").map(|value| pct_decode(value).to_ascii_lowercase());
+        let resource_id = query_param(query, "resourceId").map(pct_decode);
+        let value: Vec<Value> = list(state, org, project, key)
+            .into_iter()
+            .filter(|item| {
+                let resource = item.get("resource");
+                let stored_type = resource
+                    .and_then(|value| text_of(value, "type"))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let stored_id = resource.map(|value| value_key(&value["id"])).unwrap_or_default();
+                resource_type.as_ref().is_none_or(|wanted| stored_type == *wanted)
+                    && resource_id.as_ref().is_none_or(|wanted| stored_id == *wanted)
+            })
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 3 && method == Method::POST {
+        let payload = match parse_json(body) {
+            Some(value) if value.is_object() => value,
+            _ => return fail(StatusCode::BAD_REQUEST, "ressource absente"),
+        };
+        let Some((type_id, type_name)) = known_check_type(text_of(&payload["type"], "id").as_deref()) else {
+            return fail(StatusCode::BAD_REQUEST, "type de contrôle inconnu");
+        };
+        let resource = payload.get("resource").cloned().unwrap_or(json!({}));
+        let resource_type = text_of(&resource, "type").unwrap_or_default().to_ascii_lowercase();
+        if !known_check_resource(&resource_type) {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                if resource_type.is_empty() { "ressource absente" } else { "type de ressource inconnu" },
+            );
+        }
+        let resource_id = value_key(&resource["id"]);
+        if resource_id.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "ressource absente");
+        }
+        let resource_name = if resource_type == "environment" {
+            match get_item(state, org, project, "distributedtask/environments", &resource_id) {
+                Some(environment) => text_of(&environment, "name").unwrap_or(resource_id.clone()),
+                None => return fail(StatusCode::BAD_REQUEST, "environnement introuvable"),
+            }
+        } else {
+            text_of(&resource, "name").unwrap_or_else(|| resource_id.clone())
+        };
+        let mut settings = payload.get("settings").cloned().unwrap_or(json!({}));
+        if type_name == "Approval" {
+            let approvers = settings
+                .get("approvers")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let approvers: Vec<Value> = approvers
+                .into_iter()
+                .filter(|item| {
+                    text_of(item, "displayName").is_some_and(|name| !name.trim().is_empty())
+                        || text_of(item, "id").is_some_and(|id| !id.trim().is_empty())
+                })
+                .collect();
+            if approvers.is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "approbateurs absents");
+            }
+            if let Some(object) = settings.as_object_mut() {
+                object.insert("approvers".into(), json!(approvers));
+                object.entry("minRequiredApprovers").or_insert(json!(1));
+                object.entry("requesterCannotBeApprover").or_insert(json!(false));
+            }
+        }
+        if type_name == "Task Check" && branch_control(&settings) {
+            let branches = settings
+                .get("inputs")
+                .and_then(|inputs| text_of(inputs, "allowedBranches"))
+                .unwrap_or_default();
+            if branches.trim().is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "branches absentes");
+            }
+        }
+        let duplicate = list(state, org, project, key).into_iter().any(|item| {
+            text_of(&item["type"], "id").is_some_and(|id| id.eq_ignore_ascii_case(&type_id))
+                && text_of(&item["resource"], "type").is_some_and(|kind| kind.eq_ignore_ascii_case(&resource_type))
+                && value_key(&item["resource"]["id"]) == resource_id
+        });
+        if duplicate {
+            return fail(StatusCode::BAD_REQUEST, "contrôle déjà présent");
+        }
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let timeout = payload.get("timeout").and_then(|value| value.as_i64()).unwrap_or(43200);
+        let item = json!({
+            "id": next,
+            "version": 1,
+            "type": {"id": type_id, "name": type_name},
+            "settings": settings,
+            "resource": {"type": resource_type, "id": resource_id, "name": resource_name},
+            "timeout": timeout,
+            "isDisabled": payload.get("isDisabled").and_then(|value| value.as_bool()).unwrap_or(false),
+            "createdBy": {"displayName": "azurz", "uniqueName": "azurz"},
+            "url": format!("/{org}/{project}/_apis/pipelines/checks/configurations/{next}")
+        });
+        put_item(state, org, project, key, item.clone());
+        return Json(item).into_response();
+    }
+    let id = rest.get(3).map(String::as_str).unwrap_or("");
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "contrôle introuvable");
+    }
+    if method == Method::GET {
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "contrôle introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, key, id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "contrôle introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn check_types() -> Vec<Value> {
+    [
+        ("8c6f20a7-a545-4486-9777-f762fafe0d4d", "Approval"),
+        ("fe1de3ee-a436-41b4-bb20-f6eb4cb879a7", "Task Check"),
+        ("2ef31ad6-baa0-403a-8b45-2cbc9b4e5563", "ExclusiveLock"),
+    ]
+    .into_iter()
+    .map(|(id, name)| json!({"id": id, "name": name}))
+    .collect()
+}
+
+fn known_check_type(id: Option<&str>) -> Option<(String, &'static str)> {
+    let id = id?.to_ascii_lowercase();
+    let name = match id.as_str() {
+        "8c6f20a7-a545-4486-9777-f762fafe0d4d" => "Approval",
+        "fe1de3ee-a436-41b4-bb20-f6eb4cb879a7" => "Task Check",
+        "2ef31ad6-baa0-403a-8b45-2cbc9b4e5563" => "ExclusiveLock",
+        _ => return None,
+    };
+    Some((id, name))
+}
+
+fn known_check_resource(kind: &str) -> bool {
+    matches!(kind, "environment" | "endpoint" | "queue" | "repository" | "variablegroup" | "securefile")
+}
+
+fn branch_control(settings: &Value) -> bool {
+    text_of(settings, "displayName").is_some_and(|name| name.eq_ignore_ascii_case("Branch control"))
+        || settings.get("inputs").and_then(|inputs| inputs.get("allowedBranches")).is_some()
 }
 
 fn pipeline_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
