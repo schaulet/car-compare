@@ -525,7 +525,11 @@
               const notes = (threads.value || []).flatMap((thread) => thread.comments || []).map((note) => "<li>" + esc(note.content) + "</li>").join("") || "<li>Aucun commentaire.</li>";
               const commits = await api("GET", threadsPath + "/commits?api-version=7.1");
               const commitLines = (commits.value || []).map((item) => "<li><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code> " + esc(item.comment || "") + "</li>").join("") || "<li>Aucun commit.</li>";
-              const changes = await api("GET", threadsPath + "/iterations/1/changes?api-version=7.1");
+              const iterations = await api("GET", threadsPath + "/iterations?api-version=7.1");
+              const iterationRows = iterations.value || [];
+              const latest = iterationRows[iterationRows.length - 1];
+              const iterationLines = iterationRows.map((item) => "<li>Itération " + esc(item.id) + " · <code>" + esc(String(item.sourceRefCommit && item.sourceRefCommit.commitId || "").slice(0, 12)) + "</code></li>").join("") || "<li>Aucune itération.</li>";
+              const changes = latest ? await api("GET", threadsPath + "/iterations/" + encodeURIComponent(latest.id) + "/changes?api-version=7.1") : { changeEntries: [] };
               const fileLines = (changes.changeEntries || []).map((entry) => "<li><code>" + esc(entry.changeType) + "</code> " + esc(entry.item && entry.item.path) + "</li>").join("") || "<li>Aucun fichier.</li>";
               const linked = await api("GET", threadsPath + "/workitems?api-version=7.1");
               const details = await Promise.all((linked.value || []).map(async (ref) => {
@@ -535,7 +539,7 @@
                 return { id: ref.id, title: titleOf(item), index: index };
               }));
               const work = details.length ? details.map((item) => "<li>" + esc(item.id) + " · " + esc(item.title) + " <button type='button' class='unlink' data-id='" + esc(item.id) + "' data-index='" + item.index + "'>Retirer</button></li>").join("") : "<li>Aucun élément de travail.</li>";
-              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul><h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
+              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Itérations</h2><ul id='pr-iterations'>" + iterationLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul><h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
               panel.querySelector("#reviewer-add").onclick = async () => {
                 await api("POST", threadsPath + "/reviewers?api-version=7.1", { displayName: panel.querySelector("#reviewer-name").value || "azurz", vote: Number(panel.querySelector("#reviewer-vote").value) });
                 row.click();

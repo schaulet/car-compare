@@ -4261,6 +4261,80 @@ async fn pull_request_iteration_changes_are_the_net_diff() {
     let (status, body, _) = call(
         &app,
         "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/heads/autre","oldObjectId":"0000000000000000000000000000000000000000","newObjectId":"{main}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 1);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{bruit}"}}],"commits":[{{"comment":"Bruit 2","changes":[{{"changeType":"add","item":{{"path":"/src/cible2.txt"}},"newContent":{{"content":"son","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let bruit2 = push["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2);
+    assert_eq!(listed["value"][1]["id"], 2);
+    assert_eq!(listed["value"][1]["description"], "Iteration 2");
+    assert_eq!(listed["value"][1]["sourceRefCommit"]["commitId"], capteur);
+    assert_eq!(listed["value"][1]["targetRefCommit"]["commitId"], bruit2);
+    assert_eq!(listed["value"][0]["sourceRefCommit"]["commitId"], capteur);
+    assert_eq!(listed["value"][0]["targetRefCommit"]["commitId"], bruit);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations/2/changes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("/src/pompe.txt"), "{body}");
+    assert!(body.contains("/src/capteur.txt"), "{body}");
+    assert!(!body.contains("bruit"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
         &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
         Some(&auth),
         None,
@@ -4271,10 +4345,40 @@ async fn pull_request_iteration_changes_are_the_net_diff() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let retrait = push["commits"][0]["commitId"].as_str().unwrap().to_string();
     let (status, body, _) = call(
         &app,
         "GET",
         &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations/1/changes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("/src/pompe.txt"), "{body}");
+    assert!(body.contains("/src/capteur.txt"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3);
+    assert_eq!(listed["value"][2]["sourceRefCommit"]["commitId"], retrait);
+    assert_eq!(listed["value"][2]["targetRefCommit"]["commitId"], bruit2);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations/3/changes?api-version=7.1"),
         Some(&auth),
         None,
         "application/json",
@@ -4328,7 +4432,7 @@ async fn pull_request_iteration_changes_are_the_net_diff() {
     let (status, _, _) = call(
         &app,
         "GET",
-        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations/2?api-version=7.1"),
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/iterations/9?api-version=7.1"),
         Some(&auth),
         None,
         "application/json",

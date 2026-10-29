@@ -243,7 +243,11 @@ fn refs(
         Some(rows)
     });
     match created {
-        Some(value) => Json(page(value)).into_response(),
+        Some(value) => {
+            let names = value.iter().filter_map(|item| text_of(item, "name")).collect::<Vec<_>>();
+            advance_pull_iterations(state, org, project, repo_id, &names);
+            Json(page(value)).into_response()
+        }
         None => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
     }
 }
@@ -496,6 +500,12 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
     }
     match apply_push(state, org, project, repo_id, &payload) {
         PushOutcome::Created(item) => {
+            let names = item
+                .get("refUpdates")
+                .and_then(|value| value.as_array())
+                .map(|rows| rows.iter().filter_map(|row| text_of(row, "name")).collect::<Vec<_>>())
+                .unwrap_or_default();
+            advance_pull_iterations(state, org, project, repo_id, &names);
             deliver_work_item(state, org, project, "git.push", &item);
             Json(item).into_response()
         }
@@ -900,6 +910,11 @@ fn pull_requests(
                     };
                     if completed && previous.as_deref() != Some("completed") {
                         deliver_work_item(state, org, project, "git.pullrequest.merged", &item);
+                        if let Some(repo) = text_of(&item["repository"], "id") {
+                            if let Some(target) = text_of(&item, "targetRefName") {
+                                advance_pull_iterations(state, org, project, &repo, &[target]);
+                            }
+                        }
                     } else if !completed {
                         deliver_work_item(state, org, project, "git.pullrequest.updated", &item);
                     }
@@ -941,6 +956,7 @@ fn pull_requests(
         "url": format!("/{org}/{project}/_apis/git/repositories/{repository_id}/pullrequests/{next}")
     });
     put_item(state, org, project, key, item.clone());
+    remember_iteration(state, org, project, &item);
     deliver_work_item(state, org, project, "git.pullrequest.created", &item);
     Json(item).into_response()
 }
@@ -962,8 +978,17 @@ fn pull_tips(state: &AppState, org: &str, project: &str, pull: &Value) -> PullTi
             .find(|item| text_of(item, "name").as_deref() == Some(name))
             .and_then(|item| text_of(item, "objectId"))
     };
-    let source_id = object_of(&source_name);
-    let target_id = object_of(&target_name);
+    tips_from_commits(state, org, project, &repo_id, object_of(&source_name), object_of(&target_name))
+}
+
+fn tips_from_commits(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    source_id: Option<String>,
+    target_id: Option<String>,
+) -> PullTips {
     let commits = list(state, org, project, &format!("git/repositories/{repo_id}/commits"));
     let mut by_id = std::collections::BTreeMap::new();
     for commit in commits {
@@ -994,6 +1019,51 @@ fn pull_tips(state: &AppState, org: &str, project: &str, pull: &Value) -> PullTi
     }
 }
 
+fn iteration_bucket(pull_id: &str) -> String {
+    format!("git/pullrequests/{pull_id}/iterations")
+}
+
+fn remember_iteration(state: &AppState, org: &str, project: &str, pull: &Value) {
+    let Some(pull_id) = pull.get("pullRequestId").map(value_key).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let tips = pull_tips(state, org, project, pull);
+    let key = iteration_bucket(&pull_id);
+    let existing = list(state, org, project, &key);
+    let source = tips.source_id.clone().unwrap_or_default();
+    let target = tips.target_id.clone().unwrap_or_default();
+    if let Some(last) = existing.iter().max_by_key(|item| item.get("id").and_then(|value| value.as_i64()).unwrap_or(0)) {
+        let same_source = text_of(&last["sourceRefCommit"], "commitId").as_deref() == Some(source.as_str());
+        let same_target = text_of(&last["targetRefCommit"], "commitId").as_deref() == Some(target.as_str());
+        if same_source && same_target {
+            return;
+        }
+    }
+    let id = existing.len() as i64 + 1;
+    put_item(state, org, project, &key, iteration_document(pull, &tips, id));
+}
+
+fn advance_pull_iterations(state: &AppState, org: &str, project: &str, repo_id: &str, ref_names: &[String]) {
+    if ref_names.is_empty() {
+        return;
+    }
+    for pull in list(state, org, project, "git/pullrequests") {
+        if text_of(&pull["repository"], "id").as_deref() != Some(repo_id) {
+            continue;
+        }
+        let status = text_of(&pull, "status").unwrap_or_default();
+        if status == "completed" || status == "abandoned" {
+            continue;
+        }
+        let source = text_of(&pull, "sourceRefName").unwrap_or_default();
+        let target = text_of(&pull, "targetRefName").unwrap_or_default();
+        if !ref_names.iter().any(|name| name == &source || name == &target) {
+            continue;
+        }
+        remember_iteration(state, org, project, &pull);
+    }
+}
+
 fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
@@ -1004,16 +1074,25 @@ fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pul
     Json(page(pull_tips(state, org, project, &pull).ahead)).into_response()
 }
 
-fn iteration_document(pull: &Value, tips: &PullTips) -> Value {
+fn iteration_document(pull: &Value, tips: &PullTips, id: i64) -> Value {
     json!({
-        "id": 1,
-        "description": "Iteration 1",
+        "id": id,
+        "description": format!("Iteration {id}"),
         "sourceRefName": text_of(pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into()),
         "targetRefName": text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into()),
         "sourceRefCommit": {"commitId": tips.source_id.clone().unwrap_or_default()},
         "targetRefCommit": {"commitId": tips.target_id.clone().unwrap_or_default()},
         "commonRefCommit": {"commitId": tips.common_id.clone().unwrap_or_default()}
     })
+}
+
+fn stored_iterations(state: &AppState, org: &str, project: &str, pull: &Value, pull_id: &str) -> Vec<Value> {
+    let mut rows = list(state, org, project, &iteration_bucket(pull_id));
+    if rows.is_empty() {
+        rows.push(iteration_document(pull, &pull_tips(state, org, project, pull), 1));
+    }
+    rows.sort_by_key(|item| item.get("id").and_then(|value| value.as_i64()).unwrap_or(0));
+    rows
 }
 
 fn pull_iterations(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, tail: &[String]) -> Response {
@@ -1023,19 +1102,29 @@ fn pull_iterations(state: &AppState, method: &Method, org: &str, project: &str, 
     let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
         return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
     };
-    let tips = pull_tips(state, org, project, &pull);
-    let iteration = iteration_document(&pull, &tips);
+    let rows = stored_iterations(state, org, project, &pull, pull_id);
     if tail.is_empty() {
-        return Json(page(vec![iteration])).into_response();
+        return Json(page(rows)).into_response();
     }
-    if tail[0] != "1" {
+    let Ok(wanted) = tail[0].parse::<i64>() else {
         return fail(StatusCode::NOT_FOUND, "itération introuvable");
-    }
+    };
+    let Some(iteration) = rows.into_iter().find(|item| item.get("id").and_then(|value| value.as_i64()) == Some(wanted)) else {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    };
     if tail.len() == 1 {
         return Json(iteration).into_response();
     }
     if tail.len() == 2 && tail[1].eq_ignore_ascii_case("changes") {
         let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+        let tips = tips_from_commits(
+            state,
+            org,
+            project,
+            &repo_id,
+            text_of(&iteration["sourceRefCommit"], "commitId"),
+            text_of(&iteration["targetRefCommit"], "commitId"),
+        );
         return Json(json!({"changeEntries": net_change_entries(state, org, project, &repo_id, &tips.ahead)})).into_response();
     }
     fail(StatusCode::NOT_FOUND, "itération introuvable")
