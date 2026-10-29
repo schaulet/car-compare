@@ -149,6 +149,7 @@
       <a href="/__ORG__/__PROJECT__/_notifications">Notifications</a>
       <a href="/__ORG__/__PROJECT__/_favorites">Favoris</a>
       <a href="/__ORG__/__PROJECT__/_users">Droits</a>
+      <a href="/__ORG__/__PROJECT__/_groups">Groupes</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
@@ -3263,6 +3264,41 @@
               error.hidden = true;
               try {
                 await api("DELETE", "/" + org + "/_apis/memberentitlementmanagement/userentitlements/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_groups") {
+          const page = await api("GET", "/" + org + "/_apis/graph/groups?scopeDescriptor=" + encodeURIComponent(project) + "&api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='groups'><thead><tr><th></th><th>Nom</th><th>Description</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='grp-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.displayName) + "'>Retirer</button></td><td>" + esc(item.displayName) + "</td><td>" + esc(item.description) + "</td></tr>").join("") + "</tbody></table>" : "<p id='grp-empty' class='sub'>Aucun groupe.</p>";
+          view.innerHTML = "<h1>Groupes</h1><div class='command'><input id='grp-name' placeholder='Pompe' /><button id='grp-add' type='button'>Ajouter</button></div>" + table + "<p id='grp-error' class='error' hidden></p>";
+          document.getElementById("grp-add").onclick = async () => {
+            const error = document.getElementById("grp-error");
+            error.hidden = true;
+            const name = document.getElementById("grp-name").value;
+            try {
+              await api("POST", "/" + org + "/_apis/graph/groups?scopeDescriptor=" + encodeURIComponent(project) + "&api-version=7.1", {
+                displayName: name,
+                description: name,
+              });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.grp-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("grp-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", "/" + org + "/_apis/graph/groups/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

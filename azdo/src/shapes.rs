@@ -81,7 +81,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         }
         ("serviceendpoint", "types") => crate::tracking::endpoint_types(method),
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
-        ("graph", "groups") => graph(state, method, org, "graph/groups", format!("{org} Team")),
+        ("graph", "groups") => graph_groups(state, method, org, rest, query, body),
         _ => return None,
     };
     Some(response)
@@ -7964,6 +7964,149 @@ fn post_http(target: &str, payload: &Value) -> Result<u16, String> {
     } else {
         Err(format!("HTTP {code}"))
     }
+}
+
+fn graph_groups(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+    let key = "graph/groups";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = org_list(state, org, key);
+            rows.retain(|item| group_listed(item, query));
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_graph_group(org, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (display, description) = match group_create(body) {
+                Ok(pair) => pair,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let scope = query_param(query, "scopeDescriptor")
+                .map(pct_decode)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| org.to_string());
+            let existing = org_list(state, org, key);
+            if existing.iter().any(|item| {
+                text_of(item, "scopeDescriptor").is_some_and(|stored| stored.eq_ignore_ascii_case(&scope))
+                    && text_of(item, "displayName").is_some_and(|name| name.eq_ignore_ascii_case(&display))
+            }) {
+                return fail(StatusCode::BAD_REQUEST, "groupe existant");
+            }
+            let next = existing
+                .iter()
+                .filter_map(|item| text_of(item, "id"))
+                .filter_map(|id| id.strip_prefix("grp-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let id = format!("grp-{next}");
+            let item = json!({
+                "id": id,
+                "descriptor": id,
+                "displayName": display,
+                "description": description,
+                "subjectKind": "group",
+                "origin": "vsts",
+                "originId": id,
+                "principalName": format!("[{scope}]\\{display}"),
+                "domain": format!("vstfs:///Classification/TeamProject/{scope}"),
+                "scopeDescriptor": scope,
+                "mailAddress": Value::Null,
+            });
+            org_put(state, org, key, item.clone());
+            return Json(dress_graph_group(org, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match org_get(state, org, key, id) {
+            Some(item) => Json(dress_graph_group(org, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "groupe introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = org_get(state, org, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> Option<bool> {
+            let bucket = db.orgs.get_mut(org)?.buckets.get_mut(key)?;
+            let key_name = bucket
+                .items
+                .iter()
+                .find_map(|(stored, item)| (stored == &stored_id || value_key(&item["id"]) == stored_id).then(|| stored.clone()))?;
+            Some(bucket.items.remove(&key_name).is_some())
+        });
+        return if removed == Some(true) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn group_listed(item: &Value, query: &str) -> bool {
+    let Some(scope) = query_param(query, "scopeDescriptor")
+        .map(pct_decode)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    text_of(item, "scopeDescriptor").is_some_and(|stored| stored.eq_ignore_ascii_case(&scope))
+}
+
+fn group_create(body: &[u8]) -> Result<(String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("groupe illisible");
+    };
+    let Some(display) = object
+        .get("displayName")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(value) => {
+            let Some(text) = value.as_str() else {
+                return Err("description absente");
+            };
+            text.trim().to_string()
+        }
+    };
+    Ok((display, description))
+}
+
+fn dress_graph_group(org: &str, mut item: Value) -> Value {
+    let id = text_of(&item, "id").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        let href = format!("/{org}/_apis/graph/groups/{id}");
+        object.insert("url".into(), json!(href.clone()));
+        object.insert(
+            "_links".into(),
+            json!({
+                "self": {"href": href},
+                "memberships": {"href": format!("/{org}/_apis/graph/groups/{id}/memberships")}
+            }),
+        );
+    }
+    item
 }
 
 fn graph(state: &AppState, method: &Method, org: &str, key: &str, name: impl AsRef<str>) -> Response {

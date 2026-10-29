@@ -24690,3 +24690,196 @@ async fn removing_one_entitlement_keeps_the_sibling_the_favorite_and_the_other_p
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("droit introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_group_keeps_the_sibling_the_entitlement_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/_apis/graph/groups?api-version=7.1";
+
+    async fn create(app: &axum::Router, auth: &str, name: &str, scope: Option<&str>, description: Option<&str>) -> String {
+        let path = match scope {
+            Some(scope) => format!("/azurz/_apis/graph/groups?scopeDescriptor={scope}&api-version=7.1"),
+            None => "/azurz/_apis/graph/groups?api-version=7.1".to_string(),
+        };
+        let body = match description {
+            Some(description) => format!(r#"{{"displayName":"{name}","description":"{description}"}}"#),
+            None => format!(r#"{{"displayName":"{name}"}}"#),
+        };
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(created["displayName"], name);
+        assert_eq!(created["subjectKind"], "group");
+        assert_eq!(created["origin"], "vsts");
+        assert_eq!(created["descriptor"], created["id"]);
+        assert_eq!(created["originId"], created["id"]);
+        let expected_scope = scope.unwrap_or("azurz");
+        assert_eq!(created["scopeDescriptor"], expected_scope);
+        assert_eq!(created["principalName"], format!("[{expected_scope}]\\{name}"));
+        assert_eq!(created["domain"], format!("vstfs:///Classification/TeamProject/{expected_scope}"));
+        assert_eq!(created["description"], description.unwrap_or(""));
+        assert!(created["url"].as_str().unwrap().ends_with(&format!("/graph/groups/{}", created["id"].as_str().unwrap())), "{created}");
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("null")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"displayName":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"displayName":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"displayName":"Pompe","description":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"displayName":"Pompe","description":null}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde = create(&app, &auth, "Sonde", None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/graph/groups/{sonde}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let pompe = create(&app, &auth, "Pompe", Some("AzurzDemo"), Some("Pompe")).await;
+    let relais = create(&app, &auth, "Relais", Some("AzurzDemo"), None).await;
+    let atelier = create(&app, &auth, "Atelier", Some("Atelier"), Some("Atelier")).await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/graph/groups?scopeDescriptor=AzurzDemo&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Pompe","description":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe existant"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/memberentitlementmanagement/userentitlements?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"user":{"principalName":"Pompe","displayName":"Pompe"},"accessLevel":{"accountLicenseType":"express"},"projectEntitlements":[{"projectRef":{"id":"AzurzDemo","name":"AzurzDemo"},"group":{"groupType":"projectContributor"}}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entitlement: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entitlement_id = entitlement["id"].as_str().unwrap().to_string();
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["displayName"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["description"], "Pompe");
+    assert_eq!(pompe_row["scopeDescriptor"], "AzurzDemo");
+    let scoped = "/azurz/_apis/graph/groups?scopeDescriptor=azurzdemo&api-version=7.1";
+    let (status, body, _) = call(&app, "GET", scoped, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let project_rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(project_rows["count"], 2, "{body}");
+    assert!(project_rows["value"].as_array().unwrap().iter().any(|item| item["displayName"] == "Pompe"));
+    assert!(project_rows["value"].as_array().unwrap().iter().any(|item| item["displayName"] == "Relais"));
+    let one = format!("/azurz/_apis/graph/groups/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["displayName"], "Pompe");
+    assert_eq!(fetched["principalName"], "[AzurzDemo]\\Pompe");
+    assert_eq!(fetched["domain"], "vstfs:///Classification/TeamProject/AzurzDemo");
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/graph/groups/absent?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/graph/groups/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/graph/groups/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 2, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["displayName"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["description"], "");
+    assert_eq!(sibling["scopeDescriptor"], "AzurzDemo");
+    let other = kept["value"].as_array().unwrap().iter().find(|item| item["displayName"] == "Atelier").unwrap();
+    assert_eq!(other["id"], atelier);
+    assert_eq!(other["scopeDescriptor"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/memberentitlementmanagement/userentitlements/{entitlement_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_entitlement: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_entitlement["user"]["displayName"], "Pompe");
+    assert_eq!(kept_entitlement["projectEntitlements"][0]["projectRef"]["id"], "AzurzDemo");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+}
