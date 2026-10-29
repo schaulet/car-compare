@@ -1786,6 +1786,7 @@ const WORK_ITEM_TYPES: &str = "work/processes/workitemtypes";
 const WORK_ITEM_STATES: &str = "work/processes/states";
 const WORK_ITEM_RULES: &str = "work/processes/rules";
 const WORK_ITEM_TYPE_FIELDS: &str = "work/processes/typefields";
+const BEHAVIORS: &str = "work/processes/behaviors";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1844,6 +1845,9 @@ pub fn work_processes(
     if tail.len() > 1 && tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("workitemtypes")) {
         return work_item_types(state, method, org, project, &tail, body);
     }
+    if tail.len() > 1 && tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("behaviors")) {
+        return work_behaviors(state, method, org, project, &tail, body);
+    }
     if tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -1897,6 +1901,7 @@ pub fn work_processes(
             drop_work_item_states(stored, &stored_id, None);
             drop_work_item_rules(stored, &stored_id, None);
             drop_work_item_type_fields(stored, &stored_id, None);
+            drop_behaviors(stored, &stored_id);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -3345,6 +3350,350 @@ fn drop_work_item_type_fields(stored: &mut crate::store::ProjectData, process_id
             item_text(item, "processId").is_some_and(|process| process == process_id)
                 && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
         })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
+}
+
+struct SystemBehavior {
+    reference: &'static str,
+    name: &'static str,
+    color: &'static str,
+    inherits: Option<&'static str>,
+    rank: i64,
+    is_abstract: bool,
+}
+
+fn system_behaviors(parent_id: &str) -> Vec<SystemBehavior> {
+    let requirement = match parent_id {
+        SCRUM => "Backlog items",
+        CMMI => "Requirements",
+        BASIC => "Issues",
+        _ => "Stories",
+    };
+    let mut rows = vec![
+        SystemBehavior { reference: "System.PortfolioBehavior", name: "Portfolio", color: "", inherits: None, rank: 0, is_abstract: true },
+        SystemBehavior { reference: "Microsoft.VSTS.Common.EpicBacklogBehavior", name: "Epic", color: "E06C00", inherits: Some("System.PortfolioBehavior"), rank: 40, is_abstract: false },
+    ];
+    if parent_id != BASIC {
+        rows.push(SystemBehavior {
+            reference: "Microsoft.VSTS.Common.FeatureBacklogBehavior",
+            name: "Feature",
+            color: "773B93",
+            inherits: Some("System.PortfolioBehavior"),
+            rank: 30,
+            is_abstract: false,
+        });
+    }
+    rows.push(SystemBehavior { reference: "System.RequirementBehavior", name: "Requirement", color: "", inherits: None, rank: 0, is_abstract: true });
+    rows.push(SystemBehavior {
+        reference: "Microsoft.VSTS.Common.RequirementBacklogBehavior",
+        name: requirement,
+        color: "009CCC",
+        inherits: Some("System.RequirementBehavior"),
+        rank: 20,
+        is_abstract: false,
+    });
+    rows.push(SystemBehavior { reference: "System.TaskBehavior", name: "Task", color: "", inherits: None, rank: 0, is_abstract: true });
+    rows.push(SystemBehavior {
+        reference: "Microsoft.VSTS.Common.TaskBacklogBehavior",
+        name: "Tasks",
+        color: "F2CB1D",
+        inherits: Some("System.TaskBehavior"),
+        rank: 10,
+        is_abstract: false,
+    });
+    rows
+}
+
+fn behavior_parent(value: &str) -> Option<&'static str> {
+    match value {
+        parent if parent.eq_ignore_ascii_case("System.PortfolioBehavior") => Some("System.PortfolioBehavior"),
+        parent if parent.eq_ignore_ascii_case("System.RequirementBehavior") => Some("System.RequirementBehavior"),
+        parent if parent.eq_ignore_ascii_case("System.TaskBehavior") => Some("System.TaskBehavior"),
+        _ => None,
+    }
+}
+
+fn work_behaviors(state: &AppState, method: &Method, org: &str, project: Option<&str>, tail: &[String], body: &[u8]) -> Response {
+    let process_key = pct_decode(&tail[0]);
+    let behavior_tail = &tail[2..];
+    if behavior_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "comportement introuvable")
+        };
+    }
+    let Some((owner, process_id, parent_id)) = resolve_type_process(state, org, project, process_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "processus introuvable");
+    };
+    if behavior_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows: Vec<Value> = system_behaviors(&parent_id)
+                .iter()
+                .map(|item| dress_system_behavior(org, &owner, &process_id, item))
+                .collect();
+            rows.extend(list_behaviors(state, org, &owner, &process_id).into_iter().map(|item| dress_behavior(org, &owner, item)));
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match behavior_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_process(&process_id).is_some() {
+                return fail(StatusCode::BAD_REQUEST, "processus système");
+            }
+            return match behavior_create(state, org, &owner, &process_id, &parent_id, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&behavior_tail[0]);
+    if let Some(system) = system_behaviors(&parent_id).into_iter().find(|item| behavior_matches_system(item, key.trim())) {
+        if method == Method::GET {
+            return Json(dress_system_behavior(org, &owner, &process_id, &system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "comportement système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::GET {
+        return match locate_behavior(state, org, &owner, &process_id, key.trim()) {
+            Some(found) => Json(dress_behavior(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "comportement introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_behavior(state, org, &owner, &process_id, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "comportement introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(BEHAVIORS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "comportement introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn behavior_matches_system(item: &SystemBehavior, key: &str) -> bool {
+    item.reference.eq_ignore_ascii_case(key) || item.name.eq_ignore_ascii_case(key)
+}
+
+fn list_behaviors(state: &AppState, org: &str, project: &str, process_id: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(BEHAVIORS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item_text(item, "processId").is_some_and(|stored| stored == process_id))
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_behavior(state: &AppState, org: &str, project: &str, process_id: &str, key: &str) -> Option<Value> {
+    list_behaviors(state, org, project, process_id).into_iter().find(|item| {
+        item_id(item) == key
+            || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+            || item_text(item, "referenceName").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_behavior_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(BEHAVIORS) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("beh-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn behavior_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    parent_id: &str,
+    parsed: (String, String, String, String, String, Option<i64>),
+) -> Result<Value, &'static str> {
+    let (name, reference, color, description, inherits, rank) = parsed;
+    if system_behaviors(parent_id).iter().any(|item| behavior_matches_system(item, &name) || item.reference.eq_ignore_ascii_case(&reference)) {
+        return Err("comportement existant");
+    }
+    let id = format!("beh-{}", next_behavior_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "name": name,
+        "referenceName": reference,
+        "color": color,
+        "description": description,
+        "inherits": inherits,
+        "abstract": false,
+        "customizationType": "custom",
+        "processId": process_id
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("comportement introuvable");
+        };
+        let existing = stored.list_bucket(BEHAVIORS);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && (item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+                    || item_text(stored, "referenceName").is_some_and(|current| current.eq_ignore_ascii_case(&reference)))
+        }) {
+            return Err("comportement existant");
+        }
+        let rank = rank.unwrap_or_else(|| {
+            existing
+                .iter()
+                .filter(|stored| item_text(stored, "processId").is_some_and(|process| process == process_id))
+                .filter_map(|stored| stored.get("rank").and_then(|value| value.as_i64()))
+                .max()
+                .unwrap_or(49)
+                + 1
+        });
+        if let Some(object) = item.as_object_mut() {
+            object.insert("rank".into(), json!(rank));
+        }
+        stored.put_bucket(BEHAVIORS, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_behavior(org, project, item))
+}
+
+fn behavior_payload(body: &[u8]) -> Result<(String, String, String, String, String, Option<i64>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("comportement illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string) else {
+        return Err("nom absent");
+    };
+    let Some(reference) = work_item_reference(&name) else {
+        return Err("référence absente");
+    };
+    let color = match object.get("color") {
+        None => "009CCC".to_string(),
+        Some(Value::String(value)) if work_item_color(value.trim()) => value.trim().trim_start_matches('#').to_ascii_uppercase(),
+        Some(_) => return Err("couleur absente"),
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        Some(_) => return Err("description absente"),
+    };
+    let inherits = match object.get("inherits") {
+        None => "System.RequirementBehavior".to_string(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("parent absent");
+            }
+            let Some(parent) = behavior_parent(value) else {
+                return Err("parent inconnu");
+            };
+            parent.to_string()
+        }
+        Some(_) => return Err("parent absent"),
+    };
+    let rank = match object.get("rank") {
+        None => None,
+        Some(Value::Number(value)) => {
+            let Some(rank) = value.as_i64() else {
+                return Err("rang absent");
+            };
+            if rank < 0 {
+                return Err("rang absent");
+            }
+            Some(rank)
+        }
+        Some(_) => return Err("rang absent"),
+    };
+    Ok((name, reference, color, description, inherits, rank))
+}
+
+fn dress_system_behavior(org: &str, project: &str, process_id: &str, item: &SystemBehavior) -> Value {
+    let inherits = item.inherits.map(|parent| {
+        json!({
+            "behaviorRefName": parent,
+            "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/behaviors/{parent}")
+        })
+    });
+    json!({
+        "id": item.reference,
+        "name": item.name,
+        "referenceName": item.reference,
+        "color": item.color,
+        "description": "",
+        "inherits": inherits,
+        "abstract": item.is_abstract,
+        "rank": item.rank,
+        "customizationType": "system",
+        "processId": process_id,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/behaviors/{}", item.reference)
+    })
+}
+
+fn dress_behavior(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let id = item_id(&item);
+    let parent = item_text(&item, "inherits");
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/behaviors/{id}")));
+        if let Some(parent) = parent {
+            object.insert(
+                "inherits".into(),
+                json!({
+                    "behaviorRefName": parent,
+                    "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/behaviors/{parent}")
+                }),
+            );
+        }
+    }
+    item
+}
+
+fn drop_behaviors(stored: &mut crate::store::ProjectData, process_id: &str) {
+    let Some(bucket) = stored.buckets.get_mut(BEHAVIORS) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| item_text(item, "processId").is_some_and(|process| process == process_id))
         .map(|(key, _)| key.clone())
         .collect();
     for key in stale {
