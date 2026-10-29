@@ -158,6 +158,7 @@
       <a href="/__ORG__/__PROJECT__/_extensions">Extensions</a>
       <a href="/__ORG__/__PROJECT__/_groupentitlements">Droits de groupe</a>
       <a href="/__ORG__/__PROJECT__/_processes">Processus</a>
+      <a href="/__ORG__/__PROJECT__/_workitemtypes">Types</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3574,6 +3575,51 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_workitemtypes") {
+          const agile = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+          const processes = await api("GET", root + "/work/processes?api-version=7.1");
+          const inherited = (processes.value || []).filter((item) => item.customizationType === "Inherited");
+          let rows = [];
+          for (const process of inherited) {
+            const page = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes?api-version=7.1");
+            rows = rows.concat((page.value || []).filter((item) => item.customizationType === "custom").map((item) => Object.assign({ processName: process.name }, item)));
+          }
+          const systems = await api("GET", root + "/work/processes/" + agile + "/workitemtypes?api-version=7.1");
+          const table = rows.length ? "<table id='wittypes'><thead><tr><th></th><th>Nom</th><th>Processus</th><th>Couleur</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='wittype-remove' data-process='" + esc(item.processId) + "' data-id='" + esc(item.referenceName) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.processName) + "</td><td>" + esc(item.color) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wittype-empty' class='sub'>Aucun type.</p>";
+          const catalog = "<h2>Système</h2><table id='system-wittypes'><thead><tr><th>Nom</th><th>Référence</th></tr></thead><tbody>" + (systems.value || []).filter((item) => item.customizationType === "system").map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.referenceName) + "</td></tr>").join("") + "</tbody></table>";
+          view.innerHTML = "<h1>Types</h1><div class='command'><input id='wittype-name' placeholder='Pompe' /><button id='wittype-add' type='button'>Ajouter</button></div>" + table + catalog + "<p id='wittype-error' class='error' hidden></p>";
+          document.getElementById("wittype-add").onclick = async () => {
+            const error = document.getElementById("wittype-error");
+            error.hidden = true;
+            const name = document.getElementById("wittype-name").value;
+            try {
+              let processId = inherited.length ? inherited[0].typeId : "";
+              if (!processId) {
+                const created = await api("POST", root + "/work/processes?api-version=7.1", { name: "Hérité", parentProcessTypeId: agile });
+                processId = created.typeId;
+              }
+              await api("POST", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.wittype-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wittype-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

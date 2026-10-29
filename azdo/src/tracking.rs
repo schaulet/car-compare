@@ -1782,6 +1782,7 @@ fn dress_delivery_plan(org: &str, project: &str, mut item: Value) -> Value {
 }
 
 const PROCESSES: &str = "work/processes";
+const WORK_ITEM_TYPES: &str = "work/processes/workitemtypes";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1837,6 +1838,9 @@ pub fn work_processes(
             fail(StatusCode::NOT_FOUND, "processus introuvable")
         };
     };
+    if tail.len() > 1 && tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("workitemtypes")) {
+        return work_item_types(state, method, org, project, &tail, body);
+    }
     if tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -1884,9 +1888,21 @@ pub fn work_processes(
         };
         let stored_id = item_id(&found);
         let removed = state.write(|db| -> bool {
-            db.project_mut(org, &owner)
-                .and_then(|stored| stored.buckets.get_mut(PROCESSES))
-                .is_some_and(|bucket| bucket.remove(&stored_id))
+            let Some(stored) = db.project_mut(org, &owner) else {
+                return false;
+            };
+            if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
+                let stale: Vec<String> = bucket
+                    .items
+                    .iter()
+                    .filter(|(_, item)| item_text(item, "processId").is_some_and(|process| process == stored_id))
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                for key in stale {
+                    bucket.remove(&key);
+                }
+            }
+            stored.buckets.get_mut(PROCESSES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
             StatusCode::NO_CONTENT.into_response()
@@ -2083,6 +2099,299 @@ fn dress_process(org: &str, project: &str, mut item: Value) -> Value {
     if let Some(object) = item.as_object_mut() {
         object.insert("project".into(), json!(project));
         object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/processes/{id}")));
+    }
+    item
+}
+
+struct SystemWorkItemType {
+    reference: &'static str,
+    name: &'static str,
+    color: &'static str,
+    icon: &'static str,
+}
+
+fn system_work_item_types(parent_id: &str) -> &'static [SystemWorkItemType] {
+    const EPIC: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Epic", name: "Epic", color: "E06C00", icon: "icon_crown" };
+    const FEATURE: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Feature", name: "Feature", color: "773B93", icon: "icon_crown" };
+    const STORY: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.UserStory", name: "User Story", color: "009CCC", icon: "icon_clipboard" };
+    const PBI: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.ProductBacklogItem", name: "Product Backlog Item", color: "009CCC", icon: "icon_clipboard" };
+    const REQUIREMENT: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Requirement", name: "Requirement", color: "009CCC", icon: "icon_clipboard" };
+    const ISSUE: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Issue", name: "Issue", color: "339947", icon: "icon_clipboard" };
+    const TASK: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Task", name: "Task", color: "F2CB1D", icon: "icon_clipboard" };
+    const BUG: SystemWorkItemType = SystemWorkItemType { reference: "Microsoft.Bug", name: "Bug", color: "CC293D", icon: "icon_bug" };
+    match parent_id {
+        SCRUM => &[EPIC, FEATURE, PBI, TASK, BUG],
+        CMMI => &[EPIC, FEATURE, REQUIREMENT, TASK, BUG],
+        BASIC => &[EPIC, ISSUE, TASK],
+        _ => &[EPIC, FEATURE, STORY, TASK, BUG],
+    }
+}
+
+fn work_item_types(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    tail: &[String],
+    body: &[u8],
+) -> Response {
+    let process_key = pct_decode(&tail[0]);
+    let type_tail = &tail[2..];
+    if type_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    }
+    let Some((owner, process_id, parent_id)) = resolve_type_process(state, org, project, process_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "processus introuvable");
+    };
+    if type_tail.is_empty() {
+        if method == Method::GET {
+            return Json(page(process_work_item_types(state, org, &owner, &process_id, &parent_id))).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match work_item_type_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_process(&process_id).is_some() {
+                return fail(StatusCode::BAD_REQUEST, "processus système");
+            }
+            return match work_item_type_create(state, org, &owner, &process_id, &parent_id, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&type_tail[0]);
+    if let Some(system) = system_work_item_types(&parent_id).iter().find(|item| type_matches_system(item, key.trim())) {
+        if method == Method::GET {
+            return Json(dress_system_type(org, &owner, &process_id, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "type système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::GET {
+        return match locate_work_item_type(state, org, &owner, &process_id, key.trim()) {
+            Some(found) => Json(dress_work_item_type(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "type introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_work_item_type(state, org, &owner, &process_id, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "type introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_TYPES))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn type_matches_system(item: &SystemWorkItemType, key: &str) -> bool {
+    item.reference.eq_ignore_ascii_case(key) || item.name.eq_ignore_ascii_case(key)
+}
+
+fn resolve_type_process(state: &AppState, org: &str, project: Option<&str>, key: &str) -> Option<(String, String, String)> {
+    if let Some(system) = system_process(key) {
+        let owner = project.unwrap_or("").to_string();
+        return Some((owner, system.type_id.to_string(), system.type_id.to_string()));
+    }
+    let (owner, item) = locate_process(state, org, project, key)?;
+    let parent = item_text(&item, "parentProcessTypeId")?;
+    Some((owner, item_id(&item), parent))
+}
+
+fn process_work_item_types(state: &AppState, org: &str, project: &str, process_id: &str, parent_id: &str) -> Vec<Value> {
+    let mut rows: Vec<Value> = system_work_item_types(parent_id)
+        .iter()
+        .map(|item| dress_system_type(org, project, process_id, item))
+        .collect();
+    let mut custom = list_work_item_types(state, org, project, process_id);
+    custom.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows.extend(custom.into_iter().map(|item| dress_work_item_type(org, project, item)));
+    rows
+}
+
+fn list_work_item_types(state: &AppState, org: &str, project: &str, process_id: &str) -> Vec<Value> {
+    state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(WORK_ITEM_TYPES))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item_text(item, "processId").is_some_and(|stored| stored == process_id))
+            .collect()
+    })
+}
+
+fn locate_work_item_type(state: &AppState, org: &str, project: &str, process_id: &str, key: &str) -> Option<Value> {
+    list_work_item_types(state, org, project, process_id).into_iter().find(|item| {
+        item_id(item) == key
+            || item_text(item, "referenceName").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+            || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_work_item_type_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_TYPES) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("wit-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn work_item_type_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    parent_id: &str,
+    parsed: (String, String, String, String, bool, String),
+) -> Result<Value, &'static str> {
+    let (name, description, color, icon, disabled, reference) = parsed;
+    if system_work_item_types(parent_id).iter().any(|item| item.name.eq_ignore_ascii_case(&name) || item.reference.eq_ignore_ascii_case(&reference)) {
+        return Err("type existant");
+    }
+    let id = format!("wit-{}", next_work_item_type_id(state, org));
+    let item = json!({
+        "id": id,
+        "referenceName": reference,
+        "name": name,
+        "description": description,
+        "color": color,
+        "icon": icon,
+        "isDisabled": disabled,
+        "customizationType": "custom",
+        "processId": process_id,
+        "inherits": Value::Null
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("type introuvable");
+        };
+        let existing = stored.list_bucket(WORK_ITEM_TYPES);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+        }) {
+            return Err("type existant");
+        }
+        if existing.iter().any(|stored| item_text(stored, "referenceName").is_some_and(|current| current.eq_ignore_ascii_case(&reference))) {
+            return Err("référence existante");
+        }
+        stored.put_bucket(WORK_ITEM_TYPES, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_work_item_type(org, project, item))
+}
+
+fn work_item_type_payload(body: &[u8]) -> Result<(String, String, String, String, bool, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("type illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string) else {
+        return Err("nom absent");
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => return Err("description absente"),
+    };
+    let color = match object.get("color") {
+        None => "009CCC".to_string(),
+        Some(Value::String(value)) if work_item_color(value.trim()) => value.trim().trim_start_matches('#').to_ascii_uppercase(),
+        Some(_) => return Err("couleur absente"),
+    };
+    let icon = match object.get("icon") {
+        None => "icon_clipboard".to_string(),
+        Some(Value::String(value)) if matches!(value.as_str(), "icon_clipboard" | "icon_crown" | "icon_airplane" | "icon_bug") => value.clone(),
+        Some(_) => return Err("icône absente"),
+    };
+    let disabled = match object.get("isDisabled") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("état absent"),
+    };
+    let reference = match object.get("referenceName") {
+        None => work_item_reference(&name).ok_or("référence absente")?,
+        Some(Value::String(value)) if work_item_reference_token(value.trim()) => value.trim().to_string(),
+        Some(_) => return Err("référence absente"),
+    };
+    Ok((name, description, color, icon, disabled, reference))
+}
+
+fn work_item_color(value: &str) -> bool {
+    let value = value.trim_start_matches('#');
+    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn work_item_reference(name: &str) -> Option<String> {
+    let slug: String = name.chars().filter(|char| char.is_ascii_alphanumeric()).collect();
+    let reference = format!("Custom.{slug}");
+    work_item_reference_token(&reference).then_some(reference)
+}
+
+fn work_item_reference_token(value: &str) -> bool {
+    let Some(slug) = value.strip_prefix("Custom.") else {
+        return false;
+    };
+    let mut chars = slug.chars();
+    matches!(chars.next(), Some(char) if char.is_ascii_alphabetic()) && chars.all(|char| char.is_ascii_alphanumeric()) && !slug.contains('.')
+}
+
+fn dress_system_type(org: &str, project: &str, process_id: &str, item: &SystemWorkItemType) -> Value {
+    json!({
+        "id": item.reference,
+        "referenceName": item.reference,
+        "name": item.name,
+        "description": "",
+        "color": item.color,
+        "icon": item.icon,
+        "isDisabled": false,
+        "customizationType": "system",
+        "processId": process_id,
+        "inherits": Value::Null,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{}", item.reference)
+    })
+}
+
+fn dress_work_item_type(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "referenceName").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}")));
     }
     item
 }

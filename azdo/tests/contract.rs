@@ -27981,3 +27981,274 @@ async fn removing_one_inherited_process_keeps_the_sibling_the_group_entitlement_
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("processus introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_work_item_type_keeps_the_sibling_the_process_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let agile = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+    let scrum = "6b724908-ef14-45cf-84f8-768b5384da45";
+    let agile_types = format!("/azurz/AzurzDemo/_apis/work/processes/{agile}/workitemtypes?api-version=7.1");
+
+    async fn create_process(app: &axum::Router, auth: &str, project: &str, name: &str, parent: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/work/processes?api-version=7.1");
+        let body = format!(r#"{{"name":"{name}","parentProcessTypeId":"{parent}"}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        created["typeId"].as_str().unwrap().to_string()
+    }
+
+    async fn create_type(app: &axum::Router, auth: &str, project: &str, process: &str, body: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/work/processes/{process}/workitemtypes?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("wit-"), "{created}");
+        assert_eq!(created["customizationType"], "custom");
+        assert_eq!(created["processId"], process);
+        assert_eq!(created["project"], project);
+        assert!(created["inherits"].is_null(), "{created}");
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!(
+                "/{project}/_apis/work/processes/{process}/workitemtypes/{}",
+                created["referenceName"].as_str().unwrap()
+            )),
+            "{created}"
+        );
+        created
+    }
+
+    let (status, body, _) = call(&app, "GET", &agile_types, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let catalog: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(catalog["count"], 5, "{body}");
+    assert_eq!(catalog["value"][2]["name"], "User Story");
+    assert_eq!(catalog["value"][2]["referenceName"], "Microsoft.UserStory");
+    assert_eq!(catalog["value"][2]["customizationType"], "system");
+    let (status, body, _) = call(&app, "DELETE", &agile_types, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{agile}/workitemtypes/Microsoft.Bug?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type système"), "{body}");
+    let (status, body, _) = call(&app, "POST", &agile_types, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("processus système"), "{body}");
+    let (status, body, _) = call(&app, "POST", &agile_types, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+
+    let ligne = create_process(&app, &auth, "AzurzDemo", "Ligne", agile).await;
+    let types = format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes?api-version=7.1");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("type illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe","description":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    for payload in [r#"{"name":"Pompe","color":"bleu"}"#, r#"{"name":"Pompe","color":"009CC"}"#, r#"{"name":"Pompe","color":1}"#] {
+        let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("couleur absente"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe","icon":"icon_star"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("icône absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe","isDisabled":"false"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état absent"), "{body}");
+    for payload in [r#"{"name":"!!"}"#, r#"{"name":"Pompe","referenceName":"Pompe"}"#] {
+        let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("référence absente"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"Bug"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type existant"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Microsoft.Bug?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type système"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde = create_process(&app, &auth, "AzurzDemo", "Sonde", agile).await;
+    let atelier_process = create_process(&app, &auth, "Atelier", "Atelier", scrum).await;
+    let pompe = create_type(&app, &auth, "AzurzDemo", &ligne, r#"{"name":"Pompe"}"#).await;
+    assert_eq!(pompe["referenceName"], "Custom.Pompe");
+    assert_eq!(pompe["color"], "009CCC");
+    assert_eq!(pompe["icon"], "icon_clipboard");
+    assert_eq!(pompe["isDisabled"], false);
+    assert_eq!(pompe["description"], "");
+    let relais = create_type(
+        &app,
+        &auth,
+        "AzurzDemo",
+        &ligne,
+        r##"{"name":"Relais","description":"ligne","color":"#cc293d","icon":"icon_airplane","isDisabled":true}"##,
+    )
+    .await;
+    assert_eq!(relais["color"], "CC293D");
+    assert_eq!(relais["icon"], "icon_airplane");
+    assert_eq!(relais["isDisabled"], true);
+    assert_eq!(relais["description"], "ligne");
+    assert_eq!(relais["referenceName"], "Custom.Relais");
+    let atelier = create_type(&app, &auth, "Atelier", &atelier_process, r#"{"name":"Atelier","icon":"icon_crown"}"#).await;
+    assert_eq!(atelier["icon"], "icon_crown");
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type existant"), "{body}");
+    let (status, body, _) = call(&app, "POST", &types, Some(&auth), None, "application/json", Some(r#"{"name":"Moteur","referenceName":"Custom.Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("référence existante"), "{body}");
+    let same = create_type(&app, &auth, "Atelier", &atelier_process, r#"{"name":"Pompe"}"#).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{}?api-version=7.1", same["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/Atelier/_apis/work/processes/{atelier_process}/workitemtypes/Custom.Pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = call(&app, "GET", &types, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 7, "{body}");
+    assert!(listed["value"].as_array().unwrap().iter().any(|item| item["referenceName"] == "Microsoft.Bug" && item["customizationType"] == "system"), "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe["id"]);
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais["id"]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Relais?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let by_name: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_name["referenceName"], "Custom.Relais");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Custom.Pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Custom.Pompe/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Custom.Pompe/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("type introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/Custom.Pompe?api-version=7.1");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &types, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 6, "{body}");
+    assert!(kept["value"].as_array().unwrap().iter().all(|item| item["name"] != "Pompe"), "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais["id"]);
+    assert_eq!(sibling["color"], "CC293D");
+    assert_eq!(sibling["icon"], "icon_airplane");
+    assert_eq!(sibling["isDisabled"], true);
+    assert!(kept["value"].as_array().unwrap().iter().any(|item| item["referenceName"] == "Microsoft.Bug"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/work/processes/{atelier_process}/workitemtypes/{}?api-version=7.1", atelier["referenceName"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["name"], "Atelier");
+    assert_eq!(kept_other["icon"], "icon_crown");
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/work/processes/{sonde}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_process: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_process["name"], "Sonde");
+    assert_eq!(kept_process["typeId"], sonde);
+    assert_eq!(kept_process["parentProcessTypeId"], agile);
+    assert_eq!(kept_process["customizationType"], "Inherited");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_parent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_parent["name"], "Ligne");
+    assert_eq!(kept_parent["typeId"], ligne);
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("type introuvable"), "{body}");
+}
