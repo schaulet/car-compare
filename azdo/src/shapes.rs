@@ -5909,6 +5909,9 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         }
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("retentionpolicies") {
+        return feed_retention(state, method, org, project, feed_id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("permissions") {
         return feed_permissions(state, method, org, project, feed_id, rest, body);
     }
@@ -5948,6 +5951,95 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "flux introuvable")
+}
+
+fn feed_retention(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(feed) = get_item(state, org, project, "packaging/feeds", feed_id) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let stored_feed = text_of(&feed, "id").unwrap_or_default();
+    let key = format!("packaging/feeds/{stored_feed}/retentionpolicies");
+    if rest.len() != 4 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "politique introuvable");
+    }
+    if method == Method::GET {
+        return match get_item(state, org, project, &key, "policy") {
+            Some(item) => Json(dress_feed_retention(org, project, &stored_feed, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "politique introuvable"),
+        };
+    }
+    if method == Method::PUT {
+        let item = match retention_policy(body) {
+            Ok(item) => item,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        put_item(state, org, project, &key, item.clone());
+        return Json(dress_feed_retention(org, project, &stored_feed, item)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, &key, "policy") {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "politique introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn retention_policy(body: &[u8]) -> Result<Value, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("politique absente");
+    };
+    if let Some(age) = object.get("ageLimitInDays") {
+        retention_limit(age, "limite d'âge absente")?;
+    }
+    let count = match object.get("countLimit") {
+        None => None,
+        Some(value) => Some(retention_limit(value, "limite absente")?),
+    };
+    let days = match object.get("daysToKeepRecentlyDownloadedPackages") {
+        None => None,
+        Some(value) => Some(retention_limit(value, "durée absente")?),
+    };
+    if count.is_none() && days.is_none() {
+        return Err("politique absente");
+    }
+    let mut item = Map::new();
+    item.insert("id".into(), json!("policy"));
+    if let Some(count) = count {
+        item.insert("countLimit".into(), json!(count));
+    }
+    if let Some(days) = days {
+        item.insert("daysToKeepRecentlyDownloadedPackages".into(), json!(days));
+    }
+    Ok(Value::Object(item))
+}
+
+fn retention_limit(value: &Value, missing: &'static str) -> Result<i64, &'static str> {
+    let Some(number) = json_i64(value) else {
+        return Err(missing);
+    };
+    if number < 0 || number > i64::from(i32::MAX) {
+        return Err(missing);
+    }
+    Ok(number)
+}
+
+fn dress_feed_retention(org: &str, project: &str, feed_id: &str, mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        object.remove("id");
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/packaging/feeds/{feed_id}/retentionpolicies")),
+        );
+    }
+    item
 }
 
 fn feed_permissions(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {

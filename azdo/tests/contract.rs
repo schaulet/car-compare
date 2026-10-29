@@ -23326,3 +23326,293 @@ async fn removing_one_feed_permission_keeps_the_sibling_and_the_other_project() 
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("permission introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_feed_retention_policy_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn open_feed(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let pompe = open_feed(&app, &auth, "AzurzDemo", "pompe").await;
+    let ada = open_feed(&app, &auth, "AzurzDemo", "ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = open_feed(&app, &auth, "Atelier", "pompe").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/","protocol":"npm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let policy = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/retentionpolicies?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &policy, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("politique introuvable"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("politique absente"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some("null")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("politique absente"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("politique absente"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some(r#"{"countLimit":"10"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("limite absente"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some(r#"{"countLimit":-1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("limite absente"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &policy, Some(&auth), None, "application/json", Some(r#"{"countLimit":1.5}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("limite absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &policy,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"countLimit":10,"daysToKeepRecentlyDownloadedPackages":"30"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("durée absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &policy,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"countLimit":10,"daysToKeepRecentlyDownloadedPackages":-1}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("durée absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &policy,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"countLimit":10,"ageLimitInDays":"365"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("limite d'âge absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &policy, Some(&auth), None, "application/json", Some(r#"{"countLimit":10}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/feed-missing/retentionpolicies?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"countLimit":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    async fn open_policy(app: &axum::Router, auth: &str, project: &str, feed: &str, body: &str) -> serde_json::Value {
+        let (status, body_text, _) = call(
+            app,
+            "PUT",
+            &format!("/azurz/{project}/_apis/packaging/feeds/{feed}/retentionpolicies?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body_text}");
+        serde_json::from_str(&body_text).unwrap()
+    }
+
+    let kept = open_policy(
+        &app,
+        &auth,
+        "AzurzDemo",
+        &pompe,
+        r#"{"countLimit":10,"daysToKeepRecentlyDownloadedPackages":30,"ageLimitInDays":365}"#,
+    )
+    .await;
+    assert_eq!(kept["countLimit"], 10);
+    assert_eq!(kept["daysToKeepRecentlyDownloadedPackages"], 30);
+    assert!(kept.get("ageLimitInDays").is_none(), "{kept}");
+    assert!(kept.get("id").is_none(), "{kept}");
+    assert!(kept["url"].as_str().unwrap().ends_with(&format!("/feeds/{pompe}/retentionpolicies")), "{kept}");
+    let replaced = open_policy(&app, &auth, "AzurzDemo", &pompe, r#"{"countLimit":4}"#).await;
+    assert_eq!(replaced["countLimit"], 4);
+    assert!(replaced.get("daysToKeepRecentlyDownloadedPackages").is_none(), "{replaced}");
+    let restored = open_policy(
+        &app,
+        &auth,
+        "AzurzDemo",
+        &pompe,
+        r#"{"countLimit":10,"daysToKeepRecentlyDownloadedPackages":30}"#,
+    )
+    .await;
+    assert_eq!(restored["countLimit"], 10);
+    assert_eq!(restored["daysToKeepRecentlyDownloadedPackages"], 30);
+    let sibling = open_policy(
+        &app,
+        &auth,
+        "AzurzDemo",
+        &ada,
+        r#"{"countLimit":5,"daysToKeepRecentlyDownloadedPackages":7}"#,
+    )
+    .await;
+    assert_eq!(sibling["countLimit"], 5);
+    assert_eq!(sibling["daysToKeepRecentlyDownloadedPackages"], 7);
+    let other_policy = open_policy(
+        &app,
+        &auth,
+        "Atelier",
+        &atelier,
+        r#"{"countLimit":5,"daysToKeepRecentlyDownloadedPackages":7}"#,
+    )
+    .await;
+    assert_eq!(other_policy["countLimit"], 5);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/retentionpolicies/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/retentionpolicies/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("politique introuvable"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &policy, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &policy, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("politique introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/retentionpolicies?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["countLimit"], 5);
+    assert_eq!(ada_kept["daysToKeepRecentlyDownloadedPackages"], 7);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier}/retentionpolicies?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["countLimit"], 5);
+    assert_eq!(other["daysToKeepRecentlyDownloadedPackages"], 7);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_feed["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let packages: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(packages["value"][0]["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sources: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sources["value"][0]["name"], "npmjs");
+    let (status, body, _) = call(&app, "DELETE", &policy, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("politique introuvable"), "{body}");
+}
