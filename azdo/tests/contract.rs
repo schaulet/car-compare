@@ -2976,3 +2976,180 @@ async fn commit_statuses_keep_history_and_the_latest_per_context() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn teams_keep_members_and_their_own_backlog_settings() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let default_team = listed["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "AzurzDemo Team")
+        .unwrap();
+    assert_eq!(default_team["projectName"], "AzurzDemo");
+    assert_eq!(default_team["projectId"], "azurz-demo");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne A","description":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let team_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["description"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Atelier nord"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let patched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(patched["name"], "Ligne A");
+    assert_eq!(patched["description"], "Atelier nord");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}/members?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let members: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(members["value"][0]["identity"]["uniqueName"], "azurz");
+    assert_eq!(members["value"][0]["isTeamAdmin"], true);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}/members?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Nadia","uniqueName":"nadia@azurz.lab","isTeamAdmin":false}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}/members?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let members: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(members["count"], 2);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Ligne%20A/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(settings["bugsBehavior"], "off");
+    assert_eq!(settings["defaultIterationMacro"], "@currentIteration");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Ligne%20A/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"bugsBehavior":"asTasks","workingDays":["monday","tuesday","wednesday"]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated["bugsBehavior"], "asTasks");
+    assert_eq!(updated["workingDays"].as_array().unwrap().len(), 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let defaults: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(defaults["bugsBehavior"], "off", "{body}");
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Ligne%20A/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"bugsBehavior":"asBugs"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/_apis/projects/AzurzDemo/teams/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/projects/AzurzDemo/teams/{team_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

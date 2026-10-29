@@ -20,7 +20,7 @@ pub fn dispatch(
     let response = match (area.as_str(), resource.as_str()) {
         ("work", "boards") => boards(state, method, org, project, team, rest),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
-        ("work", "teamsettings") => team_settings(state, method, org, project, rest, body),
+        ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
         ("serviceendpoint", "endpoints") => endpoints(state, method, org, project, rest, body),
         _ => return None,
@@ -73,7 +73,15 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
     .into_response()
 }
 
-fn team_settings(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+fn team_settings(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
     if rest.len() >= 3 && rest[2].eq_ignore_ascii_case("iterations") {
         if rest.len() >= 5 {
             let iteration = &rest[3];
@@ -101,15 +109,274 @@ fn team_settings(state: &AppState, method: &Method, org: &str, project: &str, re
         }
         return Json(page(value.into_iter().map(dress_iteration).collect())).into_response();
     }
-    if method != Method::GET {
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if method == Method::GET {
+        return Json(team_settings_document(state, org, project, &team_id)).into_response();
+    }
+    if method == Method::PATCH || method == Method::PUT {
+        return patch_team_settings(state, org, project, &team_id, body);
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+pub fn teams(state: &AppState, method: &Method, org: &str, project_key: &str, tail: &[String], body: &[u8]) -> Response {
+    let Some(project_name) = state.read(|db| db.project_name(org, project_key)) else {
+        return fail(StatusCode::NOT_FOUND, "projet inconnu");
+    };
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project_key) {
+            stored.seed_missing(&project_name);
+        }
+    });
+    let project_id = state
+        .read(|db| db.project(org, project_key).map(|stored| stored.id.clone()))
+        .unwrap_or_default();
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = team_rows(state, org, project_key)
+                .into_iter()
+                .map(|item| dress_team(org, &project_name, &project_id, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            return create_team(state, org, project_key, &project_name, &project_id, body);
+        }
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
-    Json(json!({
+    let Some(team) = find_team(state, org, project_key, &tail[0]) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    let team_id = item_id(&team);
+    if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("members")) {
+        return team_members(state, method, org, project_key, &team_id, body);
+    }
+    if tail.len() != 1 {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    }
+    if method == Method::GET {
+        return Json(dress_team(org, &project_name, &project_id, team)).into_response();
+    }
+    if method == Method::PATCH || method == Method::PUT {
+        return patch_team(state, org, project_key, &project_name, &project_id, &team_id, body);
+    }
+    if method == Method::DELETE {
+        if team_id == "1" {
+            return fail(StatusCode::BAD_REQUEST, "équipe par défaut");
+        }
+        let removed = state.write(|db| {
+            db.project_mut(org, project_key)
+                .and_then(|stored| stored.buckets.get_mut("core/teams"))
+                .is_some_and(|bucket| bucket.remove(&team_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "équipe introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_team(state: &AppState, org: &str, project_key: &str, project_name: &str, project_id: &str, body: &[u8]) -> Response {
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let name = item_text(&payload, "name").unwrap_or_default();
+    if name.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    if team_rows(state, org, project_key).iter().any(|item| item_text(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))) {
+        return fail(StatusCode::BAD_REQUEST, "équipe existante");
+    }
+    let description = item_text(&payload, "description").unwrap_or_default();
+    let created = state.write(|db| {
+        let stored = db.project_mut(org, project_key)?;
+        let id = format!("team-{}", stored.list_bucket("core/teams").len() + 1);
+        let item = json!({"id": id, "name": name, "description": description});
+        stored.put_bucket("core/teams", item.clone());
+        stored.put_bucket(&format!("core/teams/{id}/members"), member_item("azurz", "azurz", true));
+        Some(item)
+    });
+    match created {
+        Some(item) => Json(dress_team(org, project_name, project_id, item)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+    }
+}
+
+fn patch_team(
+    state: &AppState,
+    org: &str,
+    project_key: &str,
+    project_name: &str,
+    project_id: &str,
+    team_id: &str,
+    body: &[u8],
+) -> Response {
+    let payload = parse_json(body).unwrap_or(json!({}));
+    if let Some(name) = payload.get("name").and_then(|value| value.as_str()) {
+        if name.trim().is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom absent");
+        }
+        if team_rows(state, org, project_key).iter().any(|item| {
+            item_id(item) != team_id && item_text(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(name))
+        }) {
+            return fail(StatusCode::BAD_REQUEST, "équipe existante");
+        }
+    }
+    let updated = state.write(|db| {
+        let stored = db.project_mut(org, project_key)?;
+        let mut item = stored.get_bucket("core/teams", team_id)?;
+        if let Some(object) = item.as_object_mut() {
+            if let Some(name) = payload.get("name").and_then(|value| value.as_str()) {
+                object.insert("name".into(), json!(name));
+            }
+            if let Some(description) = payload.get("description").and_then(|value| value.as_str()) {
+                object.insert("description".into(), json!(description));
+            }
+        }
+        Some(stored.put_bucket("core/teams", item))
+    });
+    match updated {
+        Some(item) => Json(dress_team(org, project_name, project_id, item)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "équipe introuvable"),
+    }
+}
+
+fn team_members(state: &AppState, method: &Method, org: &str, project_key: &str, team_id: &str, body: &[u8]) -> Response {
+    let key = format!("core/teams/{team_id}/members");
+    if method == Method::GET {
+        let value = state.read(|db| db.project(org, project_key).map(|stored| stored.list_bucket(&key)).unwrap_or_default());
+        return Json(page(value)).into_response();
+    }
+    if method != Method::POST && method != Method::PUT {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let unique = item_text(&payload, "uniqueName").unwrap_or_default();
+    if unique.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "identité absente");
+    }
+    let display = item_text(&payload, "displayName").unwrap_or_else(|| unique.clone());
+    let admin = payload.get("isTeamAdmin").and_then(|value| value.as_bool()).unwrap_or(false);
+    let saved = state.write(|db| {
+        let stored = db.project_mut(org, project_key)?;
+        Some(stored.put_bucket(&key, member_item(&display, &unique, admin)))
+    });
+    match saved {
+        Some(item) => Json(item).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+    }
+}
+
+fn resolve_team_id(state: &AppState, org: &str, project_key: &str, team: Option<&str>) -> Option<String> {
+    let project_name = state.read(|db| db.project_name(org, project_key))?;
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project_key) {
+            stored.seed_missing(&project_name);
+        }
+    });
+    let token = team.unwrap_or("1");
+    find_team(state, org, project_key, token).map(|item| item_id(&item))
+}
+
+fn team_settings_document(state: &AppState, org: &str, project: &str, team_id: &str) -> Value {
+    let key = settings_key(team_id);
+    state
+        .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, team_id)))
+        .map(settings_body)
+        .unwrap_or_else(|| default_team_settings(project))
+}
+
+fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str, body: &[u8]) -> Response {
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let mut current = team_settings_document(state, org, project, team_id);
+    if let Some(behavior) = payload.get("bugsBehavior").and_then(|value| value.as_str()) {
+        if !matches!(behavior, "off" | "asTasks" | "asRequirements") {
+            return fail(StatusCode::BAD_REQUEST, "comportement des bugs inconnu");
+        }
+        if let Some(object) = current.as_object_mut() {
+            object.insert("bugsBehavior".into(), json!(behavior));
+        }
+    }
+    if let Some(days) = payload.get("workingDays").and_then(|value| value.as_array()) {
+        let mut normalized = Vec::new();
+        for day in days {
+            let Some(name) = day.as_str().map(|value| value.to_ascii_lowercase()) else {
+                return fail(StatusCode::BAD_REQUEST, "jour ouvré inconnu");
+            };
+            if !matches!(name.as_str(), "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday") {
+                return fail(StatusCode::BAD_REQUEST, "jour ouvré inconnu");
+            }
+            normalized.push(json!(name));
+        }
+        if let Some(object) = current.as_object_mut() {
+            object.insert("workingDays".into(), json!(normalized));
+        }
+    }
+    if let Some(iteration) = payload.get("backlogIteration").filter(|value| value.is_object()) {
+        if let Some(object) = current.as_object_mut() {
+            object.insert("backlogIteration".into(), iteration.clone());
+        }
+    }
+    if let Some(object) = current.as_object_mut() {
+        object.insert("id".into(), json!(team_id));
+    }
+    let key = settings_key(team_id);
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket(&key, current.clone());
+        }
+    });
+    Json(settings_body(current)).into_response()
+}
+
+fn default_team_settings(project: &str) -> Value {
+    json!({
         "backlogIteration": {"name": project, "path": format!("{project}\\")},
         "defaultIteration": {"name": "Sprint 1"},
-        "defaultIterationMacro": "@currentIteration"
-    }))
-    .into_response()
+        "defaultIterationMacro": "@currentIteration",
+        "bugsBehavior": "off",
+        "workingDays": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    })
+}
+
+fn settings_key(team_id: &str) -> String {
+    format!("work/teamsettings/document/{team_id}")
+}
+
+fn settings_body(mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        object.remove("id");
+    }
+    item
+}
+
+fn team_rows(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| db.project(org, project).map(|stored| stored.list_bucket("core/teams")).unwrap_or_default())
+}
+
+fn find_team(state: &AppState, org: &str, project: &str, token: &str) -> Option<Value> {
+    team_rows(state, org, project).into_iter().find(|item| item_id(item) == token || item_text(item, "name").as_deref() == Some(token))
+}
+
+fn dress_team(org: &str, project_name: &str, project_id: &str, mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        let id = object.get("id").map(value_text).unwrap_or_default();
+        object.insert("projectName".into(), json!(project_name));
+        object.insert("projectId".into(), json!(project_id));
+        object.insert("url".into(), json!(format!("/{org}/_apis/projects/{project_name}/teams/{id}")));
+        object.entry("description").or_insert(json!(""));
+    }
+    item
+}
+
+fn member_item(display: &str, unique: &str, admin: bool) -> Value {
+    json!({
+        "id": unique,
+        "isTeamAdmin": admin,
+        "identity": {"id": unique, "displayName": display, "uniqueName": unique}
+    })
 }
 
 fn capacities(state: &AppState, method: &Method, org: &str, project: &str, iteration: &str, rest: &[String], body: &[u8]) -> Response {

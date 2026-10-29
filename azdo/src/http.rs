@@ -236,17 +236,11 @@ impl AppState {
             });
             return Json(created).into_response();
         }
+        if rest.len() >= 3 && rest[2].eq_ignore_ascii_case("teams") {
+            return crate::tracking::teams(self, method, org, &rest[1], &rest[3..], body);
+        }
         if rest.len() >= 2 && method == Method::GET {
             let key = &rest[1];
-            if rest.len() == 3 && rest[2].eq_ignore_ascii_case("teams") {
-                let value = self.read(|db| {
-                    db.project(org, key)
-                        .and_then(|project| project.buckets.get("core/teams"))
-                        .map(Bucket::list)
-                        .unwrap_or(json!({"count": 0, "value": []}))
-                });
-                return Json(value).into_response();
-            }
             let found = self.read(|db| {
                 let name = db.project_name(org, key)?;
                 let project = db.project(org, key)?;

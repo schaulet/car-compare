@@ -133,6 +133,7 @@
       <a href="/__ORG__/__PROJECT__/_artifacts">Artefacts</a>
       <a href="/__ORG__/__PROJECT__/_wiki">Wiki</a>
       <a href="/__ORG__/__PROJECT__/_hooks">Abonnements</a>
+      <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
     <main id="view"></main>
@@ -978,6 +979,62 @@
               { op: "add", path: "/fields/System.Title", value: document.getElementById("hook-title").value || "Élément" },
             ], "application/json-patch+json");
             location.reload();
+          };
+          return;
+        }
+        if (hub === "/_teams") {
+          const teamsRoot = "/" + org + "/_apis/projects/" + encodeURIComponent(project) + "/teams";
+          const listed = await api("GET", teamsRoot + "?api-version=7.1");
+          const selected = new URLSearchParams(location.search).get("team") || "";
+          const rows = (listed.value || []).map((team) => "<tr class='team click' data-id='" + esc(team.id) + "'><td>" + esc(team.name) + "</td><td>" + esc(team.description || "") + "</td></tr>").join("");
+          const table = rows ? "<table id='teams'><thead><tr><th>Équipe</th><th>Description</th></tr></thead><tbody>" + rows + "</tbody></table>" : "<p class='sub'>Aucune équipe.</p>";
+          view.innerHTML = "<h1>Équipes</h1><div class='command'><input id='team-name' placeholder='Nom' /><input id='team-description' placeholder='Description' /><button id='team-add' type='button'>Créer</button></div>" + table + "<section id='team-card' class='panel' hidden></section>";
+          async function openTeam(id) {
+            const team = (listed.value || []).find((item) => item.id === id);
+            if (!team) return;
+            const members = await api("GET", teamsRoot + "/" + encodeURIComponent(id) + "/members?api-version=7.1");
+            const settings = await api("GET", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(team.name) + "/_apis/work/teamsettings?api-version=7.1");
+            const card = document.getElementById("team-card");
+            card.hidden = false;
+            const people = (members.value || []).map((member) => "<li>" + esc(member.identity && member.identity.displayName) + " · " + esc(member.identity && member.identity.uniqueName) + (member.isTeamAdmin ? " · admin" : "") + "</li>").join("") || "<li>Aucun membre.</li>";
+            const remove = id === "1" ? "" : "<button id='team-delete' type='button'>Supprimer</button>";
+            card.innerHTML = "<h2>" + esc(team.name) + "</h2><p class='sub' id='team-blurb'>" + esc(team.description || "") + "</p><h3>Membres</h3><ul id='member-list'>" + people + "</ul><div class='row'><input id='member-name' placeholder='Nom' /><input id='member-unique' placeholder='identite@azurz.lab' /><button id='member-add' type='button'>Ajouter</button></div><h3>Réglages</h3><div class='row'><select id='bugs-behavior'><option value='off'>Bugs hors backlog</option><option value='asTasks'>Bugs comme des tâches</option><option value='asRequirements'>Bugs comme des exigences</option></select><input id='working-days' /><button id='settings-save' type='button'>Enregistrer</button>" + remove + "</div>";
+            document.getElementById("bugs-behavior").value = settings.bugsBehavior || "off";
+            document.getElementById("working-days").value = (settings.workingDays || []).join(",");
+            document.getElementById("member-add").onclick = async () => {
+              await api("POST", teamsRoot + "/" + encodeURIComponent(id) + "/members?api-version=7.1", {
+                displayName: document.getElementById("member-name").value || "Membre",
+                uniqueName: document.getElementById("member-unique").value || "membre@azurz.lab",
+                isTeamAdmin: false,
+              });
+              location.href = location.pathname + "?team=" + encodeURIComponent(id);
+            };
+            document.getElementById("settings-save").onclick = async () => {
+              const workingDays = document.getElementById("working-days").value.split(",").map((day) => day.trim()).filter(Boolean);
+              await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(team.name) + "/_apis/work/teamsettings?api-version=7.1", {
+                bugsBehavior: document.getElementById("bugs-behavior").value,
+                workingDays: workingDays,
+              });
+              location.href = location.pathname + "?team=" + encodeURIComponent(id);
+            };
+            const removeButton = document.getElementById("team-delete");
+            if (removeButton) {
+              removeButton.onclick = async () => {
+                await api("DELETE", teamsRoot + "/" + encodeURIComponent(id) + "?api-version=7.1");
+                location.href = location.pathname;
+              };
+            }
+          }
+          if (selected) await openTeam(selected);
+          document.querySelectorAll("tr.team").forEach((row) => {
+            row.onclick = () => { location.href = location.pathname + "?team=" + encodeURIComponent(row.dataset.id); };
+          });
+          document.getElementById("team-add").onclick = async () => {
+            const created = await api("POST", teamsRoot + "?api-version=7.1", {
+              name: document.getElementById("team-name").value || "Équipe",
+              description: document.getElementById("team-description").value || "",
+            });
+            location.href = location.pathname + "?team=" + encodeURIComponent(created.id);
           };
           return;
         }
