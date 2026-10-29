@@ -646,10 +646,18 @@
           return;
         }
         if (hub === "/_build") {
-          const [definitions, builds] = await Promise.all([collection("build/definitions"), collection("build/builds")]);
-          const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Pipeline</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
+          const [definitions, builds, groups] = await Promise.all([collection("build/definitions"), collection("build/builds"), collection("distributedtask/variablegroups")]);
+          function groupLabel(item) {
+            return (item.variableGroups || []).map((group) => group.name || group.id).join(", ");
+          }
+          function variableLine(key, variable) {
+            const shown = variable && variable.isSecret ? "••••" : ((variable && variable.value) || "");
+            return key + " = " + shown;
+          }
+          const defs = definitions.length ? "<table id='definitions'><thead><tr><th>ID</th><th>Pipeline</th><th>Groupe</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(groupLabel(item)) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
           const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>File</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.queue && item.queue.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          const options = groups.map((item) => "<option value='" + esc(item.id) + "'>" + esc(item.name) + "</option>").join("");
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
           function timelineItems(records, parent, depth) {
             return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
               const result = record.result ? " / " + esc(record.result) : "";
@@ -691,6 +699,13 @@
           }
           document.querySelectorAll("tr.build").forEach((row) => {
             row.onclick = async () => {
+              const build = builds.find((item) => String(item.id) === String(row.dataset.id)) || {};
+              const variables = build.variables || {};
+              const keys = Object.keys(variables);
+              const vars = document.getElementById("build-vars");
+              document.getElementById("vars-title").hidden = false;
+              vars.hidden = false;
+              vars.innerHTML = keys.length ? keys.map((key) => "<li>" + esc(variableLine(key, variables[key])) + "</li>").join("") : "<li>Aucune variable.</li>";
               const timeline = await api("GET", root + "/build/builds/" + row.dataset.id + "/timeline?api-version=7.1");
               const list = document.getElementById("timeline");
               document.getElementById("timeline-title").hidden = false;
@@ -703,6 +718,15 @@
               await showArtifacts(row.dataset.id);
             };
           });
+          document.getElementById("def-link").onclick = async () => {
+            const definition = definitions[0];
+            const groupId = document.getElementById("def-group").value;
+            if (!definition || !groupId) return;
+            await api("PUT", root + "/build/definitions/" + encodeURIComponent(definition.id) + "?api-version=7.1", {
+              variableGroups: [{ id: Number(groupId) }],
+            });
+            location.reload();
+          };
           document.getElementById("queue").onclick = async () => {
             const definition = definitions[0];
             if (!definition) return;

@@ -27,7 +27,7 @@ pub fn dispatch(
         ("git", "commits") => git_alias(state, method, org, project, "commits", query, body),
         ("git", "pushes") => git_alias(state, method, org, project, "pushes", query, body),
         ("git", "pullrequests") => pull_requests(state, method, org, project, None, rest, body),
-        ("build", "definitions") => definitions(state, method, org, project, body),
+        ("build", "definitions") => definitions(state, method, org, project, rest, body),
         ("build", "builds") => builds(state, method, org, project, rest, query, body),
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
@@ -2243,24 +2243,114 @@ fn security_namespaces(org: &str) -> Value {
     page(value)
 }
 
-fn definitions(state: &AppState, method: &Method, org: &str, project: &str, body: &[u8]) -> Response {
+fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "build/definitions";
-    if method == Method::GET {
+    if rest.len() == 2 && method == Method::GET {
         let value = list(state, org, project, key)
             .into_iter()
             .map(|item| dress_definition(project, item))
             .collect();
         return Json(page(value)).into_response();
     }
-    if method != Method::POST {
-        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    if rest.len() == 2 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_else(|| "CI".into());
+        let groups = match definition_groups(state, org, project, payload.get("variableGroups")) {
+            Ok(groups) => groups,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let next = list(state, org, project, key)
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let item = dress_definition(
+            project,
+            json!({"id": next, "name": name, "path": "\\", "type": "build", "variableGroups": groups}),
+        );
+        put_item(state, org, project, key, item.clone());
+        return Json(item).into_response();
     }
-    let payload = parse_json(body).unwrap_or(json!({}));
-    let name = text_of(&payload, "name").unwrap_or_else(|| "CI".into());
-    let next = list(state, org, project, key).len() as i64 + 1;
-    let item = dress_definition(project, json!({"id": next, "name": name, "path": "\\", "type": "build"}));
-    put_item(state, org, project, key, item.clone());
-    Json(item).into_response()
+    let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "définition introuvable");
+    }
+    if method == Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_definition(project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "définition introuvable"),
+        };
+    }
+    if method == Method::PUT || method == Method::PATCH {
+        let Some(existing) = get_item(state, org, project, key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "définition introuvable");
+        };
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_else(|| text_of(&existing, "name").unwrap_or_else(|| "CI".into()));
+        let groups = if payload.get("variableGroups").is_some() {
+            match definition_groups(state, org, project, payload.get("variableGroups")) {
+                Ok(groups) => groups,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            }
+        } else {
+            existing.get("variableGroups").cloned().unwrap_or(json!([])).as_array().cloned().unwrap_or_default()
+        };
+        let mut item = existing;
+        item["name"] = json!(name);
+        item["variableGroups"] = json!(groups);
+        let item = dress_definition(project, item);
+        put_item(state, org, project, key, item.clone());
+        return Json(item).into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn definition_groups(state: &AppState, org: &str, project: &str, value: Option<&Value>) -> Result<Vec<Value>, &'static str> {
+    let Some(entries) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = entries.as_array() else {
+        return Err("groupe introuvable");
+    };
+    let mut links = Vec::new();
+    for entry in entries {
+        let id = entry.as_i64().map(|number| number.to_string()).unwrap_or_else(|| value_key(&entry["id"]));
+        if id.is_empty() {
+            return Err("groupe introuvable");
+        }
+        let Some(group) = get_item(state, org, project, "distributedtask/variablegroups", &id) else {
+            return Err("groupe introuvable");
+        };
+        links.push(json!({"id": group.get("id").cloned().unwrap_or(json!(id)), "name": text_of(&group, "name").unwrap_or_default()}));
+    }
+    Ok(links)
+}
+
+fn queue_variables(state: &AppState, org: &str, project: &str, definition: &Value) -> Result<Value, &'static str> {
+    let Some(links) = definition.get("variableGroups").and_then(|value| value.as_array()) else {
+        return Ok(json!({}));
+    };
+    let mut variables = Map::new();
+    for link in links {
+        let id = value_key(&link["id"]);
+        let Some(group) = get_item(state, org, project, "distributedtask/variablegroups", &id) else {
+            return Err("groupe introuvable");
+        };
+        let Some(entries) = group.get("variables").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        for (key, spec) in entries {
+            let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+            let shown = if is_secret {
+                ""
+            } else {
+                spec.get("value").and_then(|value| value.as_str()).unwrap_or("")
+            };
+            variables.insert(key.clone(), json!({"value": shown, "isSecret": is_secret}));
+        }
+    }
+    Ok(Value::Object(variables))
 }
 
 fn build_artifacts(
@@ -2423,11 +2513,23 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             .and_then(|value| value.get("id"))
             .and_then(|value| value.as_i64())
             .unwrap_or(1);
-        let definition_name = list(state, org, project, "build/definitions")
+        let found = list(state, org, project, "build/definitions")
             .into_iter()
-            .find(|item| item.get("id").and_then(|value| value.as_i64()) == Some(definition_id))
-            .and_then(|item| text_of(&item, "name"))
+            .find(|item| item.get("id").and_then(|value| value.as_i64()) == Some(definition_id));
+        let definition_name = found
+            .as_ref()
+            .and_then(|item| text_of(item, "name"))
             .unwrap_or_else(|| "CI".into());
+        let (variables, groups) = match found.as_ref() {
+            Some(definition) => match queue_variables(state, org, project, definition) {
+                Ok(variables) => (
+                    variables,
+                    definition.get("variableGroups").cloned().unwrap_or(json!([])),
+                ),
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            },
+            None => (json!({}), json!([])),
+        };
         let queue = list(state, org, project, "distributedtask/queues")
             .into_iter()
             .next()
@@ -2441,6 +2543,8 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             "sourceBranch": text_of(&payload, "sourceBranch").unwrap_or_else(|| "refs/heads/main".into()),
             "sourceVersion": object_id(&format!("build-{next}")),
             "queue": queue,
+            "variables": variables,
+            "variableGroups": groups,
             "queueTime": "2026-10-29T00:00:00Z",
             "url": format!("/{org}/{project}/_apis/build/builds/{next}"),
             "requestedBy": {"displayName": "azurz"}
@@ -4104,6 +4208,7 @@ fn dress_definition(project: &str, mut item: Value) -> Value {
         object.entry("type").or_insert(json!("build"));
         object.entry("queueStatus").or_insert(json!("enabled"));
         object.entry("revision").or_insert(json!(1));
+        object.entry("variableGroups").or_insert(json!([]));
         object.entry("project").or_insert(json!({"name": project}));
     }
     item

@@ -7514,3 +7514,169 @@ async fn variable_group_hides_a_secret_until_it_is_cleared() {
     let left: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(left["count"], 0);
 }
+
+#[tokio::test]
+async fn build_receives_variables_from_its_group() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seeded["name"], "CI");
+    assert_eq!(seeded["variableGroups"], serde_json::json!([]));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"variableGroups":[{"id":999}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe introuvable"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["variableGroups"], serde_json::json!([]));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","type":"Vsts","variables":{"host":{"value":"ignition","isSecret":false},"token":{"value":"ligne-clef","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let group_id = created["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"variableGroups":[{{"id":{group_id}}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let linked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(linked["variableGroups"][0]["name"], "ligne");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queued["variables"]["host"]["value"], "ignition");
+    assert_eq!(queued["variables"]["token"]["value"], "");
+    assert_eq!(queued["variables"]["token"]["isSecret"], true);
+    assert_eq!(queued["variableGroups"][0]["name"], "ligne");
+    assert!(!body.contains("ligne-clef"));
+    let build_id = queued["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","type":"Vsts","variables":{"host":{"value":"autre","isSecret":false},"token":{"value":"","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let finished: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["variables"]["host"]["value"], "ignition");
+    assert_eq!(finished["variables"]["token"]["value"], "");
+    assert_eq!(finished["variables"]["token"]["isSecret"], true);
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Nuit","variableGroups":[{"id":999}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe introuvable"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Nuit","variableGroups":[{{"id":{group_id}}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let night: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(night["name"], "Nuit");
+    assert_eq!(night["variableGroups"][0]["name"], "ligne");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe introuvable"));
+}
