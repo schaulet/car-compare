@@ -32,8 +32,9 @@ pub fn dispatch(
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
-        ("release", "definitions") => simple_named(state, method, org, project, "release/definitions", body),
-        ("release", "releases") => simple_named(state, method, org, project, "release/releases", body),
+        ("release", "definitions") => release_definitions(state, method, org, project, rest, body),
+        ("release", "releases") => release_releases(state, method, org, project, rest, body),
+        ("release", "approvals") => release_approvals(state, method, org, project, rest, body),
         _ => return None,
     };
     Some(response)
@@ -1301,25 +1302,254 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
     fail(StatusCode::NOT_FOUND, "flux introuvable")
 }
 
-fn simple_named(state: &AppState, method: &Method, org: &str, project: &str, key: &str, body: &[u8]) -> Response {
-    if method == Method::GET {
+fn release_definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "release/definitions";
+    if rest.len() == 2 && method == Method::GET {
         return Json(page(list(state, org, project, key))).into_response();
     }
-    if method != Method::POST {
+    if rest.len() == 2 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_else(|| "Version".into());
+        let next = list(state, org, project, key).len() as i64 + 1;
+        let environments = payload
+            .get("environments")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .filter(|rows| !rows.is_empty())
+            .unwrap_or_else(|| vec![json!({"name": "Production", "rank": 1})]);
+        let environments: Vec<Value> = environments
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut environment)| {
+                let rank = environment.get("rank").and_then(|value| value.as_i64()).unwrap_or(index as i64 + 1);
+                if let Some(object) = environment.as_object_mut() {
+                    object.insert("id".into(), json!(index as i64 + 1));
+                    object.entry("name").or_insert(json!(format!("Environnement {rank}")));
+                    object.insert("rank".into(), json!(rank));
+                }
+                environment
+            })
+            .collect();
+        let item = json!({
+            "id": next,
+            "name": name,
+            "path": "\\",
+            "releaseNameFormat": "Release-$(rev:r)",
+            "environments": environments,
+            "url": format!("/{org}/{project}/_apis/release/definitions/{next}")
+        });
+        put_item(state, org, project, key, item.clone());
+        return Json(item).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if method == Method::GET {
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "définition introuvable"),
+        };
+    }
+    fail(StatusCode::NOT_FOUND, "définition introuvable")
+}
+
+fn release_releases(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "release/releases";
+    if rest.len() == 2 && method == Method::GET {
+        return Json(page(list(state, org, project, key))).into_response();
+    }
+    if rest.len() == 2 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let definition_id = payload
+            .get("definitionId")
+            .and_then(|value| value.as_i64())
+            .or_else(|| payload.get("definition").and_then(|value| value.get("id")).and_then(|value| value.as_i64()))
+            .unwrap_or(0);
+        let Some(definition) = get_item(state, org, project, "release/definitions", &definition_id.to_string()) else {
+            return fail(StatusCode::NOT_FOUND, "définition introuvable");
+        };
+        let next = list(state, org, project, key).len() as i64 + 1;
+        let description = text_of(&payload, "description").unwrap_or_default();
+        let source = definition.get("environments").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+        let (environments, approvals) = open_release_environments(&source);
+        let definition_name = text_of(&definition, "name").unwrap_or_else(|| "Version".into());
+        let release_name = format!("Release-{next}");
+        let item = json!({
+            "id": next,
+            "name": release_name,
+            "status": "active",
+            "description": description,
+            "releaseDefinition": {"id": definition_id, "name": definition_name},
+            "environments": environments,
+            "artifacts": payload.get("artifacts").cloned().unwrap_or(json!([])),
+            "createdBy": {"displayName": "azurz"},
+            "url": format!("/{org}/{project}/_apis/release/releases/{next}")
+        });
+        put_item(state, org, project, key, item.clone());
+        for mut approval in approvals {
+            let approval_id = list(state, org, project, "release/approvals").len() as i64 + 1;
+            if let Some(object) = approval.as_object_mut() {
+                object.insert("id".into(), json!(approval_id));
+                object.insert("release".into(), json!({"id": next, "name": release_name}));
+                object.insert("releaseDefinition".into(), json!({"id": definition_id, "name": definition_name}));
+            }
+            put_item(state, org, project, "release/approvals", approval);
+        }
+        return Json(item).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if method == Method::GET {
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "version introuvable"),
+        };
+    }
+    fail(StatusCode::NOT_FOUND, "version introuvable")
+}
+
+fn release_approvals(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "release/approvals";
+    if rest.len() == 2 && method == Method::GET {
+        return Json(page(list(state, org, project, key))).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if method == Method::GET {
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "approbation introuvable"),
+        };
+    }
+    if method != Method::PATCH && method != Method::PUT {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     let payload = parse_json(body).unwrap_or(json!({}));
-    let name = text_of(&payload, "name").unwrap_or_else(|| "release".into());
-    let next = list(state, org, project, key).len() as i64 + 1;
-    let item = json!({
-        "id": next,
-        "name": name,
-        "path": "\\",
-        "status": "active",
-        "projectReference": {"name": project}
+    let status = text_of(&payload, "status").unwrap_or_else(|| "approved".into());
+    let comments = text_of(&payload, "comments").unwrap_or_default();
+    let updated = state.write(|db| {
+        let stored = db.project_mut(org, project)?;
+        let mut approval = stored.get_bucket(key, id)?;
+        if let Some(object) = approval.as_object_mut() {
+            object.insert("status".into(), json!(status));
+            object.insert("comments".into(), json!(comments));
+        }
+        let release_id = approval.get("release").and_then(|release| release.get("id")).map(crate::store::value_key).unwrap_or_default();
+        let environment_id = approval.get("releaseEnvironment").and_then(|environment| environment.get("id")).and_then(|value| value.as_i64());
+        if let Some(mut release) = stored.get_bucket("release/releases", &release_id) {
+            if let Some(environments) = release.get_mut("environments").and_then(|value| value.as_array_mut()) {
+                for environment in environments.iter_mut() {
+                    if environment.get("id").and_then(|value| value.as_i64()) == environment_id {
+                        environment["status"] = json!(if status.eq_ignore_ascii_case("approved") { "succeeded" } else { "rejected" });
+                    }
+                }
+            }
+            if status.eq_ignore_ascii_case("approved") {
+                let mut fresh = Vec::new();
+                if let Some(environments) = release.get_mut("environments").and_then(|value| value.as_array_mut()) {
+                    let mut gate_open = true;
+                    for environment in environments.iter_mut() {
+                        let current = text_of(environment, "status").unwrap_or_default();
+                        if current == "succeeded" || current == "canceled" || current == "rejected" || current == "partiallySucceeded" {
+                            continue;
+                        }
+                        if !gate_open {
+                            break;
+                        }
+                        if current == "inProgress" {
+                            break;
+                        }
+                        if environment_needs_approval(environment) {
+                            environment["status"] = json!("inProgress");
+                            fresh.push(environment.clone());
+                            gate_open = false;
+                        } else {
+                            environment["status"] = json!("succeeded");
+                        }
+                    }
+                }
+                let release_name = text_of(&release, "name").unwrap_or_default();
+                let definition = release.get("releaseDefinition").cloned().unwrap_or(json!({}));
+                stored.put_bucket("release/releases", release);
+                for environment in fresh {
+                    let approval_id = stored.list_bucket(key).len() as i64 + 1;
+                    let approver = environment
+                        .get("preDeployApprovals")
+                        .and_then(|value| value.get("approvals"))
+                        .and_then(|value| value.as_array())
+                        .and_then(|rows| rows.first())
+                        .and_then(|row| row.get("approver"))
+                        .cloned()
+                        .unwrap_or(json!({"displayName": "azurz", "uniqueName": "azurz"}));
+                    stored.put_bucket(
+                        key,
+                        json!({
+                            "id": approval_id,
+                            "status": "pending",
+                            "approvalType": "preDeploy",
+                            "approver": approver,
+                            "release": {"id": release_id.parse::<i64>().unwrap_or(0), "name": release_name},
+                            "releaseDefinition": definition,
+                            "releaseEnvironment": {"id": environment.get("id").cloned().unwrap_or(json!(0)), "name": text_of(&environment, "name").unwrap_or_default()}
+                        }),
+                    );
+                }
+            } else {
+                stored.put_bucket("release/releases", release);
+            }
+        }
+        Some(stored.put_bucket(key, approval))
     });
-    put_item(state, org, project, key, item.clone());
-    Json(item).into_response()
+    match updated {
+        Some(item) => Json(item).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "approbation introuvable"),
+    }
+}
+
+fn open_release_environments(source: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let mut environments = Vec::new();
+    let mut approvals = Vec::new();
+    let mut gate_open = true;
+    for (index, environment) in source.iter().enumerate() {
+        let rank = environment.get("rank").and_then(|value| value.as_i64()).unwrap_or(index as i64 + 1);
+        let name = text_of(environment, "name").unwrap_or_else(|| format!("Environnement {rank}"));
+        let id = environment.get("id").and_then(|value| value.as_i64()).unwrap_or(index as i64 + 1);
+        let mut status = "notStarted".to_string();
+        if gate_open {
+            if environment_needs_approval(environment) {
+                status = "inProgress".into();
+                let approver = environment
+                    .get("preDeployApprovals")
+                    .and_then(|value| value.get("approvals"))
+                    .and_then(|value| value.as_array())
+                    .and_then(|rows| rows.first())
+                    .and_then(|row| row.get("approver"))
+                    .cloned()
+                    .unwrap_or(json!({"displayName": "azurz", "uniqueName": "azurz"}));
+                approvals.push(json!({
+                    "status": "pending",
+                    "approvalType": "preDeploy",
+                    "approver": approver,
+                    "releaseEnvironment": {"id": id, "name": name}
+                }));
+                gate_open = false;
+            } else {
+                status = "succeeded".into();
+            }
+        }
+        environments.push(json!({
+            "id": id,
+            "name": name,
+            "rank": rank,
+            "status": status,
+            "preDeployApprovals": environment.get("preDeployApprovals").cloned().unwrap_or(json!({"approvals": []}))
+        }));
+    }
+    (environments, approvals)
+}
+
+fn environment_needs_approval(environment: &Value) -> bool {
+    environment
+        .get("preDeployApprovals")
+        .and_then(|value| value.get("approvals"))
+        .and_then(|value| value.as_array())
+        .is_some_and(|rows| !rows.is_empty())
 }
 
 fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {

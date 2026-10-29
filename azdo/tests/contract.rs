@@ -1555,3 +1555,82 @@ async fn test_plan_suites_cases_and_points_record_a_result() {
     assert_eq!(run["state"], "Completed");
     assert_eq!(run["passedTests"], 1);
 }
+
+#[tokio::test]
+async fn release_definition_environments_wait_for_approval() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Deploiement ligne","environments":[{"name":"ligne-a","rank":1,"preDeployApprovals":{"approvals":[{"approver":{"displayName":"azurz"}}]}},{"name":"ligne-b","rank":2}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let definition: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let definition_id = definition["id"].as_i64().unwrap();
+    assert_eq!(definition["environments"][0]["name"], "ligne-a");
+    assert_eq!(definition["environments"][1]["name"], "ligne-b");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/releases?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"definitionId":{definition_id},"description":"1.0.0"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let release: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let release_id = release["id"].as_i64().unwrap();
+    assert!(release["name"].as_str().unwrap().starts_with("Release-"));
+    assert_eq!(release["environments"][0]["status"], "inProgress");
+    assert_eq!(release["environments"][1]["status"], "notStarted");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/release/approvals?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let approvals: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(approvals["value"][0]["status"], "pending");
+    assert_eq!(approvals["value"][0]["releaseEnvironment"]["name"], "ligne-a");
+    let approval_id = approvals["value"][0]["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/approvals/{approval_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"approved","comments":"ok"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let approved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(approved["status"], "approved");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let release: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(release["environments"][0]["status"], "succeeded");
+    assert_eq!(release["environments"][1]["status"], "succeeded");
+}

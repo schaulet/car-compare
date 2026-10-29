@@ -24,7 +24,7 @@
     .crumb strong { color: var(--text); font-weight: 600; }
     header form { margin-left: auto; }
     button.page { background: transparent; border: 0; color: var(--blue); font: inherit; cursor: pointer; padding: 4px 0; }
-    header button, .command button, .panel button {
+    header button, .command button, .panel button, td button {
       height: 32px; border: 1px solid transparent; background: var(--blue); color: #fff;
       font: inherit; padding: 0 12px; cursor: pointer;
     }
@@ -81,6 +81,7 @@
       nav a { white-space: nowrap; }
       .board { grid-template-columns: 1fr; }
       .form { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
     }
   </style>
 </head>
@@ -561,9 +562,51 @@
           view.innerHTML = "<h1>Poussées</h1>" + table;
           return;
         }
+        if (hub === "/_release") {
+          const [definitions, releases, approvals] = await Promise.all([
+            collection("release/definitions"),
+            collection("release/releases"),
+            collection("release/approvals"),
+          ]);
+          const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Définition</th><th>Environnements</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc((item.environments || []).map((env) => env.name).join(", ")) + "</td><td><button type='button' class='release' data-id='" + esc(item.id) + "'>Créer une version</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune définition.</p>";
+          const runs = releases.length ? "<table><thead><tr><th>Version</th><th>Description</th><th>Environnements</th></tr></thead><tbody>" + releases.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td><td>" + esc((item.environments || []).map((env) => env.name + " " + env.status).join(", ")) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune version.</p>";
+          const pending = approvals.filter((item) => item.status === "pending");
+          const gates = pending.length ? "<h2>Approbations</h2><table><thead><tr><th>Version</th><th>Environnement</th><th>Approbateur</th><th></th></tr></thead><tbody>" + pending.map((item) => "<tr><td>" + esc(item.release?.name) + "</td><td>" + esc(item.releaseEnvironment?.name) + "</td><td>" + esc(item.approver?.displayName) + "</td><td><button type='button' class='approve' data-id='" + esc(item.id) + "'>Approuver</button></td></tr>").join("") + "</tbody></table>" : "";
+          view.innerHTML = "<h1>Versions</h1><div class='command'><input id='rel-name' placeholder='Définition' /><input id='rel-env' placeholder='Environnement' /><button id='create' type='button'>Créer la définition</button></div>" + defs + "<h2>Versions</h2>" + runs + gates;
+          document.getElementById("create").onclick = async () => {
+            const environment = document.getElementById("rel-env").value || "Production";
+            await api("POST", root + "/release/definitions?api-version=7.1", {
+              name: document.getElementById("rel-name").value || "Version",
+              environments: [{ name: environment, rank: 1, preDeployApprovals: { approvals: [{ approver: { displayName: user } }] } }],
+            });
+            location.reload();
+          };
+          document.querySelectorAll("button.release").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              await api("POST", root + "/release/releases?api-version=7.1", { definitionId: Number(button.dataset.id), description: "1.0.0" });
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.approve").forEach((button) => {
+            button.onclick = async () => {
+              await api("PATCH", root + "/release/approvals/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { status: "approved", comments: "ok" });
+              location.reload();
+            };
+          });
+          return;
+        }
+        if (hub === "/_environments") {
+          const items = await collection("distributedtask/environments");
+          const table = items.length ? "<table><thead><tr><th>Nom</th><th>Description</th></tr></thead><tbody>" + items.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun environnement.</p>";
+          view.innerHTML = "<h1>Environnements</h1><div class='command'><input id='env-name' placeholder='Nom' /><input id='env-desc' placeholder='Description' /><button id='create' type='button'>Créer</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            await api("POST", root + "/distributedtask/environments?api-version=7.1", { name: document.getElementById("env-name").value || "Production", description: document.getElementById("env-desc").value || "" });
+            location.reload();
+          };
+          return;
+        }
         const catalogs = {
-          "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
-          "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
           "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
         };
         if (catalogs[hub]) {
