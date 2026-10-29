@@ -11326,3 +11326,282 @@ async fn package_can_be_removed_from_the_feed() {
     assert_eq!(notes[1]["resource"]["protocol"], "pypi");
     assert!(notes[1]["resource"].get("content").is_none());
 }
+
+#[tokio::test]
+async fn npm_package_version_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/absent-npm/npm/oee/1.0.0",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "flux introuvable");
+
+    for name in ["ligne-npm", "autre-npm"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let document = r#"{"name":"oee","description":"ligne","versions":{"1.0.0":{"version":"1.0.0"},"1.1.0":{"version":"1.1.0"}}}"#;
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(document),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/pompe",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","versions":{"1.0.0":{"version":"1.0.0"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/autre-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"oee","versions":{"1.0.0":{"version":"1.0.0"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/absente/1.0.0",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "paquet npm introuvable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee/9.9.9",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version npm introuvable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version npm absente");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee/%20",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version npm absente");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let package: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(package["description"], "ligne");
+    assert_eq!(package["versions"]["1.0.0"]["version"], "1.0.0");
+    assert_eq!(package["versions"]["1.1.0"]["version"], "1.1.0");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"packaging.package.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee/1.0.0",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let package: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(package["versions"].get("1.0.0").is_none(), "{body}");
+    assert_eq!(package["versions"]["1.1.0"]["version"], "1.1.0");
+    assert_eq!(package["description"], "ligne");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/pompe",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe["versions"]["1.0.0"]["version"], "1.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/autre-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["versions"]["1.0.0"]["version"], "1.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-npm/npm/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2);
+    let oee = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "oee").unwrap();
+    assert!(oee["versions"].get("1.0.0").is_none(), "{body}");
+    assert_eq!(oee["versions"]["1.1.0"]["version"], "1.1.0");
+    assert!(oee.get("content").is_none());
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee/1.1.0",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "paquet introuvable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/oee/1.1.0",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "paquet npm introuvable");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-npm/npm/pompe",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "packaging.package.deleted").collect();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0]["resource"]["filename"], "oee-1.0.0.tgz");
+    assert_eq!(notes[0]["resource"]["name"], "oee");
+    assert_eq!(notes[0]["resource"]["version"], "1.0.0");
+    assert_eq!(notes[0]["resource"]["protocol"], "npm");
+    assert!(notes[0]["resource"].get("content").is_none());
+    assert_eq!(notes[1]["resource"]["filename"], "oee-1.1.0.tgz");
+    assert_eq!(notes[1]["resource"]["protocol"], "npm");
+    assert!(notes[1]["resource"].get("content").is_none());
+}

@@ -26,8 +26,11 @@ pub fn project(state: &AppState, method: &Method, org: &str, project: &str, rest
             upack(state, method, org, project, rest, body)
         }
         "packaging"
-            if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("maven") || value.eq_ignore_ascii_case("pypi"))
-                && rest.get(4).is_some_and(|value| value.eq_ignore_ascii_case("packages")) =>
+            if rest.get(3).is_some_and(|value| {
+                value.eq_ignore_ascii_case("maven")
+                    || value.eq_ignore_ascii_case("pypi")
+                    || value.eq_ignore_ascii_case("npm")
+            }) && rest.get(4).is_some_and(|value| value.eq_ignore_ascii_case("packages")) =>
         {
             protocol_packages(state, method, org, project, rest)
         }
@@ -56,9 +59,8 @@ pub fn packaging(state: &AppState, method: &Method, path: &str, body: &[u8]) -> 
     if protocol == "nuget" {
         return nuget(state, method, org, project, &feed_id, feed_name, tail, body);
     }
-    if protocol == "npm" && (method == Method::GET || method == Method::PUT) {
-        let name = parts.get(index + 3).cloned().unwrap_or_default();
-        return npm_package(state, method, org, project, &feed_id, &name, body);
+    if protocol == "npm" && (method == Method::GET || method == Method::PUT || method == Method::DELETE) {
+        return npm_package(state, method, org, project, &feed_id, tail, body);
     }
     if protocol == "maven" {
         return maven(state, method, org, project, &feed_id, tail, body);
@@ -612,16 +614,21 @@ fn typed(content_type: &str, content: &str) -> Response {
         .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"))
 }
 
-fn npm_package(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, name: &str, body: &[u8]) -> Response {
+fn npm_package(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, tail: &[String], body: &[u8]) -> Response {
+    let name = tail.first().map(|value| value.trim()).unwrap_or("");
     if name.is_empty() {
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
+    let name = name.to_string();
     let key = format!("packaging/feeds/{feed_id}/npm");
     if method == Method::GET {
-        return match get_project(state, org, project, &key, name) {
+        return match get_project(state, org, project, &key, &name) {
             Some(item) => Json(item).into_response(),
             None => fail(StatusCode::NOT_FOUND, "paquet introuvable"),
         };
+    }
+    if method == Method::DELETE {
+        return delete_npm_version(state, org, project, &key, &name, tail.get(1).map(String::as_str));
     }
     let payload = parse_json(body).unwrap_or(json!({}));
     let mut item = payload;
@@ -632,6 +639,56 @@ fn npm_package(state: &AppState, method: &Method, org: &str, project: &str, feed
     }
     put_project(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn delete_npm_version(state: &AppState, org: &str, project: &str, key: &str, name: &str, version: Option<&str>) -> Response {
+    let Some(item) = get_project(state, org, project, key, name) else {
+        return fail(StatusCode::NOT_FOUND, "paquet npm introuvable");
+    };
+    let Some(raw) = version else {
+        return fail(StatusCode::BAD_REQUEST, "version npm absente");
+    };
+    let version = raw.trim();
+    if version.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "version npm absente");
+    }
+    let present = item
+        .get("versions")
+        .and_then(|value| value.as_object())
+        .is_some_and(|versions| versions.contains_key(version));
+    if !present {
+        return fail(StatusCode::NOT_FOUND, "version npm introuvable");
+    }
+    let filename = format!("{name}-{version}.tgz");
+    let notice = json!({
+        "id": name,
+        "name": name,
+        "version": version,
+        "filename": filename
+    });
+    state.write(|db| {
+        let Some(stored) = db.project_mut(org, project) else {
+            return;
+        };
+        let Some(bucket) = stored.buckets.get_mut(key) else {
+            return;
+        };
+        let Some(mut current) = bucket.get(name) else {
+            return;
+        };
+        let mut left = 0;
+        if let Some(versions) = current.get_mut("versions").and_then(|value| value.as_object_mut()) {
+            versions.remove(version);
+            left = versions.len();
+        }
+        if left == 0 {
+            bucket.remove(name);
+        } else {
+            bucket.put(current);
+        }
+    });
+    crate::shapes::deliver_work_item(state, org, project, "packaging.package.deleted", &package_notice("npm", &notice));
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub fn work_items_batch(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
