@@ -227,6 +227,13 @@ fn refs(
     }
     let payload = parse_json(body).unwrap_or(json!([]));
     let updates = payload.as_array().cloned().unwrap_or_else(|| vec![payload]);
+    let default_branch = default_branch_name(state, org, project, repo_id);
+    if updates.iter().any(|update| {
+        text_of(update, "newObjectId").as_deref().is_some_and(is_zero_object_id)
+            && text_of(update, "name").unwrap_or_else(|| "refs/heads/main".into()).eq_ignore_ascii_case(&default_branch)
+    }) {
+        return fail(StatusCode::BAD_REQUEST, "branche par défaut");
+    }
     let created = state.write(|db| {
         db.ensure_project(org, project);
         let stored = db.project_mut(org, project)?;
@@ -238,11 +245,18 @@ fn refs(
                 .cloned()
                 .unwrap_or(json!("0000000000000000000000000000000000000000"));
             if text_of(&update, "newObjectId").as_deref().is_some_and(is_zero_object_id) {
-                let removed = stored
-                    .buckets
-                    .get_mut(&key)
-                    .is_some_and(|bucket| bucket.remove(&name));
-                if let Some(short) = name.strip_prefix("refs/tags/") {
+                let stored_name = stored.buckets.get(&key).and_then(|bucket| {
+                    bucket.items.iter().find_map(|(id, item)| {
+                        let matches = id.eq_ignore_ascii_case(&name)
+                            || text_of(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name));
+                        matches.then(|| id.clone())
+                    })
+                });
+                let removed = stored_name.as_ref().is_some_and(|stored_name| {
+                    stored.buckets.get_mut(&key).is_some_and(|bucket| bucket.remove(stored_name))
+                });
+                let tag_name = stored_name.as_deref().unwrap_or(&name);
+                if let Some(short) = tag_name.strip_prefix("refs/tags/") {
                     let tags_key = format!("git/repositories/{repo_id}/annotatedtags");
                     if let Some(tags) = stored.buckets.get_mut(&tags_key) {
                         let ids: Vec<String> = tags
@@ -364,6 +378,13 @@ fn annotated_tags(
 
 fn is_zero_object_id(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch == '0')
+}
+
+fn default_branch_name(state: &AppState, org: &str, project: &str, repo_id: &str) -> String {
+    find_repo(state, org, project, repo_id)
+        .and_then(|item| text_of(&item, "defaultBranch"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "refs/heads/main".into())
 }
 
 fn tag_short_name(raw: &str) -> Option<String> {

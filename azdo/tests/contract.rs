@@ -13474,3 +13474,173 @@ async fn removing_one_team_member_keeps_the_sibling() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"], "1");
 }
+
+#[tokio::test]
+async fn removing_one_branch_keeps_the_sibling_and_the_default() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let zeros = "0000000000000000000000000000000000000000";
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heads: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let main = heads["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for name in ["refs/heads/pompe", "refs/heads/ada"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"[{{"name":"{name}","oldObjectId":"{zeros}","newObjectId":"{main}"}}]"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"name":"refs/heads/MAIN","oldObjectId":"{main}","newObjectId":"{zeros}"}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("branche par défaut"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/heads/pompe","oldObjectId":"{main}","newObjectId":"{zeros}"}},{{"name":"refs/heads/main","oldObjectId":"{main}","newObjectId":"{zeros}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("branche par défaut"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let before_names: Vec<_> = before["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(before_names.iter().any(|name| name == "refs/heads/main"));
+    assert!(before_names.iter().any(|name| name == "refs/heads/pompe"));
+    assert!(before_names.iter().any(|name| name == "refs/heads/ada"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"name":"refs/heads/POMPE","oldObjectId":"{main}","newObjectId":"{zeros}"}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let removed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(removed["value"][0]["success"], true);
+    assert_eq!(removed["value"][0]["updateStatus"], "succeeded");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = kept["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.iter().any(|name| name == "refs/heads/main"));
+    assert!(names.iter().any(|name| name == "refs/heads/ada"));
+    assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("refs/heads/pompe")));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"name":"refs/heads/pompe","oldObjectId":"{main}","newObjectId":"{zeros}"}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["value"][0]["success"], false);
+    assert_eq!(again["value"][0]["updateStatus"], "invalidRefName");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("refs/heads/ada"), "{body}");
+    assert!(body.contains("refs/heads/main"), "{body}");
+}
