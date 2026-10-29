@@ -10823,3 +10823,228 @@ async fn git_file_can_be_edited_and_deleted() {
     let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "git.push" && item["resource"]["commits"][0]["comment"] == "Pompe revue").collect();
     assert_eq!(notes.len(), 1);
 }
+
+#[tokio::test]
+async fn dashboard_can_be_renamed_and_a_widget_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards/dash-99?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "tableau de bord introuvable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards/dash-99/widgets/widget-1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "tableau de bord introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Vue ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let dashboard: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let dashboard_id = dashboard["id"].as_str().unwrap();
+    let position = dashboard["position"].clone();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Vue pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let sibling_id = sibling["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Note","contributionId":"ms.vss-dashboards.MarkdownWidget","settings":{"content":"debit 12"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let note: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let note_id = note["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Stable","contributionId":"ms.vss-dashboards.MarkdownWidget","settings":{"content":"stable"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for (payload, message) in [
+        ("[]", "tableau illisible"),
+        ("{}", "nom de tableau absent"),
+        (r#"{"name":"  "}"#, "nom de tableau absent"),
+        (r#"{"name":1}"#, "tableau illisible"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "PATCH",
+            &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["message"], message, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(stored["name"], "Vue ligne");
+    assert_eq!(stored["position"], position);
+    assert_eq!(stored["widgets"].as_array().unwrap().len(), 2);
+    assert_eq!(stored["widgets"][0]["rendered"]["text"], "debit 12");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"dashboard.updated","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" Vue atelier ","widgets":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renamed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(renamed["name"], "Vue atelier");
+    assert_eq!(renamed["id"], dashboard_id);
+    assert_eq!(renamed["position"], position);
+    assert_eq!(renamed["widgets"].as_array().unwrap().len(), 2);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{sibling_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["name"], "Vue pompe");
+    assert!(sibling["widgets"].as_array().unwrap().is_empty());
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"dashboard.widget.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets/{note_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(stored["name"], "Vue atelier");
+    assert_eq!(stored["widgets"].as_array().unwrap().len(), 1);
+    assert_eq!(stored["widgets"][0]["name"], "Stable");
+    assert_eq!(stored["widgets"][0]["rendered"]["text"], "stable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets/{note_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "widget introuvable");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let renamed_notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "dashboard.updated").collect();
+    assert_eq!(renamed_notes.len(), 1);
+    assert_eq!(renamed_notes[0]["resource"]["name"], "Vue atelier");
+    let removed_notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "dashboard.widget.deleted").collect();
+    assert_eq!(removed_notes.len(), 1);
+    assert_eq!(removed_notes[0]["resource"]["name"], "Note");
+}

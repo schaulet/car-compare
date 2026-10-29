@@ -640,7 +640,44 @@ fn dashboards(
             None => fail(StatusCode::NOT_FOUND, "tableau de bord introuvable"),
         };
     }
+    if rest.len() == 3 && (method == Method::PATCH || method == Method::PUT) {
+        return update_dashboard(state, org, project, id, body);
+    }
     fail(StatusCode::NOT_FOUND, "tableau de bord introuvable")
+}
+
+fn update_dashboard(state: &AppState, org: &str, project: &str, id: &str, body: &[u8]) -> Response {
+    let Some(previous) = load_dashboard(state, org, project, id) else {
+        return fail(StatusCode::NOT_FOUND, "tableau de bord introuvable");
+    };
+    let Some(payload) = parse_json(body).filter(|value| value.is_object()) else {
+        return fail(StatusCode::BAD_REQUEST, "tableau illisible");
+    };
+    let Some(name_value) = payload.get("name") else {
+        return fail(StatusCode::BAD_REQUEST, "nom de tableau absent");
+    };
+    let Some(name_raw) = name_value.as_str() else {
+        return fail(StatusCode::BAD_REQUEST, "tableau illisible");
+    };
+    let name = name_raw.trim();
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom de tableau absent");
+    }
+    let position = previous.get("position").cloned().unwrap_or(json!(1));
+    let widgets = widget_list(&previous);
+    let mut updated = previous;
+    if let Some(object) = updated.as_object_mut() {
+        object.insert("name".into(), json!(name));
+        object.insert("position".into(), position);
+        object.insert("widgets".into(), json!(widgets));
+    }
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket("dashboard/dashboards", updated.clone());
+        }
+    });
+    crate::shapes::deliver_work_item(state, org, project, "dashboard.updated", &updated);
+    Json(dress_dashboard(state, org, project, updated)).into_response()
 }
 
 fn dashboard_widgets(
@@ -680,8 +717,9 @@ fn dashboard_widgets(
             return Json(dress_widget(state, org, project, widgets[index].clone())).into_response();
         }
         if method == Method::DELETE {
-            widgets.remove(index);
+            let removed = widgets.remove(index);
             save_widgets(state, org, project, dashboard, widgets);
+            crate::shapes::deliver_work_item(state, org, project, "dashboard.widget.deleted", &removed);
             return StatusCode::NO_CONTENT.into_response();
         }
         if method == Method::PUT || method == Method::PATCH {

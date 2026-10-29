@@ -386,39 +386,79 @@
             const body = rendered.kind === "markdown"
               ? "<pre>" + esc(rendered.text) + "</pre>"
               : "<div class='metric'>" + esc(rendered.value ?? "") + "</div><p class='sub'>" + esc(rendered.text) + "</p>";
-            return "<article class='widget' data-kind='" + esc(rendered.kind) + "' style='grid-column: span " + span + "'><h2>" + esc(widget.name) + "</h2>" + body + "</article>";
-          }).join("") + "</div>" : "<p class='sub'>Aucun widget.</p>";
-          const create = dashboard ? "" : "<div class='command'><input id='dash-name' placeholder='Nom du tableau' value='Vue ligne' /><button id='dash-create' type='button'>Créer le tableau</button></div>";
-          view.innerHTML = "<h1>Tableau de bord</h1><p class='sub' id='dash-title'>" + esc(dashboard ? dashboard.name : "Aucun tableau") + "</p>" + create + "<div class='command'><select id='widget-kind'><option value='markdown'>Markdown</option><option value='query'>Requête</option><option value='build'>Build</option></select><input id='widget-name' placeholder='Nom' /><input id='widget-setting' placeholder='Texte, état ou définition' /><button id='widget-add' type='button'>Ajouter</button></div>" + canvas;
+            return "<article class='widget' data-id='" + esc(widget.id) + "' data-kind='" + esc(rendered.kind) + "' style='grid-column: span " + span + "'><h2>" + esc(widget.name) + "</h2>" + body + "<button type='button' class='widget-remove' data-id='" + esc(widget.id) + "'>Retirer</button></article>";
+          }).join("") + "</div>" : "<p class='sub' id='widgets-empty'>Aucun widget.</p>";
+          const naming = dashboard
+            ? "<div class='command'><input id='dash-name' placeholder='Nouveau nom' /><button id='dash-rename' type='button'>Renommer</button></div>"
+            : "<div class='command'><input id='dash-name' placeholder='Nom du tableau' value='Vue ligne' /><button id='dash-create' type='button'>Créer le tableau</button></div>";
+          view.innerHTML = "<h1>Tableau de bord</h1><p class='sub' id='dash-title'>" + esc(dashboard ? dashboard.name : "Aucun tableau") + "</p>" + naming + "<p id='dash-error' class='error' hidden></p><div class='command'><select id='widget-kind'><option value='markdown'>Markdown</option><option value='query'>Requête</option><option value='build'>Build</option></select><input id='widget-name' placeholder='Nom' /><input id='widget-setting' placeholder='Texte, état ou définition' /><button id='widget-add' type='button'>Ajouter</button></div>" + canvas;
+          function showDashError(error) {
+            const note = document.getElementById("dash-error");
+            note.hidden = false;
+            note.textContent = error.message;
+          }
           const dashCreate = document.getElementById("dash-create");
           if (dashCreate) {
             dashCreate.onclick = async () => {
-              await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+              try {
+                await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+              } catch (error) {
+                showDashError(error);
+                return;
+              }
+              location.reload();
+            };
+          }
+          const dashRename = document.getElementById("dash-rename");
+          if (dashRename) {
+            dashRename.onclick = async () => {
+              try {
+                await api("PATCH", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "?api-version=7.1", { name: document.getElementById("dash-name").value });
+              } catch (error) {
+                showDashError(error);
+                return;
+              }
               location.reload();
             };
           }
           document.getElementById("widget-add").onclick = async () => {
-            let current = dashboard;
-            if (!current) {
-              current = await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+            try {
+              let current = dashboard;
+              if (!current) {
+                current = await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+              }
+              const kind = document.getElementById("widget-kind").value;
+              const setting = document.getElementById("widget-setting").value;
+              const name = document.getElementById("widget-name").value || (kind === "build" ? "Build CI" : kind === "query" ? "Work items" : "Note");
+              const payload = { name: name, size: { rowSpan: 1, columnSpan: kind === "markdown" ? 2 : 1 } };
+              if (kind === "markdown") {
+                payload.contributionId = "ms.vss-dashboards.MarkdownWidget";
+                payload.settings = { content: setting || "Note" };
+              } else if (kind === "query") {
+                payload.contributionId = "ms.vss-dashboards.QueryScalarWidget";
+                payload.settings = setting ? { state: setting } : {};
+              } else {
+                payload.contributionId = "ms.vss-dashboards.BuildWidget";
+                payload.settings = { definitionId: Number(setting || "1") };
+              }
+              await api("POST", root + "/dashboard/dashboards/" + encodeURIComponent(current.id) + "/widgets?api-version=7.1", payload);
+            } catch (error) {
+              showDashError(error);
+              return;
             }
-            const kind = document.getElementById("widget-kind").value;
-            const setting = document.getElementById("widget-setting").value;
-            const name = document.getElementById("widget-name").value || (kind === "build" ? "Build CI" : kind === "query" ? "Work items" : "Note");
-            const payload = { name: name, size: { rowSpan: 1, columnSpan: kind === "markdown" ? 2 : 1 } };
-            if (kind === "markdown") {
-              payload.contributionId = "ms.vss-dashboards.MarkdownWidget";
-              payload.settings = { content: setting || "Note" };
-            } else if (kind === "query") {
-              payload.contributionId = "ms.vss-dashboards.QueryScalarWidget";
-              payload.settings = setting ? { state: setting } : {};
-            } else {
-              payload.contributionId = "ms.vss-dashboards.BuildWidget";
-              payload.settings = { definitionId: Number(setting || "1") };
-            }
-            await api("POST", root + "/dashboard/dashboards/" + encodeURIComponent(current.id) + "/widgets?api-version=7.1", payload);
             location.reload();
           };
+          document.querySelectorAll("button.widget-remove").forEach((button) => {
+            button.onclick = async () => {
+              try {
+                await api("DELETE", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "/widgets/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                showDashError(error);
+                return;
+              }
+              location.reload();
+            };
+          });
           return;
         }
         if (hub === "/_sprints") {
@@ -1830,10 +1870,12 @@
             if (resource.suiteType && resource.name) return resource.name;
             if (resource.releaseDefinition && resource.description) return resource.description;
             if (resource.releaseDefinition && resource.name) return resource.name;
+            if (resource.dashboardScope && resource.name) return resource.name;
+            if (resource.contributionId && resource.name) return resource.name;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1913,6 +1955,14 @@
               const definition = await api("POST", root + "/release/definitions?api-version=7.1", { name: title, environments: [{ name: "Production", rank: 1 }] });
               const release = await api("POST", root + "/release/releases?api-version=7.1", { definitionId: definition.id, description: title });
               await api("PATCH", root + "/release/releases/" + encodeURIComponent(release.id) + "?api-version=7.1", { status: "abandoned" });
+            } else if (event === "dashboard.updated" || event === "dashboard.widget.deleted") {
+              const created = await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: title });
+              if (event === "dashboard.updated") {
+                await api("PATCH", root + "/dashboard/dashboards/" + encodeURIComponent(created.id) + "?api-version=7.1", { name: title });
+              } else {
+                const widget = await api("POST", root + "/dashboard/dashboards/" + encodeURIComponent(created.id) + "/widgets?api-version=7.1", { name: title, contributionId: "ms.vss-dashboards.MarkdownWidget", settings: { content: title } });
+                await api("DELETE", root + "/dashboard/dashboards/" + encodeURIComponent(created.id) + "/widgets/" + encodeURIComponent(widget.id) + "?api-version=7.1");
+              }
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
               await api("GET", root + "/build/builds/" + encodeURIComponent(queued.id) + "?api-version=7.1");
