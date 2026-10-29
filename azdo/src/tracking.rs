@@ -21,6 +21,7 @@ pub fn dispatch(
         ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
         ("work", "plans") => delivery_plans(state, method, org, project, rest, body),
+        ("work", "processes") => picklists(state, method, org, project, rest, body),
         ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
         ("serviceendpoint", "types") if rest.len() == 2 => endpoint_types(method),
@@ -1770,6 +1771,263 @@ fn dress_delivery_plan(org: &str, project: &str, mut item: Value) -> Value {
     let id = item_id(&item);
     if let Some(object) = item.as_object_mut() {
         object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/plans/{id}")));
+    }
+    item
+}
+
+const PICKLISTS: &str = "work/processes/lists";
+
+pub fn picklists(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(tail) = lists_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    };
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list_picklists(state, org, project);
+            rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+            let value = rows.into_iter().map(|item| dress_picklist(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, kind, items, suggested) = match picklist_create(body) {
+                Ok(fields) => fields,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let existing = list_picklists(state, org, project);
+            if existing.iter().any(|item| item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name))) {
+                return fail(StatusCode::BAD_REQUEST, "liste existante");
+            }
+            let id = format!("list-{}", next_picklist_id(state, org));
+            let item = json!({
+                "id": id,
+                "name": name,
+                "type": kind,
+                "items": items,
+                "isSuggested": suggested,
+                "project": project
+            });
+            state.write(|db| {
+                db.ensure_project(org, project);
+                if let Some(stored) = db.project_mut(org, project) {
+                    stored.put_bucket(PICKLISTS, item.clone());
+                }
+            });
+            return Json(dress_picklist(org, project, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if tail.len() != 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    }
+    let id = tail[0].as_str();
+    if method == Method::GET {
+        return match state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(PICKLISTS, id))) {
+            Some(item) => Json(dress_picklist(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "liste de sélection introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(PICKLISTS, id))) else {
+            return fail(StatusCode::NOT_FOUND, "liste de sélection introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, project)
+                .and_then(|stored| stored.buckets.get_mut(PICKLISTS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+pub fn picklists_org(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(tail) = lists_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    };
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = all_picklists(state, org);
+            rows.sort_by(|left, right| item_id(&left.1).cmp(&item_id(&right.1)));
+            let value = rows
+                .into_iter()
+                .map(|(project, item)| dress_picklist(org, &project, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let project = state.names().1;
+            return picklists(state, method, org, &project, rest, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if tail.len() != 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    }
+    let id = tail[0].as_str();
+    let Some((project, found)) = locate_picklist(state, org, id) else {
+        return fail(StatusCode::NOT_FOUND, "liste de sélection introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_picklist(org, &project, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &project)
+                .and_then(|stored| stored.buckets.get_mut(PICKLISTS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "liste de sélection introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn lists_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().position(|part| part.eq_ignore_ascii_case("lists"))?;
+    Some(&rest[index + 1..])
+}
+
+fn list_picklists(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(PICKLISTS)).unwrap_or_default())
+}
+
+fn all_picklists(state: &AppState, org: &str) -> Vec<(String, Value)> {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (name, project) in &organization.projects {
+            if let Some(bucket) = project.buckets.get(PICKLISTS) {
+                for item in bucket.items.values() {
+                    rows.push((name.clone(), item.clone()));
+                }
+            }
+        }
+        rows
+    })
+}
+
+fn locate_picklist(state: &AppState, org: &str, id: &str) -> Option<(String, Value)> {
+    state.read(|db| {
+        let organization = db.orgs.get(org)?;
+        for (name, project) in &organization.projects {
+            if let Some(item) = project.get_bucket(PICKLISTS, id) {
+                return Some((name.clone(), item));
+            }
+        }
+        None
+    })
+}
+
+fn next_picklist_id(state: &AppState, org: &str) -> i64 {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return 1;
+        };
+        organization
+            .projects
+            .values()
+            .filter_map(|project| project.buckets.get(PICKLISTS))
+            .flat_map(|bucket| bucket.items.values())
+            .filter_map(|item| item_id(item).strip_prefix("list-")?.parse::<i64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1
+    })
+}
+
+fn picklist_create(body: &[u8]) -> Result<(String, String, Vec<String>, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("liste illisible");
+    };
+    let Some(name) = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let kind = match object.get("type") {
+        None => "String".to_string(),
+        Some(Value::String(value)) if matches!(value.as_str(), "String" | "Integer" | "Double") => value.clone(),
+        Some(_) => return Err("type absent"),
+    };
+    let items = match object.get("items") {
+        None => Vec::new(),
+        Some(Value::Array(rows)) => {
+            let mut items = Vec::new();
+            for row in rows {
+                let Some(text) = row.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                    return Err("éléments absents");
+                };
+                if !picklist_item(&kind, text) {
+                    return Err("éléments absents");
+                }
+                items.push(text.to_string());
+            }
+            items
+        }
+        Some(_) => return Err("éléments absents"),
+    };
+    let suggested = match object.get("isSuggested") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("suggestion absente"),
+    };
+    Ok((name, kind, items, suggested))
+}
+
+fn picklist_item(kind: &str, text: &str) -> bool {
+    match kind {
+        "String" => true,
+        "Integer" => {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        }
+        "Double" => text.parse::<f64>().ok().is_some_and(|number| number.is_finite()),
+        _ => false,
+    }
+}
+
+fn dress_picklist(org: &str, project: &str, mut item: Value) -> Value {
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/lists/{id}")),
+        );
     }
     item
 }

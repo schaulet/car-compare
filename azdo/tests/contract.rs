@@ -25581,3 +25581,324 @@ async fn removing_one_delivery_plan_keeps_the_sibling_the_tfvc_label_and_the_oth
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("plan de livraison introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_picklist_keeps_the_sibling_the_delivery_plan_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/AzurzDemo/_apis/work/processes/lists?api-version=7.1";
+
+    async fn create(
+        app: &axum::Router,
+        auth: &str,
+        project: &str,
+        name: &str,
+        kind: Option<&str>,
+        items: Option<&str>,
+        suggested: Option<bool>,
+    ) -> String {
+        let path = format!("/azurz/{project}/_apis/work/processes/lists?api-version=7.1");
+        let kind_json = match kind {
+            Some(kind) => format!(r#","type":"{kind}""#),
+            None => String::new(),
+        };
+        let items_json = match items {
+            Some(items) => format!(r#","items":{items}"#),
+            None => String::new(),
+        };
+        let suggested_json = match suggested {
+            Some(suggested) => format!(r#","isSuggested":{suggested}"#),
+            None => String::new(),
+        };
+        let body = format!(r#"{{"name":"{name}"{kind_json}{items_json}{suggested_json}}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("list-"), "{created}");
+        assert_eq!(created["name"], name);
+        assert_eq!(created["type"], kind.unwrap_or("String"));
+        assert_eq!(created["isSuggested"], suggested.unwrap_or(false));
+        assert_eq!(created["project"], project);
+        let expected_items: serde_json::Value = serde_json::from_str(items.unwrap_or("[]")).unwrap();
+        assert_eq!(created["items"], expected_items);
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!("/{project}/_apis/work/processes/lists/{}", created["id"].as_str().unwrap())),
+            "{created}"
+        );
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null"] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("liste illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","type":1}"#, r#"{"name":"Pompe","type":null}"#, r#"{"name":"Pompe","type":"DateTime"}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("type absent"), "{body}");
+    }
+    for payload in [
+        r#"{"name":"Pompe","items":null}"#,
+        r#"{"name":"Pompe","items":{}}"#,
+        r#"{"name":"Pompe","items":[1]}"#,
+        r#"{"name":"Pompe","items":[""]}"#,
+        r#"{"name":"Pompe","items":[" "]}"#,
+        r#"{"name":"Pompe","type":"Integer","items":["1.5"]}"#,
+        r#"{"name":"Pompe","type":"Double","items":["a"]}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("éléments absents"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","isSuggested":1}"#, r#"{"name":"Pompe","isSuggested":null}"#, r#"{"name":"Pompe","isSuggested":"true"}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("suggestion absente"), "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/work/processes/lists?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["project"], "AzurzDemo");
+    assert_eq!(sonde["type"], "String");
+    assert_eq!(sonde["items"], serde_json::json!([]));
+    assert_eq!(sonde["isSuggested"], false);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/work/processes/lists/{}?api-version=7.1", sonde["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pompe = create(&app, &auth, "AzurzDemo", "Pompe", None, None, None).await;
+    let relais = create(&app, &auth, "AzurzDemo", "Relais", Some("Integer"), Some(r#"["1","2"]"#), Some(true)).await;
+    let atelier = create(&app, &auth, "Atelier", "Atelier", Some("Double"), Some(r#"["1.5","2"]"#), None).await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("liste existante"), "{body}");
+    let same_name = create(&app, &auth, "Atelier", "Pompe", None, None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/Atelier/_apis/work/processes/lists/{same_name}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/plans?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","description":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let plan_id = plan["id"].as_str().unwrap().to_string();
+    assert_eq!(plan["name"], "Pompe");
+    assert_eq!(plan["type"], "deliveryTimelineView");
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["type"], "String");
+    assert_eq!(pompe_row["items"], serde_json::json!([]));
+    assert_eq!(pompe_row["isSuggested"], false);
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais);
+    assert_eq!(relais_row["type"], "Integer");
+    assert_eq!(relais_row["items"], serde_json::json!(["1", "2"]));
+    assert_eq!(relais_row["isSuggested"], true);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/work/processes/lists?project=AzurzDemo&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let scoped: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(scoped["count"], 2, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/work/processes/lists?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let everyone: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(everyone["count"], 3, "{body}");
+    let one = format!("/azurz/AzurzDemo/_apis/work/processes/lists/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["name"], "Pompe");
+    assert_eq!(fetched["type"], "String");
+    assert_eq!(fetched["project"], "AzurzDemo");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/work/processes/lists/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let org_fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(org_fetched["id"], pompe);
+    assert_eq!(org_fetched["project"], "AzurzDemo");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/processes/lists/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("liste de sélection introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/lists/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/lists/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("liste de sélection introuvable"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &one, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("liste de sélection introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["type"], "Integer");
+    assert_eq!(sibling["items"], serde_json::json!(["1", "2"]));
+    assert_eq!(sibling["isSuggested"], true);
+    let other = format!("/azurz/Atelier/_apis/work/processes/lists/{atelier}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &other, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["id"], atelier);
+    assert_eq!(kept_other["name"], "Atelier");
+    assert_eq!(kept_other["type"], "Double");
+    assert_eq!(kept_other["items"], serde_json::json!(["1.5", "2"]));
+    assert_eq!(kept_other["isSuggested"], false);
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/plans/{plan_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_plan["id"], plan_id);
+    assert_eq!(kept_plan["name"], "Pompe");
+    assert_eq!(kept_plan["description"], "Pompe");
+    assert_eq!(kept_plan["type"], "deliveryTimelineView");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("liste de sélection introuvable"), "{body}");
+}

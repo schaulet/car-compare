@@ -82,6 +82,16 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         ("serviceendpoint", "types") => crate::tracking::endpoint_types(method),
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
         ("graph", "groups") => graph_groups(state, method, org, rest, query, body),
+        ("work", "processes") => {
+            let project = query_param(query, "project")
+                .map(pct_decode)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            match project {
+                Some(project) => crate::tracking::picklists(state, method, org, &project, rest, body),
+                None => crate::tracking::picklists_org(state, method, org, rest, body),
+            }
+        }
         _ => return None,
     };
     Some(response)
