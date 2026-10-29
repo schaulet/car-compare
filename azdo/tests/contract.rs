@@ -21184,6 +21184,84 @@ async fn removing_one_feed_view_keeps_the_sibling_and_the_other_project() {
         Some(&auth),
         None,
         "application/json",
+        Some(r#"{"name":"alpha"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let alpha: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let alpha_id = alpha["id"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"beta"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let beta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let beta_id = beta["id"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{alpha_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"gamma"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gamma: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let gamma_id = gamma["id"].as_str().unwrap();
+    assert_ne!(gamma_id, beta_id.as_str());
+    assert_ne!(gamma_id, alpha_id.as_str());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{beta_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_beta: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_beta["name"], "beta");
+    for id in [beta_id.as_str(), gamma_id] {
+        let (status, body, _) = call(
+            &app,
+            "DELETE",
+            &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{id}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
         Some(r#"{"name":"pompe"}"#),
     )
     .await;

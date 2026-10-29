@@ -5378,7 +5378,13 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
         let name = text_of(&payload, "name").unwrap_or_else(|| "feed".into());
-        let next = list(state, org, project, key).len() as i64 + 1;
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| text_of(&item, "id"))
+            .filter_map(|id| id.strip_prefix("feed-").and_then(|suffix| suffix.parse::<i64>().ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
         let id = format!("feed-{next:08}");
         let item = dress_feed(org, project, json!({"id": id, "name": name}));
         put_item(state, org, project, key, item.clone());
