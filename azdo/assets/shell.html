@@ -1825,7 +1825,7 @@
             collection("release/releases"),
             collection("release/approvals"),
           ]);
-          const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Définition</th><th>Environnements</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc((item.environments || []).map((env) => env.name).join(", ")) + "</td><td><button type='button' class='release' data-id='" + esc(item.id) + "'>Créer une version</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune définition.</p>";
+          const defs = definitions.length ? "<table id='release-definitions'><thead><tr><th>ID</th><th>Définition</th><th>Environnements</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc((item.environments || []).map((env) => env.name).join(", ")) + "</td><td><button type='button' class='release' data-id='" + esc(item.id) + "'>Créer une version</button> <button type='button' class='reldef-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='reldef-empty' class='sub'>Aucune définition.</p>";
           const runs = releases.length ? "<table id='releases'><thead><tr><th>Version</th><th>État</th><th>Description</th><th>Environnements</th><th></th></tr></thead><tbody>" + releases.map((item) => {
             const action = item.status === "abandoned" ? "" : "<button type='button' class='abandon' data-id='" + esc(item.id) + "'>Abandonner</button>";
             return "<tr data-status='" + esc(item.status) + "'><td>" + esc(item.name) + "</td><td class='release-status'>" + esc(item.status) + "</td><td>" + esc(item.description || "") + "</td><td>" + esc((item.environments || []).map((env) => env.name + " " + env.status).join(", ")) + "</td><td>" + action + "</td></tr>";
@@ -1841,6 +1841,20 @@
             });
             location.reload();
           };
+          document.querySelectorAll("button.reldef-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              try {
+                await api("DELETE", root + "/release/definitions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("release-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.querySelectorAll("button.release").forEach((button) => {
             button.onclick = async (event) => {
               event.stopPropagation();

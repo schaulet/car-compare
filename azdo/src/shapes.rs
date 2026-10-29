@@ -4909,12 +4909,32 @@ fn release_definitions(state: &AppState, method: &Method, org: &str, project: &s
         put_item(state, org, project, key, item.clone());
         return Json(item).into_response();
     }
+    if rest.len() == 2 && method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
     if method == Method::GET {
         return match get_item(state, org, project, key, id) {
             Some(item) => Json(item).into_response(),
             None => fail(StatusCode::NOT_FOUND, "définition introuvable"),
         };
+    }
+    if method == Method::DELETE {
+        if rest.len() != 3 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(found) = get_item(state, org, project, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "définition introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "définition introuvable")
 }
