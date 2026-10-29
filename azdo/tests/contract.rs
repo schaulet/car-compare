@@ -11048,3 +11048,281 @@ async fn dashboard_can_be_renamed_and_a_widget_removed() {
     assert_eq!(removed_notes.len(), 1);
     assert_eq!(removed_notes[0]["resource"]["name"], "Note");
 }
+
+#[tokio::test]
+async fn package_can_be_removed_from_the_feed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let pom = "<project><artifactId>oee</artifactId><version>1.0.0</version></project>";
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/absent/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "flux introuvable");
+
+    for name in ["ligne-packages", "autre-packages"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        Some(pom),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let later = "<project><version>1.1.0</version></project>";
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.1.0/oee-1.1.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        Some(later),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/autre-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        Some(pom),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.2.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("paquet 1.2.0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.3.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("paquet 1.3.0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/maven-metadata.xml",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "méthode refusée");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.jar",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "paquet Maven introuvable");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, pom);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"packaging.package.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.1.0/oee-1.1.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, later);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/maven-metadata.xml",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<version>1.1.0</version>"), "{body}");
+    assert!(!body.contains("<version>1.0.0</version>"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/autre-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, pom);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-packages/maven/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let maven: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(maven["count"], 1);
+    assert_eq!(maven["value"][0]["version"], "1.1.0");
+    assert!(maven["value"][0].get("content").is_none());
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.2.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("oee-1.3.0.tar.gz"), "{body}");
+    assert!(!body.contains("oee-1.2.0.tar.gz"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.3.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "paquet 1.3.0");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.2.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "paquet PyPI introuvable");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "packaging.package.deleted").collect();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0]["resource"]["filename"], "oee-1.0.0.pom");
+    assert_eq!(notes[0]["resource"]["name"], "oee");
+    assert_eq!(notes[0]["resource"]["protocol"], "maven");
+    assert!(notes[0]["resource"].get("content").is_none());
+    assert_eq!(notes[1]["resource"]["filename"], "oee-1.2.0.tar.gz");
+    assert_eq!(notes[1]["resource"]["protocol"], "pypi");
+    assert!(notes[1]["resource"].get("content").is_none());
+}

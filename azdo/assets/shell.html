@@ -1272,18 +1272,29 @@
               rows.forEach((item) => packages.push({
                 feed: feed.name,
                 protocol: protocol,
+                groupId: item.groupId || "",
                 name: item.artifactId || item.name,
                 version: item.version,
                 filename: item.filename,
               }));
             }
           }
-          const table = feeds.length ? "<table><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun flux.</p>";
-          const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun paquet Maven ou PyPI.</p>";
+          const table = feeds.length ? "<table id='feeds'><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feeds-empty'>Aucun flux.</p>";
+          const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th><th></th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td><td><button type='button' class='pkg-remove' data-feed='" + esc(item.feed) + "' data-protocol='" + esc(item.protocol) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "' data-version='" + esc(item.version) + "' data-filename='" + esc(item.filename) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='packages-empty'>Aucun paquet Maven ou PyPI.</p>";
           const options = feeds.map((item) => "<option value='" + esc(item.name) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Artefacts</h1><div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div>" + listed;
+          view.innerHTML = "<h1>Artefacts</h1><div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
+          function showPkgError(error) {
+            const note = document.getElementById("pkg-error");
+            note.hidden = false;
+            note.textContent = error.message;
+          }
           document.getElementById("create").onclick = async () => {
-            await api("POST", root + "/packaging/feeds?api-version=7.1", { name: document.getElementById("feed-name").value || "flux" });
+            try {
+              await api("POST", root + "/packaging/feeds?api-version=7.1", { name: document.getElementById("feed-name").value || "flux" });
+            } catch (error) {
+              showPkgError(error);
+              return;
+            }
             location.reload();
           };
           document.getElementById("pkg-publish").onclick = async () => {
@@ -1293,17 +1304,41 @@
             const version = document.getElementById("pkg-version").value || "1.0.0";
             const group = document.getElementById("pkg-group").value || "com.azurz";
             if (!feed) return;
-            if (protocol === "maven") {
-              const path = group.split(".").filter(Boolean).join("/");
-              const filename = name + "-" + version + ".pom";
-              const pom = "<project><groupId>" + group + "</groupId><artifactId>" + name + "</artifactId><version>" + version + "</version></project>";
-              await api("PUT", "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/maven/v1/" + path + "/" + encodeURIComponent(name) + "/" + encodeURIComponent(version) + "/" + encodeURIComponent(filename), pom, "application/xml");
-            } else {
-              const filename = name + "-" + version + ".tar.gz";
-              await api("PUT", "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/pypi/simple/" + encodeURIComponent(name) + "/" + encodeURIComponent(filename), "paquet " + name + " " + version, "application/octet-stream");
+            try {
+              if (protocol === "maven") {
+                const path = group.split(".").filter(Boolean).join("/");
+                const filename = name + "-" + version + ".pom";
+                const pom = "<project><groupId>" + group + "</groupId><artifactId>" + name + "</artifactId><version>" + version + "</version></project>";
+                await api("PUT", "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/maven/v1/" + path + "/" + encodeURIComponent(name) + "/" + encodeURIComponent(version) + "/" + encodeURIComponent(filename), pom, "application/xml");
+              } else {
+                const filename = name + "-" + version + ".tar.gz";
+                await api("PUT", "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/pypi/simple/" + encodeURIComponent(name) + "/" + encodeURIComponent(filename), "paquet " + name + " " + version, "application/octet-stream");
+              }
+            } catch (error) {
+              showPkgError(error);
+              return;
             }
             location.reload();
           };
+          document.querySelectorAll("button.pkg-remove").forEach((button) => {
+            button.onclick = async () => {
+              const feed = button.dataset.feed;
+              let path;
+              if (button.dataset.protocol === "maven") {
+                const group = (button.dataset.group || "").split(".").filter(Boolean).join("/");
+                path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/maven/v1/" + group + "/" + encodeURIComponent(button.dataset.name) + "/" + encodeURIComponent(button.dataset.version) + "/" + encodeURIComponent(button.dataset.filename);
+              } else {
+                path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feed) + "/pypi/simple/" + encodeURIComponent(button.dataset.name) + "/" + encodeURIComponent(button.dataset.filename);
+              }
+              try {
+                await api("DELETE", path);
+              } catch (error) {
+                showPkgError(error);
+                return;
+              }
+              location.reload();
+            };
+          });
           return;
         }
         if (hub === "/_wiki") {
@@ -1872,10 +1907,11 @@
             if (resource.releaseDefinition && resource.name) return resource.name;
             if (resource.dashboardScope && resource.name) return resource.name;
             if (resource.contributionId && resource.name) return resource.name;
+            if (resource.protocol && resource.filename) return resource.filename;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='packaging.package.deleted'>packaging.package.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1955,6 +1991,13 @@
               const definition = await api("POST", root + "/release/definitions?api-version=7.1", { name: title, environments: [{ name: "Production", rank: 1 }] });
               const release = await api("POST", root + "/release/releases?api-version=7.1", { definitionId: definition.id, description: title });
               await api("PATCH", root + "/release/releases/" + encodeURIComponent(release.id) + "?api-version=7.1", { status: "abandoned" });
+            } else if (event === "packaging.package.deleted") {
+              const feedName = "hooks-" + Date.now();
+              await api("POST", root + "/packaging/feeds?api-version=7.1", { name: feedName });
+              const filename = "oee-1.0.0.pom";
+              const path = "/" + org + "/" + project + "/_packaging/" + encodeURIComponent(feedName) + "/maven/v1/com/azurz/oee/1.0.0/" + filename;
+              await api("PUT", path, "<project>" + title + "</project>", "application/xml");
+              await api("DELETE", path);
             } else if (event === "dashboard.updated" || event === "dashboard.widget.deleted") {
               const created = await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: title });
               if (event === "dashboard.updated") {

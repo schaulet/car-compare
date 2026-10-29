@@ -440,6 +440,9 @@ fn maven(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &
             None => fail(StatusCode::NOT_FOUND, "paquet Maven introuvable"),
         };
     }
+    if method == Method::DELETE {
+        return remove_package(state, org, project, &key, &stored_id, "maven", "paquet Maven introuvable");
+    }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
@@ -505,7 +508,38 @@ fn pypi(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &s
             None => fail(StatusCode::NOT_FOUND, "paquet PyPI introuvable"),
         };
     }
+    if method == Method::DELETE {
+        return remove_package(state, org, project, &key, &stored_id, "pypi", "paquet PyPI introuvable");
+    }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn remove_package(state: &AppState, org: &str, project: &str, key: &str, id: &str, protocol: &str, missing: &'static str) -> Response {
+    let Some(item) = get_project(state, org, project, key, id) else {
+        return fail(StatusCode::NOT_FOUND, missing);
+    };
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            if let Some(bucket) = stored.buckets.get_mut(key) {
+                bucket.remove(id);
+            }
+        }
+    });
+    crate::shapes::deliver_work_item(state, org, project, "packaging.package.deleted", &package_notice(protocol, &item));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn package_notice(protocol: &str, item: &Value) -> Value {
+    let mut resource = without_content(item.clone());
+    if let Some(object) = resource.as_object_mut() {
+        object.insert("protocol".into(), json!(protocol));
+        if object.get("name").and_then(|value| value.as_str()).is_none() {
+            if let Some(artifact) = object.get("artifactId").cloned() {
+                object.insert("name".into(), artifact);
+            }
+        }
+    }
+    resource
 }
 
 fn strip_prefix<'a>(tail: &'a [String], prefix: &str) -> &'a [String] {
