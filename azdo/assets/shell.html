@@ -2010,7 +2010,7 @@
           const params = new URLSearchParams(location.search);
           const runId = params.get("run");
           const runs = await collection("test/runs");
-          const table = runs.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Réussis</th></tr></thead><tbody>" + runs.map((item) => "<tr class='click run' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.passedTests) + " / " + esc(item.totalTests) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
+          const table = runs.length ? "<table id='run-list'><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Réussis</th><th></th></tr></thead><tbody>" + runs.map((item) => "<tr class='click run' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.passedTests) + " / " + esc(item.totalTests) + "</td><td><button type='button' class='run-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='run-empty' class='sub'>Aucune exécution.</p>";
           let detail = "";
           if (runId) {
             const results = await collection("test/runs/" + encodeURIComponent(runId) + "/results");
@@ -2020,10 +2020,17 @@
           view.innerHTML = "<h1>Exécutions</h1><div class='command'><input id='run-name' placeholder='Nouvelle exécution' /><button id='run-create' type='button'>Créer</button></div>" + table + detail;
           document.getElementById("run-create").onclick = async () => {
             await api("POST", root + "/test/runs?api-version=7.1", { name: document.getElementById("run-name").value || "Exécution" });
-            location.href = location.pathname;
+            location.reload();
           };
           document.querySelectorAll("tr.run").forEach((row) => {
             row.onclick = () => { location.href = location.pathname + "?run=" + encodeURIComponent(row.dataset.id); };
+          });
+          document.querySelectorAll("button.run-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              location.reload();
+            };
           });
           const add = document.getElementById("result-add");
           if (add) {

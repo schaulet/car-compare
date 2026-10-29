@@ -4429,6 +4429,9 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     }
     let run_id = rest.get(2).map(String::as_str).unwrap_or("");
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("results") {
+        if get_item(state, org, project, key, run_id).is_none() {
+            return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+        }
         let results_key = format!("test/runs/{run_id}/results");
         if method == Method::GET {
             return Json(page(list(state, org, project, &results_key))).into_response();
@@ -4468,6 +4471,21 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
             Some(item) => Json(item).into_response(),
             None => fail(StatusCode::NOT_FOUND, "exécution introuvable"),
         };
+    }
+    if method == Method::DELETE && rest.len() == 3 {
+        if get_item(state, org, project, key, run_id).is_none() {
+            return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+        }
+        let results_key = format!("test/runs/{run_id}/results");
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(run_id);
+                }
+                stored.buckets.remove(&results_key);
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
