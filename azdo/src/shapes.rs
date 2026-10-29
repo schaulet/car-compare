@@ -65,7 +65,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     Some(response)
 }
 
-pub fn wit_catalog(method: &Method, org: &str, project: &str, rest: &[String]) -> Option<Response> {
+pub fn wit_catalog(method: &Method, _org: &str, _project: &str, rest: &[String]) -> Option<Response> {
     if method != Method::GET {
         return None;
     }
@@ -75,9 +75,6 @@ pub fn wit_catalog(method: &Method, org: &str, project: &str, rest: &[String]) -
     }
     if resource == "fields" && rest.len() == 2 {
         return Some(Json(wit_fields()).into_response());
-    }
-    if resource == "classificationnodes" {
-        return Some(Json(classification(org, project, rest)).into_response());
     }
     None
 }
@@ -2086,35 +2083,271 @@ fn wit_fields() -> Value {
     page(value)
 }
 
-fn classification(org: &str, project: &str, rest: &[String]) -> Value {
-    let kind = rest.get(2).map(|value| value.to_ascii_lowercase()).unwrap_or_else(|| "areas".into());
-    if kind == "iterations" {
-        return json!({
-            "id": 2,
-            "identifier": "iteration",
-            "name": project,
-            "structureType": "iteration",
-            "hasChildren": true,
-            "path": format!("\\{project}\\Iteration"),
-            "url": format!("/{org}/{project}/_apis/wit/classificationnodes/iterations"),
-            "children": [{
-                "id": 3,
-                "name": "Sprint 1",
-                "structureType": "iteration",
-                "hasChildren": false,
-                "path": format!("\\{project}\\Iteration\\Sprint 1")
-            }]
-        });
+pub fn classification_nodes(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    ensure_classification(state, org, project);
+    let kind = rest.get(2).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
+    if kind != "areas" && kind != "iterations" {
+        if rest.len() == 2 && method == Method::GET {
+            let depth = classification_depth(query);
+            let value = ["areas", "iterations"]
+                .into_iter()
+                .filter_map(|group| classification_tree(state, org, project, group, "", depth))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        return fail(StatusCode::NOT_FOUND, "nœud introuvable");
     }
-    json!({
-        "id": 1,
-        "identifier": "area",
-        "name": project,
-        "structureType": "area",
-        "hasChildren": false,
-        "path": format!("\\{project}\\Area"),
-        "url": format!("/{org}/{project}/_apis/wit/classificationnodes/areas")
-    })
+    let relative = rest.get(3..).map(|parts| parts.join("\\")).unwrap_or_default();
+    let root = classification_root(project, &kind);
+    let path = if relative.is_empty() { root.clone() } else { format!("{root}\\{relative}") };
+    if method == Method::GET {
+        let depth = classification_depth(query);
+        return match classification_tree(state, org, project, &kind, &path, depth) {
+            Some(node) => Json(node).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "nœud introuvable"),
+        };
+    }
+    if method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_default();
+        if name.trim().is_empty() || name.contains('\\') || name.contains('/') {
+            return fail(StatusCode::BAD_REQUEST, "nom de nœud absent");
+        }
+        if classification_nodes_of(state, org, project, &kind).iter().any(|node| {
+            node_parent(node) == path && text_of(node, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+        }) {
+            return fail(StatusCode::BAD_REQUEST, "nœud existant");
+        }
+        if classification_by_path(state, org, project, &kind, &path).is_none() {
+            return fail(StatusCode::NOT_FOUND, "nœud introuvable");
+        }
+        let structure = if kind == "iterations" { "iteration" } else { "area" };
+        let created = state.write(|db| {
+            let stored = db.project_mut(org, project)?;
+            let key = classification_key(&kind);
+            let next = stored
+                .list_bucket(&key)
+                .iter()
+                .filter_map(|node| node.get("id").and_then(|value| value.as_i64()))
+                .max()
+                .unwrap_or(3)
+                + 1;
+            let mut item = json!({
+                "id": next,
+                "identifier": format!("node-{next}"),
+                "name": name,
+                "structureType": structure,
+                "path": format!("{path}\\{name}"),
+                "url": format!("/{org}/{project}/_apis/wit/classificationnodes/{kind}")
+            });
+            if let Some(attributes) = payload.get("attributes").filter(|value| value.is_object()) {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("attributes".into(), attributes.clone());
+                }
+            }
+            Some(stored.put_bucket(&key, item))
+        });
+        return match created {
+            Some(item) => Json(dress_classification(item, Vec::new())).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+        };
+    }
+    if path == root {
+        return fail(StatusCode::BAD_REQUEST, "nœud racine");
+    }
+    if method == Method::PATCH || method == Method::PUT {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let Some(current) = classification_by_path(state, org, project, &kind, &path) else {
+            return fail(StatusCode::NOT_FOUND, "nœud introuvable");
+        };
+        let old_path = text_of(&current, "path").unwrap_or(path.clone());
+        let new_name = text_of(&payload, "name").unwrap_or_else(|| text_of(&current, "name").unwrap_or_default());
+        if new_name.trim().is_empty() || new_name.contains('\\') || new_name.contains('/') {
+            return fail(StatusCode::BAD_REQUEST, "nom de nœud absent");
+        }
+        let parent = node_parent(&current);
+        let new_path = format!("{parent}\\{new_name}");
+        let updated = state.write(|db| {
+            let stored = db.project_mut(org, project)?;
+            let key = classification_key(&kind);
+            let nodes = stored.list_bucket(&key);
+            let mut renamed = None;
+            for mut node in nodes {
+                let node_path = text_of(&node, "path").unwrap_or_default();
+                let next_path = if node_path == old_path {
+                    new_path.clone()
+                } else if let Some(rest) = node_path.strip_prefix(&format!("{old_path}\\")) {
+                    format!("{new_path}\\{rest}")
+                } else {
+                    continue;
+                };
+                if let Some(object) = node.as_object_mut() {
+                    object.insert("path".into(), json!(next_path));
+                    if node_path == old_path {
+                        object.insert("name".into(), json!(new_name));
+                        if let Some(attributes) = payload.get("attributes").filter(|value| value.is_object()) {
+                            object.insert("attributes".into(), attributes.clone());
+                        }
+                    }
+                }
+                let saved = stored.put_bucket(&key, node);
+                if node_path == old_path {
+                    renamed = Some(saved);
+                }
+            }
+            renamed
+        });
+        return match updated {
+            Some(item) => Json(dress_classification(item, Vec::new())).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "nœud introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let removed = state.write(|db| {
+            let stored = db.project_mut(org, project)?;
+            let key = classification_key(&kind);
+            let ids: Vec<String> = stored
+                .list_bucket(&key)
+                .into_iter()
+                .filter(|node| {
+                    let node_path = text_of(node, "path").unwrap_or_default();
+                    node_path == path || node_path.starts_with(&format!("{path}\\"))
+                })
+                .map(|node| value_key(&node["id"]))
+                .filter(|id| !id.is_empty())
+                .collect();
+            if ids.is_empty() {
+                return Some(false);
+            }
+            if let Some(bucket) = stored.buckets.get_mut(&key) {
+                for id in ids {
+                    bucket.remove(&id);
+                }
+            }
+            Some(true)
+        });
+        return match removed {
+            Some(true) => StatusCode::NO_CONTENT.into_response(),
+            Some(false) => fail(StatusCode::NOT_FOUND, "nœud introuvable"),
+            None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn ensure_classification(state: &AppState, org: &str, project: &str) {
+    state.write(|db| {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return;
+        };
+        for (kind, id, identifier, structure, path_suffix) in [
+            ("areas", 1, "area", "area", "Area"),
+            ("iterations", 2, "iteration", "iteration", "Iteration"),
+        ] {
+            let key = classification_key(kind);
+            if stored.list_bucket(&key).is_empty() {
+                stored.put_bucket(
+                    &key,
+                    json!({
+                        "id": id,
+                        "identifier": identifier,
+                        "name": project,
+                        "structureType": structure,
+                        "path": format!("\\{project}\\{path_suffix}"),
+                        "url": format!("/{org}/{project}/_apis/wit/classificationnodes/{kind}")
+                    }),
+                );
+            }
+        }
+        let iterations = classification_key("iterations");
+        let sprint = format!("\\{project}\\Iteration\\Sprint 1");
+        if stored.get_bucket(&iterations, "3").is_none()
+            && stored.list_bucket(&iterations).iter().all(|node| text_of(node, "path").as_deref() != Some(sprint.as_str()))
+        {
+            stored.put_bucket(
+                &iterations,
+                json!({
+                    "id": 3,
+                    "identifier": "node-3",
+                    "name": "Sprint 1",
+                    "structureType": "iteration",
+                    "path": sprint,
+                    "url": format!("/{org}/{project}/_apis/wit/classificationnodes/iterations")
+                }),
+            );
+        }
+    });
+}
+
+fn classification_tree(state: &AppState, org: &str, project: &str, kind: &str, path: &str, depth: usize) -> Option<Value> {
+    let target = if path.is_empty() { classification_root(project, kind) } else { path.to_string() };
+    let node = classification_by_path(state, org, project, kind, &target)?;
+    let children = if depth == 0 {
+        Vec::new()
+    } else {
+        classification_nodes_of(state, org, project, kind)
+            .into_iter()
+            .filter(|child| node_parent(child) == target)
+            .filter_map(|child| {
+                let child_path = text_of(&child, "path")?;
+                classification_tree(state, org, project, kind, &child_path, depth - 1)
+            })
+            .collect()
+    };
+    Some(dress_classification(node, children))
+}
+
+fn dress_classification(mut item: Value, children: Vec<Value>) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        object.insert("hasChildren".into(), json!(!children.is_empty()));
+        if children.is_empty() {
+            object.remove("children");
+        } else {
+            object.insert("children".into(), json!(children));
+        }
+    }
+    item
+}
+
+fn classification_nodes_of(state: &AppState, org: &str, project: &str, kind: &str) -> Vec<Value> {
+    list(state, org, project, &classification_key(kind))
+}
+
+fn classification_by_path(state: &AppState, org: &str, project: &str, kind: &str, path: &str) -> Option<Value> {
+    classification_nodes_of(state, org, project, kind)
+        .into_iter()
+        .find(|node| text_of(node, "path").as_deref() == Some(path))
+}
+
+fn classification_root(project: &str, kind: &str) -> String {
+    let suffix = if kind == "iterations" { "Iteration" } else { "Area" };
+    format!("\\{project}\\{suffix}")
+}
+
+fn classification_key(kind: &str) -> String {
+    format!("wit/classification/{kind}")
+}
+
+fn node_parent(node: &Value) -> String {
+    text_of(node, "path")
+        .and_then(|path| path.rsplit_once('\\').map(|(parent, _)| parent.to_string()))
+        .unwrap_or_default()
+}
+
+fn classification_depth(query: &str) -> usize {
+    query_param(query, "$depth")
+        .or_else(|| query_param(query, "depth"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
 }
 
 fn dress_repo(org: &str, project: &str, mut item: Value) -> Value {

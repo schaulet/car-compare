@@ -111,6 +111,7 @@
       <a href="/__ORG__/__PROJECT__/_boards">Tableaux</a>
       <a href="/__ORG__/__PROJECT__/_backlogs">Backlogs</a>
       <a href="/__ORG__/__PROJECT__/_sprints">Sprints</a>
+      <a href="/__ORG__/__PROJECT__/_areas">Zones</a>
       <a href="/__ORG__/__PROJECT__/_queries">Requêtes</a>
       <div class="group">Dépôts</div>
       <a href="/__ORG__/__PROJECT__/_git">Fichiers</a>
@@ -376,6 +377,63 @@
               column.appendChild(card);
             };
           });
+          return;
+        }
+        if (hub === "/_areas") {
+          const areas = await api("GET", root + "/wit/classificationnodes/areas?$depth=2&api-version=7.1");
+          const iterations = await api("GET", root + "/wit/classificationnodes/iterations?$depth=2&api-version=7.1");
+          function relative(node, rootPath) {
+            if (!node || node.path === rootPath) return "";
+            const prefix = rootPath + "\\";
+            return String(node.path || "").startsWith(prefix) ? node.path.slice(prefix.length) : node.path;
+          }
+          function walk(node, kind, rootPath, acc) {
+            const rel = relative(node, rootPath);
+            if (rel) acc.push({ kind: kind, rel: rel, path: node.path, name: node.name });
+            (node.children || []).forEach((child) => walk(child, kind, rootPath, acc));
+          }
+          const nodes = [];
+          walk(areas, "areas", "\\" + project + "\\Area", nodes);
+          walk(iterations, "iterations", "\\" + project + "\\Iteration", nodes);
+          const list = nodes.length ? "<ul id='node-tree'>" + nodes.map((node) => "<li><button type='button' class='page node-open' data-kind='" + esc(node.kind) + "' data-rel='" + esc(node.rel) + "' data-name='" + esc(node.name) + "'>" + esc(node.path) + "</button></li>").join("") + "</ul>" : "<p class='sub'>Aucun nœud en plus des racines.</p>";
+          view.innerHTML = "<h1>Zones</h1><p class='sub'>Racine de zone " + esc(areas.path) + " · racine d'itération " + esc(iterations.path) + "</p>" + list + "<div class='command'><select id='node-kind'><option value='areas'>Zone</option><option value='iterations'>Itération</option></select><input id='node-parent' placeholder='Parent, ex. Ligne A' /><input id='node-name' placeholder='Nom' /><input id='node-start' placeholder='Début' /><input id='node-finish' placeholder='Fin' /></div><div class='command'><button id='node-add' type='button'>Créer</button><button id='node-rename' type='button'>Renommer</button><button id='node-delete' type='button'>Supprimer</button></div>";
+          let current = null;
+          document.querySelectorAll("button.node-open").forEach((button) => {
+            button.onclick = () => {
+              current = { kind: button.dataset.kind, rel: button.dataset.rel };
+              document.getElementById("node-kind").value = button.dataset.kind;
+              document.getElementById("node-name").value = button.dataset.name || "";
+              const parent = button.dataset.rel.includes("\\") ? button.dataset.rel.slice(0, button.dataset.rel.lastIndexOf("\\")) : "";
+              document.getElementById("node-parent").value = parent;
+            };
+          });
+          function nodeUrl(kind, rel) {
+            const tail = rel ? "/" + rel.split("\\").map(encodeURIComponent).join("/") : "";
+            return root + "/wit/classificationnodes/" + kind + tail + "?api-version=7.1";
+          }
+          document.getElementById("node-add").onclick = async () => {
+            const kind = document.getElementById("node-kind").value;
+            const parent = document.getElementById("node-parent").value.trim();
+            const name = document.getElementById("node-name").value || "Zone";
+            const body = { name: name };
+            const start = document.getElementById("node-start").value.trim();
+            const finish = document.getElementById("node-finish").value.trim();
+            if (start || finish) body.attributes = {};
+            if (start) body.attributes.startDate = start;
+            if (finish) body.attributes.finishDate = finish;
+            await api("POST", nodeUrl(kind, parent), body);
+            location.reload();
+          };
+          document.getElementById("node-rename").onclick = async () => {
+            if (!current) return;
+            await api("PATCH", nodeUrl(current.kind, current.rel), { name: document.getElementById("node-name").value });
+            location.reload();
+          };
+          document.getElementById("node-delete").onclick = async () => {
+            if (!current) return;
+            await api("DELETE", nodeUrl(current.kind, current.rel));
+            location.href = location.pathname;
+          };
           return;
         }
         if (hub === "/_queries") {

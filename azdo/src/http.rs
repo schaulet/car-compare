@@ -264,6 +264,9 @@ impl AppState {
         body: &[u8],
     ) -> Response {
         let resource = rest.get(1).map(|value| value.to_ascii_lowercase());
+        if resource.as_deref() == Some("classificationnodes") {
+            return crate::shapes::classification_nodes(self, method, org, project, rest, query, body);
+        }
         if let Some(response) = crate::shapes::wit_catalog(method, org, project, rest) {
             return response;
         }

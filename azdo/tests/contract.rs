@@ -3295,3 +3295,143 @@ async fn pull_request_work_items_follow_artifact_links() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn classification_nodes_keep_children_when_a_parent_is_renamed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let root: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(root["name"], "AzurzDemo");
+    assert_eq!(root["structureType"], "area");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne A"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let area: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(area["path"], "\\AzurzDemo\\Area\\Ligne A");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Ligne%20A?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Machine"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(child["path"], "\\AzurzDemo\\Area\\Ligne A\\Machine");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Ligne%20A?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne nord"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Ligne%20nord/Machine?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let moved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(moved["path"], "\\AzurzDemo\\Area\\Ligne nord\\Machine");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sprint 2","attributes":{"startDate":"2026-11-09T00:00:00Z","finishDate":"2026-11-20T00:00:00Z"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sprint: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sprint["attributes"]["startDate"], "2026-11-09T00:00:00Z");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?$depth=2&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Sprint 1"), "{body}");
+    assert!(body.contains("Sprint 2"), "{body}");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne nord"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Ligne%20nord/Machine?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Ligne%20nord/Machine?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
