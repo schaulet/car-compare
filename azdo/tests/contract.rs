@@ -17541,3 +17541,210 @@ async fn removing_one_service_connection_keeps_the_sibling_and_its_secret() {
     assert!(!body.contains("secret-ada"), "{body}");
     assert!(!body.contains("secret-relais"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_package_keeps_the_sibling_and_its_version() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let feed_id = feed["id"].as_str().unwrap();
+    assert_eq!(feed_id, "feed-00000001");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/absent/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Orphelin","version":"9.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    let mut pompe_id = String::new();
+    let mut ada_id = String::new();
+    for (name, version) in [("Pompe", "1.0.0"), ("Ada", "2.0.0")] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","version":"{version}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        assert_eq!(created["versions"][0]["version"], version);
+        let id = created["id"].as_str().unwrap().to_string();
+        if name == "Pompe" {
+            pompe_id = id;
+        } else {
+            ada_id = id;
+        }
+    }
+    assert_eq!(pompe_id, "pkg-1");
+    assert_eq!(ada_id, "pkg-2");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages/absent?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/Ligne/packages/Pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["versions"][0]["version"], "2.0.0");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Relais","version":"3.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let relais: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(relais["id"], "pkg-3");
+    assert_eq!(relais["versions"][0]["version"], "3.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_kept["name"], "Ada");
+    assert_eq!(still_kept["versions"][0]["version"], "2.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let feed_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(feed_kept["name"], "Ligne");
+}

@@ -4992,18 +4992,51 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
     }
     let feed_id = rest.get(2).map(String::as_str).unwrap_or("");
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("packages") {
-        let packages = format!("packaging/feeds/{feed_id}/packages");
-        if method == Method::GET {
+        if method == Method::DELETE && rest.len() != 5 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(feed) = get_item(state, org, project, key, feed_id) else {
+            return fail(StatusCode::NOT_FOUND, "flux introuvable");
+        };
+        let stored_feed = text_of(&feed, "id").unwrap_or_default();
+        let packages = format!("packaging/feeds/{stored_feed}/packages");
+        if rest.len() == 4 && method == Method::GET {
             return Json(page(list(state, org, project, &packages))).into_response();
         }
-        if method == Method::POST {
+        if rest.len() == 4 && method == Method::POST {
             let payload = parse_json(body).unwrap_or(json!({}));
             let name = text_of(&payload, "name").unwrap_or_else(|| "package".into());
-            let next = list(state, org, project, &packages).len() as i64 + 1;
-            let item = json!({"id": format!("pkg-{next}"), "name": name, "versions": [{"version": text_of(&payload, "version").unwrap_or_else(|| "1.0.0".into())}]});
+            let version = text_of(&payload, "version").unwrap_or_else(|| "1.0.0".into());
+            let next = list(state, org, project, &packages)
+                .into_iter()
+                .filter_map(|item| text_of(&item, "id"))
+                .filter_map(|id| id.strip_prefix("pkg-").and_then(|suffix| suffix.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let item = json!({"id": format!("pkg-{next}"), "name": name, "versions": [{"version": version}]});
             put_item(state, org, project, &packages, item.clone());
             return Json(item).into_response();
         }
+        if rest.len() == 5 && (method == Method::GET || method == Method::DELETE) {
+            let package_id = rest[4].as_str();
+            let Some(found) = get_item(state, org, project, &packages, package_id) else {
+                return fail(StatusCode::NOT_FOUND, "paquet introuvable");
+            };
+            if method == Method::GET {
+                return Json(found).into_response();
+            }
+            let stored_id = text_of(&found, "id").unwrap_or_default();
+            state.write(|db| {
+                if let Some(stored) = db.project_mut(org, project) {
+                    if let Some(bucket) = stored.buckets.get_mut(&packages) {
+                        bucket.remove(&stored_id);
+                    }
+                }
+            });
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, feed_id) {
