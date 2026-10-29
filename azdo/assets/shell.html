@@ -464,7 +464,15 @@
               const reviewers = await api("GET", threadsPath + "/reviewers?api-version=7.1");
               const people = (Array.isArray(reviewers) ? reviewers : reviewers.value || []).map((person) => "<li>" + esc(person.displayName) + " · " + esc(person.vote) + "</li>").join("") || "<li>Aucun relecteur.</li>";
               const notes = (threads.value || []).flatMap((thread) => thread.comments || []).map((note) => "<li>" + esc(note.content) + "</li>").join("") || "<li>Aucun commentaire.</li>";
-              panel.innerHTML = "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div>";
+              const linked = await api("GET", threadsPath + "/workitems?api-version=7.1");
+              const details = await Promise.all((linked.value || []).map(async (ref) => {
+                const item = await api("GET", root + "/wit/workitems/" + encodeURIComponent(ref.id) + "?api-version=7.1");
+                const relations = item.relations || [];
+                const index = relations.findIndex((relation) => relation.rel === "ArtifactLink" && decodeURIComponent(relation.url || "").endsWith("/" + repoId + "/" + row.dataset.id));
+                return { id: ref.id, title: titleOf(item), index: index };
+              }));
+              const work = details.length ? details.map((item) => "<li>" + esc(item.id) + " · " + esc(item.title) + " <button type='button' class='unlink' data-id='" + esc(item.id) + "' data-index='" + item.index + "'>Retirer</button></li>").join("") : "<li>Aucun élément de travail.</li>";
+              panel.innerHTML = "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
               panel.querySelector("#reviewer-add").onclick = async () => {
                 await api("POST", threadsPath + "/reviewers?api-version=7.1", { displayName: panel.querySelector("#reviewer-name").value || "azurz", vote: Number(panel.querySelector("#reviewer-vote").value) });
                 row.click();
@@ -478,6 +486,23 @@
                 await api("POST", threadsPath + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
                 row.click();
               };
+              panel.querySelector("#pr-link").onclick = async () => {
+                const workId = panel.querySelector("#pr-work-id").value;
+                if (!workId) return;
+                const artifact = "vstfs:///Git/PullRequestId/" + encodeURIComponent(project) + "%2F" + encodeURIComponent(repoId) + "%2F" + encodeURIComponent(row.dataset.id);
+                await api("PATCH", root + "/wit/workitems/" + encodeURIComponent(workId) + "?api-version=7.1", [
+                  { op: "add", path: "/relations/-", value: { rel: "ArtifactLink", url: artifact, attributes: { name: "Pull Request" } } },
+                ], "application/json-patch+json");
+                row.click();
+              };
+              panel.querySelectorAll("button.unlink").forEach((button) => {
+                button.onclick = async () => {
+                  await api("PATCH", root + "/wit/workitems/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", [
+                    { op: "remove", path: "/relations/" + button.dataset.index },
+                  ], "application/json-patch+json");
+                  row.click();
+                };
+              });
             };
           });
           document.getElementById("create").onclick = async () => {

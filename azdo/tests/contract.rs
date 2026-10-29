@@ -3153,3 +3153,145 @@ async fn teams_keep_members_and_their_own_backlog_settings() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn pull_request_work_items_follow_artifact_links() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Lier la pompe","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe liee"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let linked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let linked_id = linked["id"].as_i64().unwrap();
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Hors demande"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list_path = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/workitems?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &list_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let artifact = format!("vstfs:///Git/PullRequestId/azurz-demo%2F{repo_id}%2F{pull_id}");
+    let patch = format!(
+        r#"[{{"op":"add","path":"/relations/-","value":{{"rel":"ArtifactLink","url":"{artifact}","attributes":{{"name":"Pull Request"}}}}}}]"#
+    );
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{linked_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other = format!("vstfs:///Git/PullRequestId/azurz-demo%2F{repo_id}%2F999");
+    let other_patch = format!(
+        r#"[{{"op":"add","path":"/relations/-","value":{{"rel":"ArtifactLink","url":"{other}","attributes":{{"name":"Pull Request"}}}}}}]"#
+    );
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_id = items["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["fields"]["System.Title"] == "Hors demande")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{other_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&other_patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = call(&app, "GET", &list_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(found["count"], 1, "{body}");
+    assert_eq!(found["value"][0]["id"], linked_id.to_string());
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{linked_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"remove","path":"/relations/0"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = call(&app, "GET", &list_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cleared: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cleared["count"], 0, "{body}");
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/99999/workitems?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

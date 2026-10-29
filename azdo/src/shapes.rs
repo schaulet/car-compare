@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 
-use crate::http::{fail, parse_json, query_param};
+use crate::http::{fail, parse_json, pct_decode, query_param};
 use crate::store::{object_id, value_key, Bucket};
 use crate::AppState;
 
@@ -785,7 +785,7 @@ fn pull_requests(
 
 fn pull_child(rest: &[String]) -> Option<(String, String)> {
     let index = rest.iter().position(|part| {
-        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations" | "reviewers")
+        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations" | "reviewers" | "workitems")
     })?;
     let id = rest.get(index.checked_sub(1)?)?.clone();
     if id.eq_ignore_ascii_case("pullrequests") || id.eq_ignore_ascii_case("repositories") {
@@ -804,6 +804,9 @@ fn pull_child_resource(
     body: &[u8],
 ) -> Response {
     let key = format!("git/pullrequests/{pull_id}/{kind}");
+    if kind == "workitems" {
+        return pull_work_items(state, method, org, project, pull_id);
+    }
     if kind == "reviewers" {
         return reviewers(state, method, org, project, pull_id, body);
     }
@@ -864,6 +867,67 @@ fn pull_child_resource(
     };
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn pull_work_items(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let project_id = state.read(|db| db.project(org, project).map(|stored| stored.id.clone())).unwrap_or_default();
+    let linked = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| {
+                stored
+                    .work_items
+                    .values()
+                    .filter(|item| work_item_links_pull(item, project, &project_id, &repo_id, pull_id))
+                    .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+                    .map(|id| {
+                        json!({
+                            "id": id.to_string(),
+                            "url": format!("/{org}/{project}/_apis/wit/workitems/{id}")
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    Json(page(linked)).into_response()
+}
+
+fn work_item_links_pull(item: &Value, project: &str, project_id: &str, repo_id: &str, pull_id: &str) -> bool {
+    item.get("relations")
+        .and_then(|value| value.as_array())
+        .is_some_and(|relations| {
+            relations.iter().any(|relation| {
+                relation.get("rel").and_then(|value| value.as_str()) == Some("ArtifactLink")
+                    && relation
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|url| artifact_targets_pull(url, project, project_id, repo_id, pull_id))
+            })
+        })
+}
+
+fn artifact_targets_pull(url: &str, project: &str, project_id: &str, repo_id: &str, pull_id: &str) -> bool {
+    let decoded = pct_decode(url);
+    let lower = decoded.to_ascii_lowercase();
+    let Some(index) = lower.find("pullrequestid/") else {
+        return false;
+    };
+    let rest = &decoded[index + "pullrequestid/".len()..];
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 3 || repo_id.is_empty() {
+        return false;
+    }
+    let project_ok = parts[0].eq_ignore_ascii_case(project) || parts[0] == project_id;
+    let repo_ok = parts[1].eq_ignore_ascii_case(repo_id);
+    let pull_ok = parts[2] == pull_id;
+    project_ok && repo_ok && pull_ok
 }
 
 fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, body: &[u8]) -> Response {

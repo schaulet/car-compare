@@ -312,6 +312,18 @@ impl ProjectData {
                     }
                     continue;
                 }
+                if operation == "remove" {
+                    if let Some(index) = path.strip_prefix("/relations/") {
+                        if let Ok(index) = index.parse::<usize>() {
+                            if let Some(relations) = item.get_mut("relations").and_then(|relations| relations.as_array_mut()) {
+                                if index < relations.len() {
+                                    relations.remove(index);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let Some(key) = path.strip_prefix("/fields/") else {
                     continue;
                 };
