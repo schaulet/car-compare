@@ -148,6 +148,7 @@
       <a href="/__ORG__/__PROJECT__/_hooks">Abonnements</a>
       <a href="/__ORG__/__PROJECT__/_notifications">Notifications</a>
       <a href="/__ORG__/__PROJECT__/_favorites">Favoris</a>
+      <a href="/__ORG__/__PROJECT__/_users">Droits</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
@@ -3223,6 +3224,45 @@
               error.hidden = true;
               try {
                 await api("DELETE", "/" + org + "/_apis/favorite/favorites/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_users") {
+          const page = await api("GET", "/" + org + "/_apis/memberentitlementmanagement/userentitlements?api-version=7.1");
+          const rows = (page.value || []).filter((item) => (item.projectEntitlements || []).some((row) => {
+            const ref = row.projectRef || {};
+            return ref.id === project || ref.name === project;
+          }));
+          const table = rows.length ? "<table id='entitlements'><thead><tr><th></th><th>Nom</th><th>Licence</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='ent-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.user && item.user.displayName) + "'>Retirer</button></td><td>" + esc(item.user && item.user.displayName) + "</td><td>" + esc(item.accessLevel && item.accessLevel.licenseDisplayName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='ent-empty' class='sub'>Aucun droit.</p>";
+          view.innerHTML = "<h1>Droits</h1><div class='command'><input id='ent-name' placeholder='Pompe' /><select id='ent-license'><option value='express'>Basic</option><option value='stakeholder'>Partie prenante</option></select><button id='ent-add' type='button'>Ajouter</button></div>" + table + "<p id='ent-error' class='error' hidden></p>";
+          document.getElementById("ent-add").onclick = async () => {
+            const error = document.getElementById("ent-error");
+            error.hidden = true;
+            const name = document.getElementById("ent-name").value;
+            try {
+              await api("POST", "/" + org + "/_apis/memberentitlementmanagement/userentitlements?api-version=7.1", {
+                user: { principalName: name, displayName: name },
+                accessLevel: { accountLicenseType: document.getElementById("ent-license").value },
+                projectEntitlements: [{ projectRef: { id: project, name: project }, group: { groupType: "projectContributor" } }],
+              });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.ent-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("ent-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", "/" + org + "/_apis/memberentitlementmanagement/userentitlements/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

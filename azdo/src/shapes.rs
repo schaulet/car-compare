@@ -75,6 +75,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         ("hooks", "inbox") => hooks_inbox(state, method, org),
         ("notification", "subscriptions") => notification_subscriptions(state, method, org, rest, body),
         ("favorite", "favorites") => favorites(state, method, org, rest, query, body),
+        ("memberentitlementmanagement", "userentitlements") => user_entitlements(state, method, org, rest, query, body),
         ("distributedtask", "pools") | ("distributedtask", "queues") => {
             task_agents(state, method, org, None, rest, query, body)
         }
@@ -7053,6 +7054,253 @@ fn environment_needs_approval(environment: &Value) -> bool {
         .and_then(|value| value.get("approvals"))
         .and_then(|value| value.as_array())
         .is_some_and(|rows| !rows.is_empty())
+}
+
+fn user_entitlements(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+    let key = "memberentitlementmanagement/userentitlements";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = org_list(state, org, key);
+            rows.retain(|item| entitlement_listed(item, query));
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_entitlement(org, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let mut item = match entitlement_create(body) {
+                Ok(item) => item,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = org_list(state, org, key)
+                .into_iter()
+                .filter_map(|item| text_of(&item, "id"))
+                .filter_map(|id| id.strip_prefix("ent-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            if let Some(object) = item.as_object_mut() {
+                let id = format!("ent-{next}");
+                object.insert("id".into(), json!(id.clone()));
+                if let Some(user) = object.get_mut("user").and_then(|value| value.as_object_mut()) {
+                    user.insert("originId".into(), json!(id));
+                }
+                object.entry("projectEntitlements").or_insert(json!([{
+                    "projectRef": {"id": org, "name": org},
+                    "group": {"groupType": "projectContributor", "displayName": "Contributeurs"}
+                }]));
+            }
+            org_put(state, org, key, item.clone());
+            return Json(dress_entitlement(org, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "droit introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match org_get(state, org, key, id) {
+            Some(item) => Json(dress_entitlement(org, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "droit introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = org_get(state, org, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "droit introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> Option<bool> {
+            let bucket = db.orgs.get_mut(org)?.buckets.get_mut(key)?;
+            let key_name = bucket
+                .items
+                .iter()
+                .find_map(|(stored, item)| (stored == &stored_id || value_key(&item["id"]) == stored_id).then(|| stored.clone()))?;
+            Some(bucket.items.remove(&key_name).is_some())
+        });
+        return if removed == Some(true) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "droit introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn entitlement_listed(item: &Value, query: &str) -> bool {
+    let Some(project) = query_param(query, "project").map(pct_decode).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    item.get("projectEntitlements")
+        .and_then(|value| value.as_array())
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                let reference = row.get("projectRef");
+                let id = reference.and_then(|value| value.get("id")).and_then(|value| value.as_str()).unwrap_or("");
+                let name = reference.and_then(|value| value.get("name")).and_then(|value| value.as_str()).unwrap_or("");
+                id.eq_ignore_ascii_case(&project) || name.eq_ignore_ascii_case(&project)
+            })
+        })
+}
+
+fn canonical_license(value: &str) -> Option<(&'static str, &'static str)> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "express" => Some(("express", "Basic")),
+        "stakeholder" => Some(("stakeholder", "Stakeholder")),
+        "advanced" => Some(("advanced", "Advanced")),
+        "professional" => Some(("professional", "Professional")),
+        _ => None,
+    }
+}
+
+fn canonical_group(value: &str) -> Option<(&'static str, &'static str)> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "projectcontributor" => Some(("projectContributor", "Contributeurs")),
+        "projectreader" => Some(("projectReader", "Lecteurs")),
+        "projectadministrator" => Some(("projectAdministrator", "Administrateurs")),
+        "projectstakeholder" => Some(("projectStakeholder", "Parties prenantes")),
+        "custom" => Some(("custom", "Personnalisé")),
+        _ => None,
+    }
+}
+
+fn read_project_entitlements(value: &Value) -> Result<Vec<Value>, &'static str> {
+    let Some(rows) = value.as_array() else {
+        return Err("projet absent");
+    };
+    let mut entitlements = Vec::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return Err("projet absent");
+        };
+        let Some(project_ref) = object.get("projectRef").and_then(|item| item.as_object()) else {
+            return Err("projet absent");
+        };
+        let Some(id) = project_ref
+            .get("id")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        else {
+            return Err("projet absent");
+        };
+        let name = project_ref
+            .get("name")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or(id);
+        let (group_type, group_name) = match object.get("group") {
+            None => ("projectContributor", "Contributeurs"),
+            Some(group) => {
+                let Some(group) = group.as_object() else {
+                    return Err("groupe absent");
+                };
+                let Some(kind) = group
+                    .get("groupType")
+                    .and_then(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                else {
+                    return Err("groupe absent");
+                };
+                let Some(pair) = canonical_group(kind) else {
+                    return Err("groupe inconnu");
+                };
+                pair
+            }
+        };
+        entitlements.push(json!({
+            "projectRef": {"id": id, "name": name},
+            "group": {"groupType": group_type, "displayName": group_name}
+        }));
+    }
+    Ok(entitlements)
+}
+
+fn entitlement_create(body: &[u8]) -> Result<Value, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("droit illisible");
+    };
+    let Some(user) = object.get("user").and_then(|value| value.as_object()) else {
+        return Err("identité absente");
+    };
+    let Some(principal) = user
+        .get("principalName")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("identité absente");
+    };
+    let display = match user.get("displayName") {
+        None => principal.to_string(),
+        Some(value) => {
+            let Some(name) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("nom absent");
+            };
+            name.to_string()
+        }
+    };
+    let Some(access) = object.get("accessLevel").and_then(|value| value.as_object()) else {
+        return Err("licence absente");
+    };
+    let Some(license_raw) = access
+        .get("accountLicenseType")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("licence absente");
+    };
+    let Some((license, license_name)) = canonical_license(license_raw) else {
+        return Err("licence inconnue");
+    };
+    let projects = match object.get("projectEntitlements") {
+        None => None,
+        Some(value) => Some(read_project_entitlements(value)?),
+    };
+    let mut item = Map::new();
+    item.insert(
+        "user".into(),
+        json!({
+            "displayName": display,
+            "principalName": principal,
+            "subjectKind": "user",
+            "origin": "azurz"
+        }),
+    );
+    item.insert(
+        "accessLevel".into(),
+        json!({
+            "licensingSource": "account",
+            "accountLicenseType": license,
+            "licenseDisplayName": license_name,
+            "status": "active",
+            "assignmentSource": "unknown"
+        }),
+    );
+    item.insert("dateCreated".into(), json!("2026-10-29T00:00:00Z"));
+    item.insert("lastAccessedDate".into(), json!("2026-10-29T00:00:00Z"));
+    if let Some(projects) = projects {
+        item.insert("projectEntitlements".into(), json!(projects));
+    }
+    Ok(Value::Object(item))
+}
+
+fn dress_entitlement(org: &str, mut item: Value) -> Value {
+    let id = text_of(&item, "id").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        let href = format!("/{org}/_apis/memberentitlementmanagement/userentitlements/{id}");
+        object.insert("url".into(), json!(href.clone()));
+        object.insert("_links".into(), json!({"self": {"href": href}}));
+    }
+    item
 }
 
 fn favorites(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
