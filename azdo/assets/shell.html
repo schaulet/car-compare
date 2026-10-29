@@ -542,7 +542,9 @@
                 return { id: ref.id, title: titleOf(item), index: index };
               }));
               const work = details.length ? details.map((item) => "<li>" + esc(item.id) + " · " + esc(item.title) + " <button type='button' class='unlink' data-id='" + esc(item.id) + "' data-index='" + item.index + "'>Retirer</button></li>").join("") : "<li>Aucun élément de travail.</li>";
-              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Itérations</h2><ul id='pr-iterations'>" + iterationLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul>" + mergeLine + "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><select id='pr-strategy'><option value='noFastForward'>Fusion</option><option value='squash'>Squash</option><option value='rebase'>Rebase</option><option value='rebaseMerge'>Semi-linéaire</option></select><label><input id='pr-delete-source' type='checkbox' /> Supprimer la source</label><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
+              const labels = await api("GET", threadsPath + "/labels?api-version=7.1");
+              const labelLines = (labels.value || []).map((item) => "<li><span class='pill'>" + esc(item.name) + "</span> <button type='button' class='label-remove' data-id='" + esc(item.id) + "'>Retirer</button></li>").join("") || "<li id='pr-label-empty'>Aucune étiquette.</li>";
+              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Itérations</h2><ul id='pr-iterations'>" + iterationLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul>" + mergeLine + "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><select id='pr-strategy'><option value='noFastForward'>Fusion</option><option value='squash'>Squash</option><option value='rebase'>Rebase</option><option value='rebaseMerge'>Semi-linéaire</option></select><label><input id='pr-delete-source' type='checkbox' /> Supprimer la source</label><button id='pr-complete' type='button'>Terminer</button></div><h2>Étiquettes</h2><ul id='pr-labels'>" + labelLines + "</ul><div class='row'><input id='label-name' placeholder='Étiquette' /><button id='label-add' type='button'>Ajouter</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
               panel.querySelector("#reviewer-add").onclick = async () => {
                 await api("POST", threadsPath + "/reviewers?api-version=7.1", { displayName: panel.querySelector("#reviewer-name").value || "azurz", vote: Number(panel.querySelector("#reviewer-vote").value) });
                 row.click();
@@ -566,6 +568,16 @@
                 await api("POST", threadsPath + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
                 row.click();
               };
+              panel.querySelector("#label-add").onclick = async () => {
+                await api("POST", threadsPath + "/labels?api-version=7.1", { name: panel.querySelector("#label-name").value || "revue" });
+                row.click();
+              };
+              panel.querySelectorAll("button.label-remove").forEach((button) => {
+                button.onclick = async () => {
+                  await api("DELETE", threadsPath + "/labels/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                  row.click();
+                };
+              });
               panel.querySelector("#pr-link").onclick = async () => {
                 const workId = panel.querySelector("#pr-work-id").value;
                 if (!workId) return;

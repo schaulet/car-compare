@@ -5656,3 +5656,224 @@ async fn cherry_pick_replays_commits_and_revert_undoes_them() {
     assert!(body.contains("refs/heads/cherry-out"), "{body}");
     assert!(body.contains("refs/heads/revert-out"), "{body}");
 }
+
+#[tokio::test]
+async fn pull_request_labels_are_shared_and_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue etiquette","sourceRefName":"refs/heads/etiquette","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let labels: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(labels["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom d"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Bug"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bug: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let bug_id = bug["id"].as_str().unwrap().to_string();
+    assert_eq!(bug_id.len(), 40);
+    assert_eq!(bug["name"], "Bug");
+    assert_eq!(bug["active"], true);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"bug"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["id"], bug_id);
+    assert_eq!(again["name"], "Bug");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Revue"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let labels: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(labels["count"], 2);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Bug"), "{body}");
+    assert!(body.contains("Revue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Seconde revue","sourceRefName":"refs/heads/autre","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let second_id = second["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{second_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Bug"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shared: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(shared["id"], bug_id);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels/{bug_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let labels: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(labels["count"], 1);
+    assert_eq!(labels["value"][0]["name"], "Revue");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{second_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(&bug_id), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Bug"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/labels/absente?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/9/labels?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}

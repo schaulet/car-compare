@@ -138,6 +138,7 @@ fn git_repositories(
         "cherrypicks" => git_replay(state, method, org, project, repo_id, tail_after(rest, "cherrypicks"), body, false),
         "reverts" => git_replay(state, method, org, project, repo_id, tail_after(rest, "reverts"), body, true),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
+        "labels" => repo_labels(state, method, org, project, repo_id, tail_after(rest, "labels")),
         "items" => items(state, org, project, repo_id, query),
         "diffs" => diffs(state, org, project, repo_id, query),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
@@ -1541,7 +1542,7 @@ fn pull_child(rest: &[String]) -> Option<(String, String, &[String])> {
     let index = rest.iter().position(|part| {
         matches!(
             part.to_ascii_lowercase().as_str(),
-            "threads" | "statuses" | "iterations" | "reviewers" | "workitems" | "commits"
+            "threads" | "statuses" | "iterations" | "reviewers" | "workitems" | "commits" | "labels"
         )
     })?;
     let id = rest.get(index.checked_sub(1)?)?.clone();
@@ -1573,6 +1574,9 @@ fn pull_child_resource(
     }
     if kind == "iterations" {
         return pull_iterations(state, method, org, project, pull_id, tail);
+    }
+    if kind == "labels" {
+        return pull_labels(state, method, org, project, pull_id, tail, body);
     }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
@@ -1619,6 +1623,110 @@ fn pull_child_resource(
     };
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn repo_labels(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String]) -> Response {
+    if find_repo(state, org, project, repo_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
+    }
+    let key = format!("git/repositories/{repo_id}/labels");
+    if let Some(label_id) = tail.first() {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return match label_named(&list(state, org, project, &key), label_id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "étiquette introuvable"),
+        };
+    }
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    Json(page(list(state, org, project, &key))).into_response()
+}
+
+fn pull_labels(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    pull_id: &str,
+    tail: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let key = format!("git/repositories/{repo_id}/pullrequests/{pull_id}/labels");
+    let catalog = format!("git/repositories/{repo_id}/labels");
+    if let Some(label_id) = tail.first() {
+        let found = label_named(&list(state, org, project, &key), label_id);
+        if method == Method::GET {
+            return match found {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "étiquette introuvable"),
+            };
+        }
+        if method != Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(found) = found else {
+            return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+        };
+        let stored_id = text_of(&found, "id").unwrap_or_default();
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(&key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        if text_of(&pull, "status").as_deref() != Some("completed") {
+            deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+        }
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if method == Method::GET {
+        return Json(page(list(state, org, project, &key))).into_response();
+    }
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let Some(name) = text_of(&payload, "name").map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+        return fail(StatusCode::BAD_REQUEST, "nom d'étiquette absent");
+    };
+    if let Some(existing) = label_named(&list(state, org, project, &key), &name) {
+        return Json(existing).into_response();
+    }
+    let label = if let Some(existing) = label_named(&list(state, org, project, &catalog), &name) {
+        existing
+    } else {
+        let id = object_id(&format!("{repo_id}:label:{}", name.to_lowercase()));
+        let item = json!({
+            "id": id,
+            "name": name,
+            "active": true,
+            "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/labels/{id}")
+        });
+        put_item(state, org, project, &catalog, item.clone());
+        item
+    };
+    put_item(state, org, project, &key, label.clone());
+    if text_of(&pull, "status").as_deref() != Some("completed") {
+        deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+    }
+    Json(label).into_response()
+}
+
+fn label_named(rows: &[Value], wanted: &str) -> Option<Value> {
+    rows.iter()
+        .find(|item| {
+            text_of(item, "id").as_deref() == Some(wanted)
+                || text_of(item, "name").is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+        })
+        .cloned()
 }
 
 fn pull_work_items(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
