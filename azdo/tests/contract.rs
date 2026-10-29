@@ -17362,3 +17362,182 @@ async fn removing_one_repository_keeps_the_sibling_and_its_commit() {
     assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_service_connection_keeps_the_sibling_and_its_secret() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let mut pompe_id = String::new();
+    let mut ada_id = String::new();
+    for (name, url, user, secret) in [
+        ("Pompe", "http://pompe", "pompe", "secret-pompe"),
+        ("Ada", "http://ada", "ada", "secret-ada"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"name":"{name}","type":"generic","url":"{url}","authorization":{{"scheme":"UsernamePassword","parameters":{{"username":"{user}","password":"{secret}"}}}}}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains(secret), "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        assert_eq!(created["authorization"]["parameters"]["username"], user);
+        assert_eq!(created["authorization"]["parameters"]["password"], "");
+        let id = created["id"].as_str().unwrap().to_string();
+        if name == "Pompe" {
+            pompe_id = id;
+        } else {
+            ada_id = id;
+        }
+    }
+    assert_eq!(pompe_id, "endpoint-00000001");
+    assert_eq!(ada_id, "endpoint-00000002");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("connexion introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("connexion introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-ada"), "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["url"], "http://ada");
+    assert_eq!(kept["authorization"]["parameters"]["username"], "ada");
+    assert_eq!(kept["authorization"]["parameters"]["password"], "");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Relais","type":"generic","url":"http://relais","authorization":{"scheme":"UsernamePassword","parameters":{"username":"relais","password":"secret-relais"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-relais"), "{body}");
+    let relais: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(relais["id"], "endpoint-00000003");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_kept["authorization"]["parameters"]["username"], "ada");
+    assert_eq!(still_kept["authorization"]["parameters"]["password"], "");
+    assert!(!body.contains("secret-ada"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+    assert!(!body.contains("secret-ada"), "{body}");
+    assert!(!body.contains("secret-relais"), "{body}");
+}

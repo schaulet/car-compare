@@ -2532,9 +2532,9 @@
           const listed = await api("GET", root + "/serviceendpoint/endpoints?api-version=7.1");
           const types = await api("GET", root + "/serviceendpoint/types?api-version=7.1");
           const options = (types.value || []).map((item) => "<option value='" + esc(item.name) + "'>" + esc(item.displayName) + "</option>").join("");
-          const rows = (listed.value || []).map((item) => "<tr class='endpoint click' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(item.url) + "</td></tr>").join("");
-          const table = rows ? "<table id='endpoints'><thead><tr><th>Nom</th><th>Type</th><th>URL</th></tr></thead><tbody>" + rows + "</tbody></table>" : "<p id='endpoint-empty' class='sub'>Aucune connexion.</p>";
-          view.innerHTML = "<h1>Connexions de service</h1><div class='command'><input id='endpoint-name' placeholder='Nom' /><select id='endpoint-type'>" + options + "</select><input id='endpoint-url' placeholder='https://' /><input id='endpoint-user' placeholder='Utilisateur' /><input id='endpoint-password' type='password' placeholder='Mot de passe' /><button id='endpoint-add' type='button'>Créer</button></div>" + table + "<section id='endpoint-card' class='panel' hidden></section>";
+          const rows = (listed.value || []).map((item) => "<tr><td><button type='button' class='endpoint-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td class='endpoint click' data-id='" + esc(item.id) + "'>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(item.url) + "</td></tr>").join("");
+          const table = rows ? "<table id='endpoints'><thead><tr><th></th><th>Nom</th><th>Type</th><th>URL</th></tr></thead><tbody>" + rows + "</tbody></table>" : "<p id='endpoint-empty' class='sub'>Aucune connexion.</p>";
+          view.innerHTML = "<h1>Connexions de service</h1><div class='command'><input id='endpoint-name' placeholder='Pompe' /><select id='endpoint-type'>" + options + "</select><input id='endpoint-url' placeholder='https://' /><input id='endpoint-user' placeholder='Utilisateur' /><input id='endpoint-password' type='password' placeholder='Mot de passe' /><button id='endpoint-add' type='button'>Créer</button></div><p id='endpoint-error' class='sub'></p>" + table + "<section id='endpoint-card' class='panel' hidden></section>";
           const selected = new URLSearchParams(location.search).get("endpoint") || "";
           async function openEndpoint(id) {
             const item = await api("GET", root + "/serviceendpoint/endpoints/" + encodeURIComponent(id) + "?api-version=7.1");
@@ -2561,24 +2561,42 @@
             };
           }
           if (selected) await openEndpoint(selected);
-          document.querySelectorAll("tr.endpoint").forEach((row) => {
+          document.querySelectorAll("td.endpoint").forEach((row) => {
             row.onclick = () => { location.href = location.pathname + "?endpoint=" + encodeURIComponent(row.dataset.id); };
           });
           document.getElementById("endpoint-add").onclick = async () => {
-            await api("POST", root + "/serviceendpoint/endpoints?api-version=7.1", {
-              name: document.getElementById("endpoint-name").value,
-              type: document.getElementById("endpoint-type").value,
-              url: document.getElementById("endpoint-url").value,
-              authorization: {
-                scheme: "UsernamePassword",
-                parameters: {
-                  username: document.getElementById("endpoint-user").value,
-                  password: document.getElementById("endpoint-password").value,
+            const note = document.getElementById("endpoint-error");
+            try {
+              await api("POST", root + "/serviceendpoint/endpoints?api-version=7.1", {
+                name: document.getElementById("endpoint-name").value || "Pompe",
+                type: document.getElementById("endpoint-type").value,
+                url: document.getElementById("endpoint-url").value,
+                authorization: {
+                  scheme: "UsernamePassword",
+                  parameters: {
+                    username: document.getElementById("endpoint-user").value,
+                    password: document.getElementById("endpoint-password").value,
+                  },
                 },
-              },
-            });
+              });
+            } catch (error) {
+              note.textContent = error.message;
+              return;
+            }
             location.href = location.pathname;
           };
+          document.querySelectorAll("button.endpoint-remove").forEach((button) => {
+            button.onclick = async () => {
+              const note = document.getElementById("endpoint-error");
+              try {
+                await api("DELETE", root + "/serviceendpoint/endpoints/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                note.textContent = error.message;
+                return;
+              }
+              location.href = location.pathname;
+            };
+          });
           return;
         }
         if (hub === "/_settings") {

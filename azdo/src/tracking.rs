@@ -1226,6 +1226,9 @@ fn endpoints(state: &AppState, method: &Method, org: &str, project: &str, rest: 
             None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         };
     }
+    if method == Method::DELETE && rest.len() != 3 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
     if id.is_empty() {
         return fail(StatusCode::NOT_FOUND, "connexion introuvable");
@@ -1292,17 +1295,18 @@ fn endpoints(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         };
     }
     if method == Method::DELETE {
-        let removed = state.write(|db| {
-            db.project_mut(org, project)
-                .and_then(|stored| stored.buckets.get_mut(key))
-                .map(|bucket| bucket.remove(&id))
-                .unwrap_or(false)
-        });
-        return if removed {
-            StatusCode::NO_CONTENT.into_response()
-        } else {
-            fail(StatusCode::NOT_FOUND, "connexion introuvable")
+        let Some(found) = state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, &id))) else {
+            return fail(StatusCode::NOT_FOUND, "connexion introuvable");
         };
+        let stored_id = found.get("id").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
