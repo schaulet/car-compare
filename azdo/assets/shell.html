@@ -531,15 +531,28 @@
           const repoPath = repo ? root + "/git/repositories/" + encodeURIComponent(repo.id) : "";
           if (hub === "/_git/commits") {
             const commits = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/commits") : [];
-            const table = commits.length ? "<table><thead><tr><th>Commit</th><th>Commentaire</th><th>Auteur</th></tr></thead><tbody>" + commits.map((item) => "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 8)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
+            const table = commits.length ? "<table><thead><tr><th>Commit</th><th>Commentaire</th><th>Auteur</th></tr></thead><tbody>" + commits.map((item) => "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "' data-parent='" + esc((item.parents && item.parents[0]) || "") + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
             view.innerHTML = "<h1>Commits</h1><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<pre id='diff' class='panel' hidden></pre>";
+            function diffText(changes) {
+              return (changes || []).map((change) => {
+                const head = (change.changeType || "") + " " + ((change.item && change.item.path) || "");
+                const before = change.originalContent && change.originalContent.content;
+                const after = change.newContent && change.newContent.content;
+                const body = [before != null && before !== "" ? "- " + before : "", after != null && after !== "" ? "+ " + after : ""].filter(Boolean).join("\n");
+                return body ? head + "\n" + body : head;
+              }).join("\n\n") || "Aucun changement.";
+            }
             document.querySelectorAll("tr.commit").forEach((row) => {
               row.onclick = async () => {
-                const diff = await api("GET", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/changes?api-version=7.1");
                 const panel = document.getElementById("diff");
                 panel.hidden = false;
-                const lines = (diff.changes || []).map((change) => esc(change.changeType) + " " + esc(change.item?.path)).join("\n") || "Aucun changement.";
-                panel.textContent = lines;
+                if (row.dataset.parent) {
+                  const diff = await api("GET", repoPath + "/diffs/commits?baseVersion=" + encodeURIComponent(row.dataset.parent) + "&targetVersion=" + encodeURIComponent(row.dataset.id) + "&baseVersionType=commit&targetVersionType=commit&api-version=7.1");
+                  panel.textContent = diffText(diff.changes);
+                } else {
+                  const diff = await api("GET", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/changes?api-version=7.1");
+                  panel.textContent = diffText(diff.changes);
+                }
               };
             });
             document.getElementById("push").onclick = async () => {

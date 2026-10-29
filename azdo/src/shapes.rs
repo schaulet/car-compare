@@ -134,6 +134,7 @@ fn git_repositories(
         "pushes" => pushes(state, method, org, project, repo_id, tail_after(rest, "pushes"), body),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
         "items" => items(state, org, project, repo_id, query),
+        "diffs" => diffs(state, org, project, repo_id, query),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
     }
 }
@@ -324,17 +325,24 @@ fn apply_push(state: &AppState, org: &str, project: &str, repo_id: &str, payload
                     .and_then(|item| text_of(item, "path"))
                     .unwrap_or_else(|| "/fichier.txt".into());
                 let path = if path.starts_with('/') { path } else { format!("/{path}") };
-                let change_type = text_of(&change, "changeType").unwrap_or_else(|| "add".into());
+                let mut change_type = text_of(&change, "changeType").unwrap_or_else(|| "add".into()).to_ascii_lowercase();
+                let original = stored.get_bucket(&items_key, &path).and_then(|item| text_of(&item, "content"));
+                let exists = original.is_some() || stored.get_bucket(&items_key, &path).is_some();
+                if change_type == "add" && exists {
+                    change_type = "edit".into();
+                } else if change_type == "edit" && !exists {
+                    change_type = "add".into();
+                }
+                let content = change
+                    .get("newContent")
+                    .and_then(|value| text_of(value, "content").or_else(|| value.as_str().map(str::to_string)))
+                    .unwrap_or_default();
                 if change_type.eq_ignore_ascii_case("delete") {
                     if let Some(bucket) = stored.buckets.get_mut(&items_key) {
                         bucket.remove(&path);
                     }
                 } else {
                     ensure_tree(stored, &items_key, &path);
-                    let content = change
-                        .get("newContent")
-                        .and_then(|value| text_of(value, "content").or_else(|| value.as_str().map(str::to_string)))
-                        .unwrap_or_default();
                     stored.put_bucket(
                         &items_key,
                         json!({
@@ -349,7 +357,9 @@ fn apply_push(state: &AppState, org: &str, project: &str, repo_id: &str, payload
                 stored_changes.push(json!({
                     "id": path,
                     "changeType": change_type,
-                    "item": {"path": path, "gitObjectType": "blob"}
+                    "item": {"path": path, "gitObjectType": "blob"},
+                    "originalContent": original.as_ref().map(|text| json!({"content": text, "contentType": "rawtext"})).unwrap_or(Value::Null),
+                    "newContent": if change_type.eq_ignore_ascii_case("delete") { Value::Null } else { json!({"content": content, "contentType": "rawtext"}) }
                 }));
             }
             let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
@@ -366,6 +376,11 @@ fn apply_push(state: &AppState, org: &str, project: &str, repo_id: &str, payload
             stored.put_bucket(&commits_key, item.clone());
             for change in stored_changes {
                 stored.put_bucket(&format!("{commits_key}/{commit_id}/changes"), change);
+            }
+            let snapshot = stored.list_bucket(&items_key);
+            let blob_key = format!("{commits_key}/{commit_id}/blobs");
+            for blob in snapshot {
+                stored.put_bucket(&blob_key, blob);
             }
             parent = Some(commit_id.clone());
             created_commits.push(item);
@@ -453,8 +468,138 @@ fn tail_after<'a>(rest: &'a [String], name: &str) -> &'a [String] {
         .unwrap_or(&[])
 }
 
+fn diffs(state: &AppState, org: &str, project: &str, repo_id: &str, query: &str) -> Response {
+    let base_version = query_param(query, "baseVersion").map(crate::http::pct_decode).unwrap_or_default();
+    let target_version = query_param(query, "targetVersion").map(crate::http::pct_decode).unwrap_or_default();
+    if base_version.is_empty() || target_version.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "versions absentes");
+    }
+    let base_type = query_param(query, "baseVersionType").map(crate::http::pct_decode).unwrap_or_default();
+    let target_type = query_param(query, "targetVersionType").map(crate::http::pct_decode).unwrap_or_default();
+    let Some(base) = resolve_version(state, org, project, repo_id, &base_version, &base_type) else {
+        return fail(StatusCode::NOT_FOUND, "commit de base introuvable");
+    };
+    let Some(target) = resolve_version(state, org, project, repo_id, &target_version, &target_type) else {
+        return fail(StatusCode::NOT_FOUND, "commit cible introuvable");
+    };
+    let chain = commits_after(state, org, project, repo_id, &base, &target);
+    let mut nets: Vec<(String, String, Value, Value)> = Vec::new();
+    for commit_id in &chain {
+        for change in list(state, org, project, &format!("git/repositories/{repo_id}/commits/{commit_id}/changes")) {
+            let path = change.get("item").and_then(|item| text_of(item, "path")).unwrap_or_else(|| value_key(&change["id"]));
+            if path.is_empty() {
+                continue;
+            }
+            let kind = text_of(&change, "changeType").unwrap_or_else(|| "add".into()).to_ascii_lowercase();
+            let original = change.get("originalContent").cloned().unwrap_or(Value::Null);
+            let fresh = change.get("newContent").cloned().unwrap_or(Value::Null);
+            if let Some(index) = nets.iter().position(|(stored, _, _, _)| stored == &path) {
+                let previous = nets[index].1.clone();
+                if previous == "add" && kind == "delete" {
+                    nets.remove(index);
+                    continue;
+                }
+                let next_kind = if previous == "add" {
+                    "add".to_string()
+                } else if previous == "delete" && kind == "add" {
+                    "edit".to_string()
+                } else if kind == "delete" {
+                    "delete".to_string()
+                } else {
+                    previous.clone()
+                };
+                let kept_original = if previous == "add" || !nets[index].2.is_null() {
+                    nets[index].2.clone()
+                } else {
+                    original
+                };
+                nets[index] = (path, next_kind, kept_original, fresh);
+            } else {
+                nets.push((path, kind, original, fresh));
+            }
+        }
+    }
+    let changes: Vec<Value> = nets
+        .into_iter()
+        .map(|(path, kind, original, fresh)| {
+            json!({
+                "changeType": kind,
+                "item": {"path": path, "gitObjectType": "blob"},
+                "originalContent": original,
+                "newContent": fresh
+            })
+        })
+        .collect();
+    Json(json!({
+        "allChangesIncluded": true,
+        "changeCounts": change_counts(&changes),
+        "changes": changes,
+        "commonCommit": base,
+        "baseCommit": base,
+        "targetCommit": target,
+        "aheadCount": chain.len(),
+        "behindCount": 0
+    }))
+    .into_response()
+}
+
+fn resolve_version(state: &AppState, org: &str, project: &str, repo_id: &str, version: &str, kind: &str) -> Option<String> {
+    let branch = kind.eq_ignore_ascii_case("branch") || kind.eq_ignore_ascii_case("tag") || version.starts_with("refs/");
+    if branch {
+        let name = if version.starts_with("refs/") {
+            version.to_string()
+        } else {
+            format!("refs/heads/{version}")
+        };
+        return get_item(state, org, project, &format!("git/repositories/{repo_id}/refs"), &name).and_then(|item| text_of(&item, "objectId"));
+    }
+    if get_item(state, org, project, &format!("git/repositories/{repo_id}/commits"), version).is_some() {
+        Some(version.to_string())
+    } else {
+        None
+    }
+}
+
+fn commits_after(state: &AppState, org: &str, project: &str, repo_id: &str, base: &str, target: &str) -> Vec<String> {
+    if base == target {
+        return Vec::new();
+    }
+    let mut cursor = target.to_string();
+    let mut stack = Vec::new();
+    for _ in 0..64 {
+        if cursor == base {
+            break;
+        }
+        stack.push(cursor.clone());
+        let Some(commit) = get_item(state, org, project, &format!("git/repositories/{repo_id}/commits"), &cursor) else {
+            break;
+        };
+        let Some(parent) = commit
+            .get("parents")
+            .and_then(|value| value.as_array())
+            .and_then(|parents| parents.first())
+            .map(value_key)
+            .filter(|parent| !parent.is_empty())
+        else {
+            break;
+        };
+        cursor = parent;
+    }
+    stack.reverse();
+    stack
+}
+
 fn items(state: &AppState, org: &str, project: &str, repo_id: &str, query: &str) -> Response {
-    let key = format!("git/repositories/{repo_id}/items");
+    let version = query_param(query, "versionDescriptor.version").map(crate::http::pct_decode);
+    let version_type = query_param(query, "versionDescriptor.versionType").map(crate::http::pct_decode).unwrap_or_default();
+    let key = if let Some(version) = version.as_deref() {
+        let Some(commit) = resolve_version(state, org, project, repo_id, version, &version_type) else {
+            return fail(StatusCode::NOT_FOUND, "commit introuvable");
+        };
+        format!("git/repositories/{repo_id}/commits/{commit}/blobs")
+    } else {
+        format!("git/repositories/{repo_id}/items")
+    };
     let rows = list(state, org, project, &key);
     let path = query_param(query, "path").map(|value| crate::http::pct_decode(value));
     let recursion = query_param(query, "recursionLevel").is_some();

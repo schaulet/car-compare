@@ -1952,3 +1952,133 @@ async fn branch_policies_reject_then_approve_a_pull_request() {
     let evaluations: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(evaluations["value"].as_array().unwrap().iter().all(|item| item["status"] == "approved"));
 }
+
+#[tokio::test]
+async fn git_diff_compares_two_commits_and_reads_a_file_at_that_version() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let base = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{base}"}}],"commits":[{{"comment":"ajout vanne","changes":[{{"changeType":"add","item":{{"path":"/src/vanne.txt"}},"newContent":{{"content":"debit 12","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let first_commit = first["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{first_commit}"}}],"commits":[{{"comment":"reglage vanne","changes":[{{"changeType":"edit","item":{{"path":"/src/vanne.txt"}},"newContent":{{"content":"debit 18","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let second_commit = second["commits"][0]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/diffs/commits?baseVersion={first_commit}&targetVersion={second_commit}&baseVersionType=commit&targetVersionType=commit&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let diff: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(diff["aheadCount"], 1);
+    assert_eq!(diff["changes"][0]["changeType"], "edit");
+    assert_eq!(diff["changes"][0]["item"]["path"], "/src/vanne.txt");
+    assert_eq!(diff["changes"][0]["originalContent"]["content"], "debit 12");
+    assert_eq!(diff["changes"][0]["newContent"]["content"], "debit 18");
+    assert_eq!(diff["changeCounts"]["Edit"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/diffs/commits?baseVersion={base}&targetVersion=refs/heads/main&baseVersionType=commit&targetVersionType=branch&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ranged: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ranged["aheadCount"], 2);
+    assert_eq!(ranged["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(ranged["changes"][0]["changeType"], "add");
+    assert_eq!(ranged["changes"][0]["newContent"]["content"], "debit 18");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/vanne.txt&versionDescriptor.version={first_commit}&versionDescriptor.versionType=commit&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let old: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(old["content"], "debit 12");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/vanne.txt&versionDescriptor.version={second_commit}&versionDescriptor.versionType=commit&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let current: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(current["content"], "debit 18");
+}
