@@ -14725,3 +14725,285 @@ async fn removing_one_pull_request_reviewer_keeps_the_sibling() {
     let after_merge: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(after_merge["count"].as_i64().unwrap(), updated_before, "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_build_definition_keeps_the_sibling_and_its_builds() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let trigger = r#"{"triggerType":"continuousIntegration","branchFilters":["+refs/heads/main"],"pathFilters":["+/src/*"],"batchChanges":false}"#;
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seeded["name"], "CI");
+    assert_eq!(seeded["triggers"], serde_json::json!([]));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Pompe","triggers":[{trigger}],"variables":{{"token":{{"value":"secret-pompe","isSecret":true}}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_i64().unwrap();
+    assert_eq!(pompe["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Ada","triggers":[{trigger}],"variables":{{"host":{{"value":"atelier","isSecret":false}}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_id = ada["id"].as_i64().unwrap();
+    assert_ne!(ada_id, pompe_id);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"definition":{{"id":{pompe_id}}},"sourceBranch":"refs/heads/main","reason":"manual"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = queued["id"].as_i64().unwrap();
+    assert_eq!(queued["definition"]["name"], "Pompe");
+    assert_eq!(queued["reason"], "manual");
+    assert_eq!(queued["variables"]["token"]["value"], "");
+    assert_eq!(queued["variables"]["token"]["isSecret"], true);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/definitions/999?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("définition introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/definitions/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(before["count"], 3, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/definitions/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/definitions/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("définition introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/definitions/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/definitions/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["queueStatus"], "enabled");
+    assert_eq!(kept["triggers"][0]["triggerType"], "continuousIntegration");
+    assert_eq!(kept["variables"]["host"]["value"], "atelier");
+    assert_eq!(kept["variables"]["host"]["isSecret"], false);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_seed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_seed["name"], "CI");
+    assert_eq!(still_seed["triggers"], serde_json::json!([]));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_build["definition"]["id"], pompe_id);
+    assert_eq!(kept_build["definition"]["name"], "Pompe");
+    assert_eq!(kept_build["reason"], "manual");
+    assert_eq!(kept_build["variables"]["token"]["value"], "");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let old = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{old}"}}],"commits":[{{"comment":"sonde","changes":[{{"changeType":"add","item":{{"path":"/src/pipeline.txt"}},"newContent":{{"content":"sonde","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let builds: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = builds["value"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{body}");
+    assert!(rows.iter().any(|item| item["definition"]["name"] == "Pompe" && item["reason"] == "manual"), "{body}");
+    assert!(rows.iter().any(|item| item["definition"]["id"] == ada_id && item["reason"] == "individualCI"), "{body}");
+    assert!(!rows.iter().any(|item| item["definition"]["name"] == "Pompe" && item["reason"] == "individualCI"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "CI"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+}

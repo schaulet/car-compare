@@ -2831,6 +2831,9 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
         put_item(state, org, project, key, item.clone());
         return Json(dress_definition(project, item)).into_response();
     }
+    if rest.len() == 2 && method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
     if id.is_empty() {
         return fail(StatusCode::NOT_FOUND, "définition introuvable");
@@ -2887,6 +2890,22 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
         let item = fill_definition(project, item);
         put_item(state, org, project, key, item.clone());
         return Json(dress_definition(project, item)).into_response();
+    }
+    if method == Method::DELETE {
+        if rest.len() != 3 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        if get_item(state, org, project, key, &id).is_none() {
+            return fail(StatusCode::NOT_FOUND, "définition introuvable");
+        }
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }

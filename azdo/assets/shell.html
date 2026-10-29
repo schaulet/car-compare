@@ -1096,10 +1096,10 @@
             return labels.join(", ");
           }
           const ciOn = pipeline && (pipeline.triggers || []).some((trigger) => trigger.triggerType === "continuousIntegration");
-          const defs = definitions.length ? "<table id='definitions'><thead><tr><th>ID</th><th>Pipeline</th><th>Groupe</th><th>File</th><th>Déclencheur</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(groupLabel(item)) + "</td><td>" + esc(item.queueStatus) + "</td><td class='def-trigger'>" + esc(triggerLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
+          const defs = definitions.length ? "<table id='definitions'><thead><tr><th>ID</th><th>Pipeline</th><th>Groupe</th><th>File</th><th>Déclencheur</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(groupLabel(item)) + "</td><td>" + esc(item.queueStatus) + "</td><td class='def-trigger'>" + esc(triggerLabel(item)) + "</td><td><button type='button' class='def-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='def-empty' class='sub'>Aucun pipeline.</p>";
           const runs = builds.length ? "<table id='builds'><thead><tr><th>Build</th><th>Numéro</th><th>File</th><th>Raison</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.queue && item.queue.name) + "</td><td class='build-reason'>" + esc(item.reason || "") + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-empty' class='sub'>Aucune exécution.</p>";
           const options = groups.map((item) => "<option value='" + esc(item.id) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><input id='def-name' placeholder='Pompe' /><button id='def-create' type='button'>Créer</button><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
           function timelineItems(records, parent, depth) {
             return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
               const result = record.result ? " / " + esc(record.result) : "";
@@ -1158,6 +1158,30 @@
               log.hidden = false;
               log.textContent = await response.text();
               await showArtifacts(row.dataset.id);
+            };
+          });
+          document.getElementById("def-create").onclick = async () => {
+            const error = document.getElementById("build-error");
+            error.textContent = "";
+            try {
+              await api("POST", root + "/build/definitions?api-version=7.1", { name: document.getElementById("def-name").value || "Pipeline" });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.def-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("build-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/build/definitions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
             };
           });
           document.getElementById("def-schedule").onclick = async () => {
