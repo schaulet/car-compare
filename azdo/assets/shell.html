@@ -2335,10 +2335,11 @@
           return;
         }
         if (hub === "/_release") {
-          const [definitions, releases, approvals] = await Promise.all([
+          const [definitions, releases, approvals, releaseFolders] = await Promise.all([
             collection("release/definitions"),
             collection("release/releases"),
             collection("release/approvals"),
+            collection("release/folders"),
           ]);
           const defs = definitions.length ? "<table id='release-definitions'><thead><tr><th>ID</th><th>Définition</th><th>Environnements</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc((item.environments || []).map((env) => env.name).join(", ")) + "</td><td><button type='button' class='release' data-id='" + esc(item.id) + "'>Créer une version</button> <button type='button' class='reldef-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='reldef-empty' class='sub'>Aucune définition.</p>";
           const runs = releases.length ? "<table id='releases'><thead><tr><th>Version</th><th>État</th><th>Description</th><th>Environnements</th><th></th></tr></thead><tbody>" + releases.map((item) => {
@@ -2347,7 +2348,35 @@
           }).join("") + "</tbody></table>" : "<p id='release-empty' class='sub'>Aucune version.</p>";
           const pending = approvals.filter((item) => item.status === "pending");
           const gates = pending.length ? "<h2>Approbations</h2><table><thead><tr><th>Version</th><th>Environnement</th><th>Approbateur</th><th></th></tr></thead><tbody>" + pending.map((item) => "<tr><td>" + esc(item.release?.name) + "</td><td>" + esc(item.releaseEnvironment?.name) + "</td><td>" + esc(item.approver?.displayName) + "</td><td><button type='button' class='approve' data-id='" + esc(item.id) + "'>Approuver</button></td></tr>").join("") + "</tbody></table>" : "";
-          view.innerHTML = "<h1>Versions</h1><div class='command'><input id='rel-name' placeholder='Définition' /><input id='rel-env' placeholder='Environnement' /><button id='create' type='button'>Créer la définition</button></div>" + defs + "<h2>Versions</h2>" + runs + gates + "<p id='release-error' class='error' hidden></p>";
+          const folderRows = releaseFolders.filter((item) => item.path !== "\\");
+          const folderTable = folderRows.length ? "<table id='release-folders'><thead><tr><th></th><th>Chemin</th><th>Description</th></tr></thead><tbody>" + folderRows.map((item) => "<tr><td><button type='button' class='rfolder-remove' data-id='" + esc(item.path) + "' data-name='" + esc(item.path) + "'>Retirer</button></td><td>" + esc(item.path) + "</td><td>" + esc(item.description || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='release-folder-empty' class='sub'>Aucun dossier.</p>";
+          view.innerHTML = "<h1>Versions</h1><h2>Dossiers</h2><div class='command'><input id='rfolder-path' placeholder='pompe' /><input id='rfolder-desc' placeholder='ligne' /><button id='rfolder-add' type='button'>Ajouter</button></div>" + folderTable + "<p id='rfolder-error' class='sub'></p><div class='command'><input id='rel-name' placeholder='Définition' /><input id='rel-env' placeholder='Environnement' /><button id='create' type='button'>Créer la définition</button></div>" + defs + "<h2>Versions</h2>" + runs + gates + "<p id='release-error' class='error' hidden></p>";
+          document.getElementById("rfolder-add").onclick = async () => {
+            const error = document.getElementById("rfolder-error");
+            error.textContent = "";
+            const path = document.getElementById("rfolder-path").value.trim() || "pompe";
+            const description = document.getElementById("rfolder-desc").value.trim() || "ligne";
+            try {
+              await api("POST", root + "/release/folders?api-version=7.1", { path, description });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.rfolder-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("rfolder-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/release/folders/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("create").onclick = async () => {
             const environment = document.getElementById("rel-env").value || "Production";
             await api("POST", root + "/release/definitions?api-version=7.1", {

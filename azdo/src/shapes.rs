@@ -52,6 +52,7 @@ pub fn dispatch(
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
+        ("release", "folders") => release_folders(state, method, org, project, rest, body),
         ("release", "definitions") => release_definitions(state, method, org, project, rest, body),
         ("release", "releases") => release_releases(state, method, org, project, rest, body),
         ("release", "approvals") => release_approvals(state, method, org, project, rest, body),
@@ -5606,6 +5607,110 @@ fn dress_feed_view(org: &str, project: &str, feed_id: &str, feed_name: &str, mut
     item
 }
 
+fn release_folders(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "release/folders";
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.push(json!({"id": "\\", "path": "\\", "description": ""}));
+            rows.sort_by(|left, right| text_of(left, "path").unwrap_or_default().cmp(&text_of(right, "path").unwrap_or_default()));
+            let value = rows.into_iter().map(|item| dress_release_folder(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_release_folder(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let raw = rest[2..].iter().map(|part| pct_decode(part)).collect::<Vec<_>>().join("/");
+    let path = match canonical_folder_path(&raw) {
+        Ok(path) => path,
+        Err("dossier racine") => {
+            if method == &Method::GET {
+                return Json(dress_release_folder(org, project, json!({"id": "\\", "path": "\\", "description": ""}))).into_response();
+            }
+            if method == &Method::DELETE {
+                return fail(StatusCode::BAD_REQUEST, "dossier racine");
+            }
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        Err(message) => return fail(StatusCode::NOT_FOUND, message),
+    };
+    if method == &Method::GET {
+        return match find_folder(&list(state, org, project, key), &path) {
+            Some(item) => Json(dress_release_folder(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "dossier introuvable"),
+        };
+    }
+    if method == &Method::DELETE {
+        let rows = list(state, org, project, key);
+        let Some(item) = find_folder(&rows, &path) else {
+            return fail(StatusCode::NOT_FOUND, "dossier introuvable");
+        };
+        let id = value_key(&item["id"]);
+        let prefix = format!("{path}\\");
+        for child in &rows {
+            let child_path = text_of(child, "path").unwrap_or_default();
+            if child_path.eq_ignore_ascii_case(&path) {
+                continue;
+            }
+            if child_path.len() > prefix.len() && child_path[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+                delete_item(state, org, project, key, &value_key(&child["id"]));
+            }
+        }
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "dossier introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_release_folder(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "chemin absent");
+    };
+    let raw = object.get("path").and_then(|value| value.as_str()).unwrap_or("");
+    if raw.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "chemin absent");
+    }
+    let path = match canonical_folder_path(raw) {
+        Ok(path) => path,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(value) => match value.as_str() {
+            Some(text) => text.trim().to_string(),
+            None => return fail(StatusCode::BAD_REQUEST, "description absente"),
+        },
+    };
+    let existing = list(state, org, project, "release/folders");
+    if find_folder(&existing, &path).is_some() {
+        return fail(StatusCode::BAD_REQUEST, "dossier déjà présent");
+    }
+    let item = json!({"id": path, "path": path, "description": description});
+    put_item(state, org, project, "release/folders", item.clone());
+    Json(dress_release_folder(org, project, item)).into_response()
+}
+
+fn dress_release_folder(org: &str, project: &str, mut item: Value) -> Value {
+    let path = text_of(&item, "path").unwrap_or_else(|| "\\".into());
+    if let Some(object) = item.as_object_mut() {
+        object.entry("description").or_insert(json!(""));
+        object.insert("project".into(), json!({"name": project}));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/release/folders/{}", path.replace('\\', "%5C"))),
+        );
+    }
+    item
+}
+
 fn release_definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "release/definitions";
     if rest.len() == 2 && method == Method::GET {
@@ -7339,14 +7444,14 @@ fn build_folders(state: &AppState, method: &Method, org: &str, project: &str, re
         Err(message) => return fail(StatusCode::NOT_FOUND, message),
     };
     if method == &Method::GET {
-        return match find_build_folder(&list(state, org, project, key), &path) {
+        return match find_folder(&list(state, org, project, key), &path) {
             Some(item) => Json(dress_build_folder(org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "dossier introuvable"),
         };
     }
     if method == &Method::DELETE {
         let rows = list(state, org, project, key);
-        let Some(item) = find_build_folder(&rows, &path) else {
+        let Some(item) = find_folder(&rows, &path) else {
             return fail(StatusCode::NOT_FOUND, "dossier introuvable");
         };
         let id = value_key(&item["id"]);
@@ -7392,7 +7497,7 @@ fn create_build_folder(state: &AppState, org: &str, project: &str, body: &[u8]) 
         },
     };
     let existing = list(state, org, project, "build/folders");
-    if find_build_folder(&existing, &path).is_some() {
+    if find_folder(&existing, &path).is_some() {
         return fail(StatusCode::BAD_REQUEST, "dossier déjà présent");
     }
     let item = json!({"id": path, "path": path, "description": description});
@@ -7417,7 +7522,7 @@ fn canonical_folder_path(raw: &str) -> Result<String, &'static str> {
     Ok(format!("\\{}", parts.join("\\")))
 }
 
-fn find_build_folder(rows: &[Value], path: &str) -> Option<Value> {
+fn find_folder(rows: &[Value], path: &str) -> Option<Value> {
     rows.iter()
         .find(|item| text_of(item, "path").is_some_and(|current| current.eq_ignore_ascii_case(path)))
         .cloned()

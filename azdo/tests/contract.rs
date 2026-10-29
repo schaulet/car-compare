@@ -21525,3 +21525,162 @@ async fn removing_one_feed_view_keeps_the_sibling_and_the_other_project() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("vue introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_release_folder_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let folders = "/azurz/AzurzDemo/_apis/release/folders?api-version=7.1";
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"CI","environments":[{"name":"Production","rank":1}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let definition: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let definition_id = definition["id"].as_i64().unwrap();
+    assert_eq!(definition["name"], "CI");
+
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("chemin absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some(r#"{"path":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("chemin absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some(r#"{"path":"\\"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("dossier racine"), "{body}");
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some(r#"{"path":"pompe\\..","description":"ligne"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("chemin absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", folders, Some(&auth), None, "application/json", Some(r#"{"path":"pompe","description":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", folders, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "DELETE", "/azurz/AzurzDemo/_apis/release/folders/%5C?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("dossier racine"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        folders,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":" pompe ","description":" ligne "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe["path"], "\\pompe");
+    assert_eq!(pompe["description"], "ligne");
+    assert_eq!(pompe["project"]["name"], "AzurzDemo");
+    assert!(pompe["url"].as_str().unwrap().contains("/_apis/release/folders/%5Cpompe"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        folders,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"\\Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("dossier déjà présent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        folders,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"\\pompe\\ligne","description":"enfant"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(child["path"], "\\pompe\\ligne");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        folders,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"ada","description":"nord"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada["path"], "\\ada");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/release/folders?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"pompe","description":"atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", "/azurz/AzurzDemo/_apis/release/folders/%5Cabsente?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("dossier introuvable"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", "/azurz/AzurzDemo/_apis/release/folders/%5Cpompe?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", folders, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 2);
+    assert_eq!(left["value"][0]["path"], "\\");
+    assert_eq!(left["value"][1]["path"], "\\ada");
+    assert_eq!(left["value"][1]["description"], "nord");
+    let (status, body, _) = call(&app, "GET", "/azurz/AzurzDemo/_apis/release/folders/%5Cpompe%5Cligne?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("dossier introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/AzurzDemo/_apis/release/folders/%5Cada?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["path"], "\\ada");
+    assert_eq!(sibling["project"]["name"], "AzurzDemo");
+    let (status, body, _) = call(&app, "GET", "/azurz/Atelier/_apis/release/folders?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 2);
+    assert_eq!(other["value"][1]["path"], "\\pompe");
+    assert_eq!(other["value"][1]["description"], "atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/release/definitions/{definition_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "CI");
+    let (status, body, _) = call(&app, "DELETE", "/azurz/AzurzDemo/_apis/release/folders/%5Cpompe?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("dossier introuvable"), "{body}");
+}
