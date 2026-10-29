@@ -5141,7 +5141,52 @@ fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], 
             fail(StatusCode::NOT_FOUND, "abonnement introuvable")
         };
     }
+    if (method == Method::PATCH || method == Method::PUT) && rest.len() == 3 {
+        return update_subscription_status(state, org, key, &id, body);
+    }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn update_subscription_status(state: &AppState, org: &str, key: &str, id: &str, body: &[u8]) -> Response {
+    if org_get(state, org, key, id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "abonnement introuvable");
+    }
+    let Some(payload) = parse_json(body).filter(|value| value.is_object()) else {
+        return fail(StatusCode::BAD_REQUEST, "abonnement illisible");
+    };
+    let Some(status_value) = payload.get("status") else {
+        return fail(StatusCode::BAD_REQUEST, "statut absent");
+    };
+    let Some(status_raw) = status_value.as_str() else {
+        return fail(StatusCode::BAD_REQUEST, "statut illisible");
+    };
+    let trimmed = status_raw.trim();
+    if trimmed.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "statut absent");
+    }
+    let Some(canonical) = canonical_subscription_status(trimmed) else {
+        return fail(StatusCode::BAD_REQUEST, "statut inconnu");
+    };
+    let updated = state.write(|db| {
+        let bucket = db.orgs.get_mut(org)?.buckets.get_mut(key)?;
+        let mut item = bucket.get(id)?;
+        if let Some(object) = item.as_object_mut() {
+            object.insert("status".into(), json!(canonical));
+        }
+        Some(bucket.put(item))
+    });
+    match updated {
+        Some(item) => Json(item).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "abonnement introuvable"),
+    }
+}
+
+fn canonical_subscription_status(status: &str) -> Option<&'static str> {
+    match status.to_ascii_lowercase().as_str() {
+        "enabled" => Some("enabled"),
+        "disabled" => Some("disabled"),
+        _ => None,
+    }
 }
 
 pub fn receive_hook(state: &AppState, body: &[u8]) -> Response {

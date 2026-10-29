@@ -1988,12 +1988,15 @@
         if (hub === "/_hooks") {
           const subscriptions = await api("GET", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1");
           const inbox = await api("GET", "/" + org + "/_apis/hooks/inbox?api-version=7.1");
-          const rows = (subscriptions.value || []).length ? "<table id='subs'><thead><tr><th>ID</th><th>Événement</th><th>URL</th><th>Dernier envoi</th></tr></thead><tbody>" + (await Promise.all((subscriptions.value || []).map(async (item) => {
+          const rows = (subscriptions.value || []).length ? "<table id='subs'><thead><tr><th>ID</th><th>Événement</th><th>URL</th><th>Statut</th><th>Dernier envoi</th><th></th></tr></thead><tbody>" + (await Promise.all((subscriptions.value || []).map(async (item) => {
             const notes = await api("GET", "/" + org + "/_apis/hooks/subscriptions/" + encodeURIComponent(item.id) + "/notifications?api-version=7.1");
             const list = notes.value || [];
             const last = list[list.length - 1];
-            return "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.eventType) + "</td><td>" + esc(item.consumerInputs && item.consumerInputs.url) + "</td><td class='hook-status'>" + esc(last ? last.status : "") + "</td></tr>";
-          }))).join("") + "</tbody></table>" : "<p class='sub'>Aucun abonnement.</p>";
+            const state = item.status || "enabled";
+            const next = state === "disabled" ? "enabled" : "disabled";
+            const action = state === "disabled" ? "Activer" : "Désactiver";
+            return "<tr data-status='" + esc(state) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.eventType) + "</td><td>" + esc(item.consumerInputs && item.consumerInputs.url) + "</td><td class='hook-state'>" + esc(state) + "</td><td class='hook-status'>" + esc(last ? last.status : "") + "</td><td><button type='button' class='hook-toggle' data-id='" + esc(item.id) + "' data-status='" + esc(next) + "'>" + action + "</button></td></tr>";
+          }))).join("") + "</tbody></table>" : "<p id='subs-empty' class='sub'>Aucun abonnement.</p>";
           function hookLabel(item) {
             const resource = item.resource || {};
             const title = resource.fields && resource.fields["System.Title"];
@@ -2017,8 +2020,14 @@
             if (resource.type === "Vsts" && resource.name) return resource.name;
             return "";
           }
-          const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
+          const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p id='inbox-empty' class='sub'>Aucune notification reçue.</p>";
           view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='packaging.package.deleted'>packaging.package.deleted</option><option value='library.variablegroup.deleted'>library.variablegroup.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          document.querySelectorAll("button.hook-toggle").forEach((button) => {
+            button.onclick = async () => {
+              await api("PATCH", "/" + org + "/_apis/hooks/subscriptions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { status: button.dataset.status });
+              location.reload();
+            };
+          });
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",

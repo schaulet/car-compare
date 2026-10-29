@@ -12947,3 +12947,234 @@ async fn nuget_package_version_can_be_removed() {
     assert_eq!(notes[0]["resource"]["version"], "1.0.0");
     assert!(notes[0]["resource"].get("content").is_none());
 }
+
+#[tokio::test]
+async fn disabled_subscription_stays_silent_while_its_sibling_delivers() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/_apis/hooks/subscriptions/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"disabled"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+
+    let subscribe = |app: axum::Router, auth: String| async move {
+        call(
+            &app,
+            "POST",
+            "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(r#"{"publisherId":"tfs","eventType":"workitem.created","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+        )
+        .await
+    };
+    let (status, body, _) = subscribe(app.clone(), auth.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let first_id = first["id"].as_str().unwrap().to_string();
+    assert_eq!(first["status"], "enabled");
+    let (status, body, _) = subscribe(app.clone(), auth.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let second_id = second["id"].as_str().unwrap().to_string();
+    assert_ne!(first_id, second_id);
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":1}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statut illisible"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statut absent"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statut absent"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"onProbation"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statut inconnu"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["status"], "enabled");
+    assert_eq!(still["eventType"], "workitem.created");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"Disabled"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let disabled: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(disabled["status"], "disabled");
+    assert_eq!(disabled["id"], first_id);
+    assert_eq!(disabled["eventType"], "workitem.created");
+    assert_eq!(disabled["consumerInputs"]["url"], "/_hooks/inbox");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Sonde muette"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let quiet: Vec<_> = inbox["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["eventType"] == "workitem.created" && item["resource"]["fields"]["System.Title"] == "Sonde muette")
+        .collect();
+    assert_eq!(quiet.len(), 1);
+    assert_eq!(quiet[0]["subscriptionId"], second_id);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let silent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(silent["count"], 0);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{second_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heard: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(heard["count"], 1);
+    assert_eq!(heard["value"][0]["resource"]["fields"]["System.Title"], "Sonde muette");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{second_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["status"], "enabled");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/hooks/subscriptions/{first_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"enabled"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let resumed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resumed["status"], "enabled");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Sonde reprise"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let resumed_notes: Vec<_> = again["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["eventType"] == "workitem.created" && item["resource"]["fields"]["System.Title"] == "Sonde reprise")
+        .collect();
+    assert_eq!(resumed_notes.len(), 2);
+    assert!(resumed_notes.iter().any(|item| item["subscriptionId"] == first_id));
+    assert!(resumed_notes.iter().any(|item| item["subscriptionId"] == second_id));
+}
