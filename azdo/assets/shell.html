@@ -146,6 +146,7 @@
       <a href="/__ORG__/__PROJECT__/_artifacts">Artefacts</a>
       <a href="/__ORG__/__PROJECT__/_wiki">Wiki</a>
       <a href="/__ORG__/__PROJECT__/_hooks">Abonnements</a>
+      <a href="/__ORG__/__PROJECT__/_notifications">Notifications</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
@@ -3148,6 +3149,45 @@
               location.href = location.pathname + "?run=" + encodeURIComponent(runId);
             };
           }
+          return;
+        }
+        if (hub === "/_notifications") {
+          const page = await api("GET", "/" + org + "/_apis/notification/subscriptions?api-version=7.1");
+          const rows = (page.value || []).filter((item) => {
+            const scope = item.scope || {};
+            return scope.id === project || scope.name === project;
+          });
+          const table = rows.length ? "<table id='notifications'><thead><tr><th></th><th>Description</th><th>Événement</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='notif-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.description) + "'>Retirer</button></td><td>" + esc(item.description) + "</td><td>" + esc(item.filter && item.filter.eventType) + "</td></tr>").join("") + "</tbody></table>" : "<p id='notif-empty' class='sub'>Aucune notification.</p>";
+          view.innerHTML = "<h1>Notifications</h1><div class='command'><input id='notif-desc' placeholder='Pompe' /><select id='notif-event'><option value='ms.vss-work.workitem-changed-event'>Élément de travail</option><option value='ms.vss-code.git-push-event'>Poussée</option></select><button id='notif-add' type='button'>Ajouter</button></div>" + table + "<p id='notif-error' class='error' hidden></p>";
+          document.getElementById("notif-add").onclick = async () => {
+            const error = document.getElementById("notif-error");
+            error.hidden = true;
+            try {
+              await api("POST", "/" + org + "/_apis/notification/subscriptions?api-version=7.1", {
+                description: document.getElementById("notif-desc").value,
+                filter: { type: "Expression", eventType: document.getElementById("notif-event").value },
+                channel: { type: "EmailHtml" },
+                scope: { type: "project", id: project, name: project },
+              });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.notif-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("notif-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", "/" + org + "/_apis/notification/subscriptions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
           return;
         }
         if (hub === "/_hooks") {

@@ -73,6 +73,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     let response = match (area.as_str(), resource.as_str()) {
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
         ("hooks", "inbox") => hooks_inbox(state, method, org),
+        ("notification", "subscriptions") => notification_subscriptions(state, method, org, rest, body),
         ("distributedtask", "pools") | ("distributedtask", "queues") => {
             task_agents(state, method, org, None, rest, query, body)
         }
@@ -7051,6 +7052,244 @@ fn environment_needs_approval(environment: &Value) -> bool {
         .and_then(|value| value.get("approvals"))
         .and_then(|value| value.as_array())
         .is_some_and(|rows| !rows.is_empty())
+}
+
+fn notification_subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "notification/subscriptions";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = org_list(state, org, key);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_notification(org, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let mut item = match notification_create(body) {
+                Ok(item) => item,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = org_list(state, org, key)
+                .into_iter()
+                .filter_map(|item| text_of(&item, "id"))
+                .filter_map(|id| id.strip_prefix("notif-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            if let Some(object) = item.as_object_mut() {
+                object.insert("id".into(), json!(format!("notif-{next}")));
+                object.entry("scope").or_insert(json!({"type": "none", "id": org}));
+            }
+            org_put(state, org, key, item.clone());
+            return Json(dress_notification(org, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "abonnement introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match org_get(state, org, key, id) {
+            Some(item) => Json(dress_notification(org, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "abonnement introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = org_get(state, org, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "abonnement introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> Option<bool> {
+            let bucket = db.orgs.get_mut(org)?.buckets.get_mut(key)?;
+            let key_name = bucket
+                .items
+                .iter()
+                .find_map(|(stored, item)| (stored == &stored_id || value_key(&item["id"]) == stored_id).then(|| stored.clone()))?;
+            Some(bucket.items.remove(&key_name).is_some())
+        });
+        return if removed == Some(true) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "abonnement introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn notification_create(body: &[u8]) -> Result<Value, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("abonnement illisible");
+    };
+    let Some(description) = object
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("description absente");
+    };
+    let Some(filter) = object.get("filter").and_then(|value| value.as_object()) else {
+        return Err("filtre absent");
+    };
+    let filter_type = filter
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Expression");
+    let canonical_type = match filter_type.to_ascii_lowercase().as_str() {
+        "expression" => "Expression",
+        "artifact" => "Artifact",
+        _ => return Err("filtre inconnu"),
+    };
+    let mut stored_filter = Map::new();
+    stored_filter.insert("type".into(), json!(canonical_type));
+    if canonical_type == "Expression" {
+        let Some(event) = filter
+            .get("eventType")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err("événement absent");
+        };
+        stored_filter.insert("eventType".into(), json!(event));
+        let criteria = match filter.get("criteria") {
+            None => json!({"clauses": [], "groups": [], "maxGroupLevel": 0}),
+            Some(value) if value.is_object() => value.clone(),
+            Some(_) => return Err("filtre illisible"),
+        };
+        stored_filter.insert("criteria".into(), criteria);
+    } else {
+        let Some(artifact_type) = filter
+            .get("artifactType")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err("artefact absent");
+        };
+        let Some(artifact_id) = filter
+            .get("artifactId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err("artefact absent");
+        };
+        stored_filter.insert("artifactType".into(), json!(artifact_type));
+        stored_filter.insert("artifactId".into(), json!(artifact_id));
+    }
+    let channel = match object.get("channel") {
+        None => json!({"type": "EmailHtml", "useCustomAddress": false}),
+        Some(value) => {
+            let Some(channel) = value.as_object() else {
+                return Err("canal illisible");
+            };
+            let Some(kind) = channel
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return Err("canal illisible");
+            };
+            let mut stored = Map::new();
+            stored.insert("type".into(), json!(kind));
+            if let Some(address) = channel
+                .get("address")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                stored.insert("address".into(), json!(address));
+            }
+            let custom = channel.get("useCustomAddress").and_then(|value| value.as_bool()).unwrap_or(false);
+            stored.insert("useCustomAddress".into(), json!(custom));
+            Value::Object(stored)
+        }
+    };
+    let subscriber = match object.get("subscriber") {
+        None => json!({"id": "azurz", "displayName": "azurz", "uniqueName": "azurz"}),
+        Some(value) => {
+            let Some(person) = value.as_object() else {
+                return Err("abonné absent");
+            };
+            let Some(id) = person.get("id").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("abonné absent");
+            };
+            let display = person
+                .get("displayName")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id);
+            let unique = person
+                .get("uniqueName")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id);
+            json!({"id": id, "displayName": display, "uniqueName": unique})
+        }
+    };
+    let scope = match object.get("scope") {
+        None => None,
+        Some(value) => {
+            let Some(scope) = value.as_object() else {
+                return Err("périmètre absent");
+            };
+            let Some(id) = scope.get("id").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("périmètre absent");
+            };
+            let kind = scope
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("project");
+            let mut stored = Map::new();
+            stored.insert("type".into(), json!(kind));
+            stored.insert("id".into(), json!(id));
+            if let Some(name) = scope.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {
+                stored.insert("name".into(), json!(name));
+            }
+            Some(Value::Object(stored))
+        }
+    };
+    let mut item = Map::new();
+    item.insert("description".into(), json!(description));
+    item.insert("subscriber".into(), subscriber);
+    item.insert("status".into(), json!("enabled"));
+    item.insert("flags".into(), json!("none"));
+    item.insert("filter".into(), Value::Object(stored_filter));
+    item.insert("channel".into(), channel);
+    item.insert("permissions".into(), json!("view, edit, delete"));
+    if let Some(scope) = scope {
+        item.insert("scope".into(), scope);
+    }
+    Ok(Value::Object(item))
+}
+
+fn dress_notification(org: &str, mut item: Value) -> Value {
+    let id = text_of(&item, "id").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/_apis/notification/subscriptions/{id}")),
+        );
+        object.insert(
+            "_links".into(),
+            json!({"self": {"href": format!("/{org}/_apis/notification/subscriptions/{id}")}}),
+        );
+    }
+    item
 }
 
 fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {

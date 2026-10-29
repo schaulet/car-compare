@@ -23922,3 +23922,250 @@ async fn removing_one_recycled_package_keeps_the_sibling_and_the_other_project()
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("paquet introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_notification_keeps_the_sibling_the_hook_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/_apis/notification/subscriptions?api-version=7.1";
+
+    async fn subscribe(app: &axum::Router, auth: &str, description: &str, project: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/_apis/notification/subscriptions?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"description":"{description}","filter":{{"type":"Expression","eventType":"ms.vss-work.workitem-changed-event"}},"channel":{{"type":"EmailHtml"}},"scope":{{"type":"project","id":"{project}","name":"{project}"}}}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["description"], description);
+        assert_eq!(created["status"], "enabled");
+        assert_eq!(created["filter"]["eventType"], "ms.vss-work.workitem-changed-event");
+        assert_eq!(created["scope"]["id"], project);
+        assert_eq!(created["subscriber"]["id"], "azurz");
+        assert_eq!(created["channel"]["type"], "EmailHtml");
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("abonnement illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("null")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("abonnement illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"description":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"description":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"description":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":"work"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"type":"autre","eventType":"ms.vss-work.workitem-changed-event"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"type":"Expression"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("événement absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"type":"Artifact","artifactType":"WorkItem"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("artefact absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"eventType":"ms.vss-work.workitem-changed-event"},"channel":"mail"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("canal illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"eventType":"ms.vss-work.workitem-changed-event"},"subscriber":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("abonné absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"eventType":"ms.vss-work.workitem-changed-event"},"scope":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("périmètre absent"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe = subscribe(&app, &auth, "Pompe", "AzurzDemo").await;
+    let relais = subscribe(&app, &auth, "Relais", "AzurzDemo").await;
+    let atelier = subscribe(&app, &auth, "Atelier", "Atelier").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","publisherId":"tfs","eventType":"workitem.updated","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"http://lab/hooks"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let hook_id = hook["id"].as_str().unwrap().to_string();
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["description"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert!(pompe_row["url"].as_str().unwrap().ends_with(&format!("/notification/subscriptions/{pompe}")), "{pompe_row}");
+    let one = format!("/azurz/_apis/notification/subscriptions/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["description"], "Pompe");
+    assert_eq!(fetched["scope"]["name"], "AzurzDemo");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/notification/subscriptions/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/notification/subscriptions/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/notification/subscriptions/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 2, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["description"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["scope"]["id"], "AzurzDemo");
+    let other = kept["value"].as_array().unwrap().iter().find(|item| item["description"] == "Atelier").unwrap();
+    assert_eq!(other["id"], atelier);
+    assert_eq!(other["scope"]["name"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{hook_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_hook["name"], "Pompe");
+    assert_eq!(kept_hook["eventType"], "workitem.updated");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+}
