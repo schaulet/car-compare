@@ -1178,7 +1178,8 @@ fn pull_requests(
     if method != Method::POST {
         if method == Method::PATCH || method == Method::PUT {
             let id = rest.last().cloned().unwrap_or_default();
-            let payload = parse_json(body).unwrap_or(json!({}));
+            let mut payload = parse_json(body).unwrap_or(json!({}));
+            normalize_autocomplete(&mut payload);
             if let Some(strategy) = payload
                 .get("completionOptions")
                 .and_then(|options| text_of(options, "mergeStrategy"))
@@ -1191,7 +1192,7 @@ fn pull_requests(
             return match patch_item(state, org, project, key, &id, &payload) {
                 Some(item) => {
                     let completed = text_of(&item, "status").as_deref() == Some("completed");
-                    let item = if completed && previous.as_deref() != Some("completed") {
+                    let mut item = if completed && previous.as_deref() != Some("completed") {
                         let prepared = if squash_requested(&item) {
                             Some(Prepared::Squash(prepare_squash(state, org, project, &item)))
                         } else if rebase_requested(&item) {
@@ -1213,7 +1214,11 @@ fn pull_requests(
                             }
                         }
                     } else if !completed {
-                        deliver_work_item(state, org, project, "git.pullrequest.updated", &item);
+                        if let Some(done) = try_autocomplete(state, org, project, &id) {
+                            item = done;
+                        } else {
+                            deliver_work_item(state, org, project, "git.pullrequest.updated", &item);
+                        }
                     }
                     Json(item).into_response()
                 }
@@ -1822,9 +1827,11 @@ fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_i
         put_item(state, org, project, &key, item.clone());
         stored.push(item);
     }
-    if let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) {
-        if text_of(&pull, "status").as_deref() != Some("completed") {
-            deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+    if try_autocomplete(state, org, project, pull_id).is_none() {
+        if let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) {
+            if text_of(&pull, "status").as_deref() != Some("completed") {
+                deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+            }
         }
     }
     if stored.len() == 1 {
@@ -1832,6 +1839,82 @@ fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_i
     } else {
         Json(Value::Array(stored)).into_response()
     }
+}
+
+fn normalize_autocomplete(payload: &mut Value) {
+    let Some(value) = payload.get("autoCompleteSetBy").cloned() else {
+        return;
+    };
+    if value.is_null() {
+        return;
+    }
+    let id = text_of(&value, "id")
+        .or_else(|| text_of(&value, "uniqueName"))
+        .or_else(|| text_of(&value, "displayName"))
+        .unwrap_or_else(|| "azurz".into());
+    let display = text_of(&value, "displayName").unwrap_or_else(|| id.clone());
+    let unique = text_of(&value, "uniqueName").unwrap_or_else(|| id.clone());
+    payload["autoCompleteSetBy"] = json!({"id": id, "displayName": display, "uniqueName": unique});
+}
+
+fn autocomplete_armed(pull: &Value) -> bool {
+    pull.get("autoCompleteSetBy").is_some_and(|value| !value.is_null())
+}
+
+fn pull_blocked(state: &AppState, org: &str, project: &str, pull: &Value) -> bool {
+    let pull_id = value_key(&pull["pullRequestId"]);
+    let pull_key = if pull_id.is_empty() { value_key(&pull["id"]) } else { pull_id };
+    let reviewers = list(state, org, project, &format!("git/pullrequests/{pull_key}/reviewers"));
+    if reviewers.iter().any(|reviewer| reviewer.get("vote").and_then(|value| value.as_i64()).unwrap_or(0) < 0) {
+        return true;
+    }
+    if reviewers.iter().any(|reviewer| {
+        reviewer.get("isRequired").and_then(|value| value.as_bool()) == Some(true)
+            && reviewer.get("vote").and_then(|value| value.as_i64()).unwrap_or(0) < 10
+    }) {
+        return true;
+    }
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let target = text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+    list(state, org, project, "policy/configurations").into_iter().any(|item| {
+        let configuration = dress_policy(org, project, item);
+        if configuration.get("isEnabled").and_then(|value| value.as_bool()) == Some(false) {
+            return false;
+        }
+        if configuration.get("isBlocking").and_then(|value| value.as_bool()) == Some(false) {
+            return false;
+        }
+        let settings = configuration.get("settings").unwrap_or(&Value::Null);
+        if !scope_matches(settings, &repo_id, &target) {
+            return false;
+        }
+        let status = evaluate_policy(state, org, project, &configuration, pull);
+        status == "rejected" || status == "queued"
+    })
+}
+
+fn try_autocomplete(state: &AppState, org: &str, project: &str, pull_id: &str) -> Option<Value> {
+    let pull = get_item(state, org, project, "git/pullrequests", pull_id)?;
+    let status = text_of(&pull, "status").unwrap_or_default();
+    if status == "completed" || status == "abandoned" || !autocomplete_armed(&pull) || pull_blocked(state, org, project, &pull) {
+        return None;
+    }
+    let patched = patch_item(state, org, project, "git/pullrequests", pull_id, &json!({"status": "completed"}))?;
+    let prepared = if squash_requested(&patched) {
+        Some(Prepared::Squash(prepare_squash(state, org, project, &patched)))
+    } else if rebase_requested(&patched) {
+        Some(Prepared::Rebase(prepare_rebase(state, org, project, &patched)))
+    } else {
+        None
+    };
+    let item = finish_pull(state, org, project, pull_id, prepared).unwrap_or(patched);
+    deliver_work_item(state, org, project, "git.pullrequest.merged", &item);
+    if let Some(repo) = text_of(&item["repository"], "id") {
+        if let Some(target) = text_of(&item, "targetRefName") {
+            advance_pull_iterations(state, org, project, &repo, &[target]);
+        }
+    }
+    Some(item)
 }
 
 enum Prepared {

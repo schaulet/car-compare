@@ -6939,3 +6939,234 @@ async fn build_artifact_hides_its_bytes_until_download() {
     let left: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(left["count"], 0);
 }
+
+#[tokio::test]
+async fn pull_request_autocomplete_waits_for_a_required_reviewer() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Pompe auto","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let path = format!("/azurz/AzurzDemo/_apis/git/pullrequests/{pull_id}");
+    assert!(pull.get("autoCompleteSetBy").is_none());
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"ligne","isRequired":true,"vote":0}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{"id":"azurz"},"completionOptions":{"mergeStrategy":"squash","deleteSourceBranch":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let waiting: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(waiting["status"], "active");
+    assert_eq!(waiting["autoCompleteSetBy"]["displayName"], "azurz");
+    assert_eq!(waiting["completionOptions"]["mergeStrategy"], "squash");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"ligne","isRequired":true,"vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let merged: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(merged["status"], "completed");
+    assert_eq!(merged["completionOptions"]["mergeStrategy"], "squash");
+    assert!(!merged["lastMergeCommit"]["commitId"].as_str().unwrap_or("").is_empty());
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Attente","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let second_id = second["pullRequestId"].as_i64().unwrap();
+    let second_path = format!("/azurz/AzurzDemo/_apis/git/pullrequests/{second_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{second_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"ligne","isRequired":true,"vote":0}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{second_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{"id":"azurz"},"completionOptions":{"mergeStrategy":"ff"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("stratégie de fusion inconnue"));
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{second_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{"id":"azurz"},"completionOptions":{"mergeStrategy":"noFastForward"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let armed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(armed["status"], "active");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{second_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":null}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cleared: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cleared["status"], "active");
+    assert!(cleared.get("autoCompleteSetBy").is_none() || cleared["autoCompleteSetBy"].is_null());
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{second_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"ligne","isRequired":true,"vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{second_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["status"], "active");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Direct","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let third: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let third_id = third["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/pullrequests/{third_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{},"completionOptions":{"mergeStrategy":"noFastForward"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let immediate: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(immediate["status"], "completed");
+    assert_eq!(immediate["autoCompleteSetBy"]["displayName"], "azurz");
+    assert_eq!(immediate["completionOptions"]["mergeStrategy"], "noFastForward");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Refus","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fourth: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let fourth_id = fourth["pullRequestId"].as_i64().unwrap();
+    let fourth_path = format!("/azurz/AzurzDemo/_apis/git/pullrequests/{fourth_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{fourth_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"ligne","vote":-10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{fourth_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{"displayName":"azurz"},"completionOptions":{"mergeStrategy":"noFastForward"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rejected: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rejected["status"], "active");
+    assert_eq!(rejected["autoCompleteSetBy"]["displayName"], "azurz");
+}
