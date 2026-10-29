@@ -355,6 +355,9 @@ impl AppState {
         if resource.as_deref() == Some("classificationnodes") {
             return crate::shapes::classification_nodes(self, method, org, project, rest, query, body);
         }
+        if resource.as_deref() == Some("tags") {
+            return crate::shapes::work_item_tags(self, method, org, project, rest, body);
+        }
         if let Some(response) = crate::shapes::wit_catalog(self, method, org, project, rest) {
             return response;
         }

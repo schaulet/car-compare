@@ -546,7 +546,42 @@
           const bin = binItems.length
             ? "<table id='bin'><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th></th></tr></thead><tbody>" + binItems.map((item) => "<tr data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(item.name || "") + "</td><td>" + esc(item.type || "") + "</td><td><button class='bin-restore' type='button'>Restaurer</button><button class='bin-destroy' type='button'>Détruire</button></td></tr>").join("") + "</tbody></table>"
             : "<p class='sub' id='bin-empty'>Corbeille vide.</p>";
-          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items) + "<h2>Corbeille</h2>" + bin;
+          let tagBlock = "";
+          if (hub === "/_workitems") {
+            const listed = await api("GET", root + "/wit/tags?api-version=7.1").catch(() => ({ value: [] }));
+            const tagRows = listed.value || [];
+            const tagTable = tagRows.length ? "<table id='wit-tags'><thead><tr><th></th><th>Nom</th></tr></thead><tbody>" + tagRows.map((item) => "<tr><td><button type='button' class='wtag-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wit-tag-empty' class='sub'>Aucune étiquette.</p>";
+            tagBlock = "<h2>Étiquettes</h2><div class='command'><input id='wtag-name' placeholder='pompe' /><button id='wtag-add' type='button'>Ajouter</button></div>" + tagTable + "<p id='wtag-error' class='sub'></p>";
+          }
+          view.innerHTML = "<h1>" + heading + "</h1>" + tagBlock + "<div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items) + "<h2>Corbeille</h2>" + bin;
+          const addTag = document.getElementById("wtag-add");
+          if (addTag) {
+            addTag.onclick = async () => {
+              const error = document.getElementById("wtag-error");
+              error.textContent = "";
+              const name = document.getElementById("wtag-name").value.trim() || "pompe";
+              try {
+                await api("POST", root + "/wit/tags?api-version=7.1", { name });
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          }
+          document.querySelectorAll("button.wtag-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wtag-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/wit/tags/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           bindRows();
           document.getElementById("create").onclick = async () => {
             const kind = document.getElementById("kind").value;

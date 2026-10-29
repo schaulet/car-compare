@@ -4277,6 +4277,96 @@ fn pipeline_runs(state: &AppState, method: &Method, org: &str, project: &str, re
     }
 }
 
+pub fn work_item_tags(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "wit/tags";
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by_key(|item| item.get("id").and_then(json_i64).unwrap_or(0));
+            let value = rows.into_iter().map(|item| dress_work_item_tag(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_work_item_tag(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    let wanted = pct_decode(&rest[2]).trim().to_string();
+    if wanted.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    let Some(item) = find_work_item_tag(&list(state, org, project, key), &wanted) else {
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    };
+    let id = value_key(&item["id"]);
+    if method == &Method::GET {
+        return Json(dress_work_item_tag(org, project, item)).into_response();
+    }
+    if method == &Method::DELETE {
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "étiquette introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_work_item_tag(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    let existing = list(state, org, project, "wit/tags");
+    if existing.iter().any(|item| {
+        item.get("name")
+            .and_then(|value| value.as_str())
+            .is_some_and(|current| current.eq_ignore_ascii_case(name))
+    }) {
+        return fail(StatusCode::BAD_REQUEST, "étiquette déjà présente");
+    }
+    let next = existing.iter().filter_map(|item| item.get("id").and_then(json_i64)).max().unwrap_or(0) + 1;
+    let item = json!({"id": next, "name": name});
+    put_item(state, org, project, "wit/tags", item.clone());
+    Json(dress_work_item_tag(org, project, item)).into_response()
+}
+
+fn find_work_item_tag(rows: &[Value], wanted: &str) -> Option<Value> {
+    rows.iter()
+        .find(|item| value_key(&item["id"]) == wanted)
+        .cloned()
+        .or_else(|| {
+            rows.iter()
+                .find(|item| {
+                    item.get("name")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+                })
+                .cloned()
+        })
+}
+
+fn dress_work_item_tag(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!({"name": project}));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/wit/tags/{id}")));
+    }
+    item
+}
+
 fn test_variables(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "testplan/variables";
     if rest.len() == 2 {
