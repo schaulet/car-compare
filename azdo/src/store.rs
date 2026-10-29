@@ -516,12 +516,27 @@ pub fn value_key(value: &Value) -> String {
 }
 
 pub fn object_id(seed: &str) -> String {
-    let bytes = seed.as_bytes();
+    let mut lanes = [
+        0xcbf29ce484222325u64,
+        0x84222325cbf29ce4u64,
+        0x9e3779b97f4a7c15u64,
+        0x6c62272e07bb0142u64,
+        0x517cc1b727220a95u64,
+    ];
+    for (index, byte) in seed.bytes().enumerate() {
+        let lane = index % lanes.len();
+        lanes[lane] ^= u64::from(byte);
+        lanes[lane] = lanes[lane].wrapping_mul(0x100000001b3);
+        lanes[lane] ^= (index as u64).wrapping_shl(1).wrapping_add(0x9e3779b97f4a7c15);
+    }
+    for index in 0..lanes.len() {
+        let next = lanes[(index + 1) % lanes.len()];
+        lanes[index] ^= next.rotate_left(17);
+        lanes[index] = lanes[index].wrapping_mul(0x100000001b3);
+    }
     let mut out = String::with_capacity(40);
-    for index in 0..40 {
-        let byte = bytes.get(index % bytes.len().max(1)).copied().unwrap_or(b'a') as u16;
-        let nibble = (byte + index as u16) % 16;
-        out.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
+    for lane in lanes {
+        out.push_str(&format!("{:08x}", lane as u32));
     }
     out
 }

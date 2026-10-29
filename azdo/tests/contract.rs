@@ -4348,3 +4348,127 @@ async fn pull_request_iteration_changes_are_the_net_diff() {
     .await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn commit_ids_stay_distinct_when_comments_share_a_prefix() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heads: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let mut tip = heads["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let root = tip.clone();
+    let mut ids = Vec::new();
+    for (comment, path) in [
+        ("Sonde", "/src/sonde.txt"),
+        ("Sonde poussée", "/src/sonde-poussee.txt"),
+        ("sonde lab", "/src/sonde-lab.txt"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{tip}"}}],"commits":[{{"comment":"{comment}","changes":[{{"changeType":"add","item":{{"path":"{path}"}},"newContent":{{"content":"ok","contentType":"rawtext"}}}}]}}]}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let commit_id = push["commits"][0]["commitId"].as_str().unwrap().to_string();
+        assert_eq!(commit_id.len(), 40, "{commit_id}");
+        assert!(commit_id.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_ne!(commit_id, tip);
+        ids.push(commit_id.clone());
+        tip = commit_id;
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_ne!(ids[0], ids[2]);
+    let parents = [root.as_str(), ids[0].as_str(), ids[1].as_str()];
+    let comments = ["Sonde", "Sonde poussée", "sonde lab"];
+    for index in 0..3 {
+        let (status, body, _) = call(
+            &app,
+            "GET",
+            &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{}?api-version=7.1", ids[index]),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let commit: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(commit["comment"], comments[index]);
+        assert_eq!(commit["parents"][0], parents[index]);
+    }
+    let mut tag_ids = Vec::new();
+    for name in ["v1.0.0", "v1.0.1"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"name":"{name}","message":"{name}","taggedObject":{{"objectId":"{}"}}}}"#,
+                ids[2]
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let tag: serde_json::Value = serde_json::from_str(&body).unwrap();
+        tag_ids.push(tag["objectId"].as_str().unwrap().to_string());
+    }
+    assert_ne!(tag_ids[0], tag_ids[1]);
+    assert_ne!(tag_ids[0], ids[2]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags/{}?api-version=7.1", tag_ids[0]),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first_tag: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(first_tag["name"], "v1.0.0");
+    assert_eq!(first_tag["taggedObject"]["objectId"], ids[2]);
+}
