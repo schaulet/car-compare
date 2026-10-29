@@ -33,7 +33,7 @@ Outils : `analyser_demande`, `creer_demande_azure_devops`, `enrichir_demande`, `
 
 `docker compose -f lab/docker-compose.yml up --build` démarre :
 
-- un Azure DevOps de laboratoire en Rust (`azdo`), organisation `azurz`, projet `AzurzDemo`, PAT `azurz-lab-pat`, avec page de connexion, hubs du portail et contrôles d'environnement (approbation, branche, verrou) et approbations qui retiennent une exécution, fichiers sécurisés de la bibliothèque ;
+- un Azure DevOps de laboratoire en Rust (`azdo`), organisation `azurz`, projet `AzurzDemo`, PAT `azurz-lab-pat`, avec page de connexion, hubs du portail et contrôles d'environnement (approbation, branche, verrou) et approbations qui retiennent une exécution, fichiers sécurisés de la bibliothèque, artefacts de build téléchargeables ;
 - le pont (UI `http://localhost:8080`, API Azure DevOps du lab republished sur `http://localhost:8081`) ;
 - trois passerelles Ignition 8.1 : Ligne A `:8088`, Ligne B `:8089`, Supervision `:8090` (compte `admin` / `azurz-lab`).
 

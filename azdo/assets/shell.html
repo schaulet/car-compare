@@ -638,6 +638,39 @@
               return "<li data-type='" + esc(record.type) + "' data-name='" + esc(record.name) + "' style='margin-left:" + (depth * 18) + "px'><span class='type'>" + esc(record.type) + "</span> " + esc(record.name) + " — " + esc(record.state) + result + "</li>" + timelineItems(records, String(record.id), depth + 1);
             }).join("");
           }
+          async function showArtifacts(buildId) {
+            const pageData = await api("GET", root + "/build/builds/" + encodeURIComponent(buildId) + "/artifacts?api-version=7.1");
+            const rows = pageData.value || [];
+            const table = rows.length ? "<table id='build-artifacts'><thead><tr><th>Nom</th><th></th></tr></thead><tbody>" + rows.map((item) => "<tr class='artifact'><td>" + esc(item.name) + "</td><td><button type='button' class='artifact-read' data-name='" + esc(item.name) + "'>Télécharger</button> <button type='button' class='artifact-remove' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='artifact-empty' class='sub'>Aucun artefact.</p>";
+            let panel = document.getElementById("artifact-panel");
+            if (!panel) {
+              panel = document.createElement("section");
+              panel.id = "artifact-panel";
+              view.appendChild(panel);
+            }
+            panel.innerHTML = "<h2>Artefacts</h2><div class='command'><input id='artifact-name' placeholder='Nom' /><input id='artifact-content' placeholder='Contenu' /><button id='artifact-add' type='button'>Publier</button></div>" + table + "<pre id='artifact-preview' class='panel' hidden></pre>";
+            document.getElementById("artifact-add").onclick = async () => {
+              await api("POST", root + "/build/builds/" + encodeURIComponent(buildId) + "/artifacts?api-version=7.1", {
+                name: document.getElementById("artifact-name").value || "drop",
+                resource: { type: "PipelineArtifact", content: document.getElementById("artifact-content").value || "" },
+              });
+              await showArtifacts(buildId);
+            };
+            document.querySelectorAll("button.artifact-read").forEach((button) => {
+              button.onclick = async () => {
+                const response = await fetch(root + "/build/builds/" + encodeURIComponent(buildId) + "/artifacts?artifactName=" + encodeURIComponent(button.dataset.name) + "&%24format=zip&api-version=7.1");
+                const preview = document.getElementById("artifact-preview");
+                preview.hidden = false;
+                preview.textContent = await response.text();
+              };
+            });
+            document.querySelectorAll("button.artifact-remove").forEach((button) => {
+              button.onclick = async () => {
+                await api("DELETE", root + "/build/builds/" + encodeURIComponent(buildId) + "/artifacts/" + encodeURIComponent(button.dataset.name) + "?api-version=7.1");
+                await showArtifacts(buildId);
+              };
+            });
+          }
           document.querySelectorAll("tr.build").forEach((row) => {
             row.onclick = async () => {
               const timeline = await api("GET", root + "/build/builds/" + row.dataset.id + "/timeline?api-version=7.1");
@@ -649,6 +682,7 @@
               const log = document.getElementById("log");
               log.hidden = false;
               log.textContent = await response.text();
+              await showArtifacts(row.dataset.id);
             };
           });
           document.getElementById("queue").onclick = async () => {

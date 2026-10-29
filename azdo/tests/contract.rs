@@ -6733,3 +6733,209 @@ async fn secure_file_hides_its_bytes_until_download() {
     assert_eq!(left["count"], 1);
     assert_eq!(left["value"][0]["name"], "jeton");
 }
+
+#[tokio::test]
+async fn build_artifact_hides_its_bytes_until_download() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = build["id"].as_i64().unwrap();
+    let artifacts = format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/artifacts");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"  ","resource":{"type":"PipelineArtifact","content":"secret"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom d'artefact absent"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"drop","resource":{"type":"PipelineArtifact","data":"container/drop","content":"pipeline-drop"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["name"], "drop");
+    assert_eq!(created["source"], "build");
+    assert_eq!(created["resource"]["type"], "PipelineArtifact");
+    assert_eq!(created["resource"]["data"], "container/drop");
+    assert!(created.get("content").is_none());
+    assert!(created["resource"].get("content").is_none());
+    assert!(!body.contains("pipeline-drop"));
+    let download_url = created["resource"]["downloadUrl"].as_str().unwrap();
+    assert!(download_url.contains("artifactName=drop"));
+    assert!(download_url.contains("%24format=zip"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Drop","resource":{"type":"PipelineArtifact","content":"autre"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("artefact déjà présent"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["value"][0]["name"], "drop");
+    assert!(!body.contains("pipeline-drop"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?artifactName=drop&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(named["name"], "drop");
+    assert!(named.get("count").is_none());
+    assert!(!body.contains("pipeline-drop"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}/drop?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("drop"));
+    assert!(!body.contains("pipeline-drop"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?artifactName=absent&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("artefact introuvable"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?artifactName=drop&$format=zip&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "pipeline-drop");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?artifactName=drop&%24format=zip&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "pipeline-drop");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}/drop/download?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "pipeline-drop");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{artifacts}/drop?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}/drop?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{artifacts}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 0);
+}

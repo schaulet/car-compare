@@ -28,7 +28,7 @@ pub fn dispatch(
         ("git", "pushes") => git_alias(state, method, org, project, "pushes", query, body),
         ("git", "pullrequests") => pull_requests(state, method, org, project, None, rest, body),
         ("build", "definitions") => definitions(state, method, org, project, body),
-        ("build", "builds") => builds(state, method, org, project, rest, body),
+        ("build", "builds") => builds(state, method, org, project, rest, query, body),
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
         }
@@ -2178,7 +2178,150 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, body
     Json(item).into_response()
 }
 
-fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+fn build_artifacts(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    build_id: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let key = format!("build/builds/{build_id}/artifacts");
+    if rest.len() == 4 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom d'artefact absent");
+        }
+        if list(state, org, project, &key)
+            .iter()
+            .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+        {
+            return fail(StatusCode::BAD_REQUEST, "artefact déjà présent");
+        }
+        let incoming = payload.get("resource").cloned().unwrap_or(json!({"type": "PipelineArtifact"}));
+        let content = incoming.get("content").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        let mut resource = if incoming.is_object() { incoming } else { json!({"type": "PipelineArtifact", "data": incoming}) };
+        if let Some(object) = resource.as_object_mut() {
+            object.remove("content");
+            object.entry("type").or_insert(json!("PipelineArtifact"));
+        }
+        let next = list(state, org, project, &key)
+            .into_iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let item = json!({
+            "id": next,
+            "name": name,
+            "source": "build",
+            "resource": resource,
+            "content": base64::engine::general_purpose::STANDARD.encode(content.as_bytes())
+        });
+        put_item(state, org, project, &key, item.clone());
+        return Json(dress_build_artifact(org, project, build_id, &item)).into_response();
+    }
+    let named = artifact_query_name(query, rest);
+    if method == Method::GET && named.is_none() && rest.len() == 4 {
+        let value = list(state, org, project, &key)
+            .into_iter()
+            .map(|item| dress_build_artifact(org, project, build_id, &item))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    let Some(name) = named else {
+        return fail(StatusCode::NOT_FOUND, "artefact introuvable");
+    };
+    let Some(item) = list(state, org, project, &key)
+        .into_iter()
+        .find(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    else {
+        return fail(StatusCode::NOT_FOUND, "artefact introuvable");
+    };
+    let download = rest.iter().skip(4).any(|part| part.eq_ignore_ascii_case("download"))
+        || query_param(query, "download").is_some_and(|value| pct_decode(value).eq_ignore_ascii_case("true"))
+        || query_param(query, "$format").is_some_and(|value| pct_decode(value).eq_ignore_ascii_case("zip"));
+    if method == Method::GET && download {
+        let encoded = text_of(&item, "content").unwrap_or_default();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .unwrap_or_default();
+        let content_type = if query_param(query, "$format").is_some_and(|value| pct_decode(value).eq_ignore_ascii_case("zip")) {
+            "application/zip"
+        } else {
+            "application/octet-stream"
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"));
+    }
+    if method == Method::GET {
+        return Json(dress_build_artifact(org, project, build_id, &item)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&item["id"]);
+        return if delete_item(state, org, project, &key, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "artefact introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn artifact_query_name(query: &str, rest: &[String]) -> Option<String> {
+    if let Some(part) = rest.get(4) {
+        if !part.eq_ignore_ascii_case("download") {
+            let name = pct_decode(part).trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    query_param(query, "artifactName").and_then(|value| {
+        let name = pct_decode(value).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    })
+}
+
+fn dress_build_artifact(org: &str, project: &str, build_id: &str, item: &Value) -> Value {
+    let name = text_of(item, "name").unwrap_or_default();
+    let encoded = query_encode(&name);
+    let url = format!("/{org}/{project}/_apis/build/builds/{build_id}/artifacts?artifactName={encoded}");
+    let download = format!("{url}&%24format=zip");
+    let mut resource = item.get("resource").cloned().unwrap_or(json!({"type": "PipelineArtifact"}));
+    if let Some(object) = resource.as_object_mut() {
+        object.remove("content");
+        object.entry("type").or_insert(json!("PipelineArtifact"));
+        object.insert("downloadUrl".into(), json!(download));
+        object.insert("url".into(), json!(url));
+    }
+    json!({
+        "id": item["id"],
+        "name": name,
+        "source": item.get("source").cloned().unwrap_or(json!("build")),
+        "resource": resource,
+        "url": url
+    })
+}
+
+fn query_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
     let key = "build/builds";
     if rest.len() == 2 && method == Method::GET {
         let value = list(state, org, project, key)
@@ -2237,21 +2380,7 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
         return Json(page(vec![json!({"id": 1, "type": "Container", "lineCount": 2, "url": format!("/{org}/{project}/_apis/build/builds/{id}/logs/1")})])).into_response();
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("artifacts") {
-        let artifacts = format!("build/builds/{id}/artifacts");
-        if method == Method::GET && rest.len() == 4 {
-            return Json(page(list(state, org, project, &artifacts))).into_response();
-        }
-        if method == Method::POST {
-            let payload = parse_json(body).unwrap_or(json!({}));
-            let name = text_of(&payload, "name").unwrap_or_else(|| "drop".into());
-            let item = json!({
-                "id": list(state, org, project, &artifacts).len() + 1,
-                "name": name,
-                "resource": payload.get("resource").cloned().unwrap_or(json!({"type": "PipelineArtifact"}))
-            });
-            put_item(state, org, project, &artifacts, item.clone());
-            return Json(item).into_response();
-        }
+        return build_artifacts(state, method, org, project, id, rest, query, body);
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, id) {
