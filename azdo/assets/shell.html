@@ -1433,14 +1433,14 @@
             const shown = variable && variable.isSecret ? "••••" : ((variable && variable.value) || "");
             return key + " = " + shown;
           }
-          const table = groups.length ? "<table id='vg-groups'><thead><tr><th>Nom</th><th>Type</th><th>Variables</th></tr></thead><tbody>" + groups.map((item) => {
+          const table = groups.length ? "<table id='vg-groups'><thead><tr><th>Nom</th><th>Type</th><th>Variables</th><th></th></tr></thead><tbody>" + groups.map((item) => {
             const variables = item.variables || {};
             const shown = Object.keys(variables).map((key) => variableLine(key, variables[key])).join(", ");
-            return "<tr class='vg click' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(shown) + "</td></tr>";
+            return "<tr class='vg click' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(shown) + "</td><td><button type='button' class='vg-remove' data-id='" + esc(item.id) + "'>Retirer</button></td></tr>";
           }).join("") + "</tbody></table>" : "<p id='vg-empty' class='sub'>Aucun groupe de variables.</p>";
           const files = await collection("distributedtask/securefiles");
           const secure = files.length ? "<table id='secure-files'><thead><tr><th>Nom</th><th></th></tr></thead><tbody>" + files.map((item) => "<tr class='secure'><td>" + esc(item.name) + "</td><td><button type='button' class='secure-read' data-id='" + esc(item.id) + "'>Lire</button> <button type='button' class='secure-remove' data-id='" + esc(item.id) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='secure-empty' class='sub'>Aucun fichier sécurisé.</p>";
-          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Nom du fichier' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<p id='vg-error' class='sub'></p><section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Nom du fichier' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
           const selected = new URLSearchParams(location.search).get("group") || "";
           async function openGroup(id) {
             const item = await api("GET", root + "/distributedtask/variablegroups/" + encodeURIComponent(id) + "?api-version=7.1");
@@ -1465,6 +1465,19 @@
           if (selected) await openGroup(selected);
           document.querySelectorAll("tr.vg").forEach((row) => {
             row.onclick = () => { location.href = location.pathname + "?group=" + encodeURIComponent(row.dataset.id); };
+          });
+          document.querySelectorAll("button.vg-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              const error = document.getElementById("vg-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/distributedtask/variablegroups/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.href = location.pathname;
+              } catch (err) {
+                error.textContent = err.message;
+              }
+            };
           });
           document.getElementById("create").onclick = async () => {
             const key = document.getElementById("vg-key").value || "CLE";
@@ -1936,10 +1949,11 @@
             if (resource.dashboardScope && resource.name) return resource.name;
             if (resource.contributionId && resource.name) return resource.name;
             if (resource.protocol && resource.filename) return resource.filename;
+            if (resource.type === "Vsts" && resource.name) return resource.name;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='packaging.package.deleted'>packaging.package.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='dashboard.updated'>dashboard.updated</option><option value='dashboard.widget.deleted'>dashboard.widget.deleted</option><option value='packaging.package.deleted'>packaging.package.deleted</option><option value='library.variablegroup.deleted'>library.variablegroup.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -2019,6 +2033,13 @@
               const definition = await api("POST", root + "/release/definitions?api-version=7.1", { name: title, environments: [{ name: "Production", rank: 1 }] });
               const release = await api("POST", root + "/release/releases?api-version=7.1", { definitionId: definition.id, description: title });
               await api("PATCH", root + "/release/releases/" + encodeURIComponent(release.id) + "?api-version=7.1", { status: "abandoned" });
+            } else if (event === "library.variablegroup.deleted") {
+              const created = await api("POST", root + "/distributedtask/variablegroups?api-version=7.1", {
+                name: title,
+                type: "Vsts",
+                variables: { token: { value: title, isSecret: true } },
+              });
+              await api("DELETE", root + "/distributedtask/variablegroups/" + encodeURIComponent(created.id) + "?api-version=7.1");
             } else if (event === "packaging.package.deleted") {
               const feedName = "hooks-" + Date.now();
               await api("POST", root + "/packaging/feeds?api-version=7.1", { name: feedName });

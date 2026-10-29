@@ -11605,3 +11605,224 @@ async fn npm_package_version_can_be_removed() {
     assert_eq!(notes[1]["resource"]["protocol"], "npm");
     assert!(notes[1]["resource"].get("content").is_none());
 }
+
+#[tokio::test]
+async fn variable_group_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups/99?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "groupe introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","type":"Vsts","variables":{"host":{"value":"ignition","isSecret":false},"token":{"value":"ligne-clef","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let group_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["variables"]["token"]["value"], "");
+    assert!(!body.contains("ligne-clef"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Voisin","type":"Vsts","variables":{"site":{"value":"atelier","isSecret":false},"clef":{"value":"voisin-clef","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let sibling_id = sibling["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"variableGroups":[{{"id":{group_id}}},{{"id":{sibling_id}}}],"variables":{{"poste":{{"value":"pompe","isSecret":false}}}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let linked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(linked["variableGroups"].as_array().unwrap().len(), 2);
+    assert_eq!(linked["variables"]["poste"]["value"], "pompe");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = queued["id"].as_i64().unwrap();
+    assert_eq!(queued["variables"]["host"]["value"], "ignition");
+    assert_eq!(queued["variables"]["token"]["value"], "");
+    assert_eq!(queued["variables"]["token"]["isSecret"], true);
+    assert_eq!(queued["variables"]["poste"]["value"], "pompe");
+    assert!(!body.contains("ligne-clef"));
+    assert!(!body.contains("voisin-clef"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"library.variablegroup.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "groupe introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{sibling_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Voisin");
+    assert_eq!(kept["variables"]["site"]["value"], "atelier");
+    assert_eq!(kept["variables"]["clef"]["value"], "");
+    assert_eq!(kept["variables"]["clef"]["isSecret"], true);
+    assert!(!body.contains("voisin-clef"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let definition: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(definition["variableGroups"].as_array().unwrap().len(), 2);
+    assert_eq!(definition["variables"]["poste"]["value"], "pompe");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let finished: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(finished["variables"]["host"]["value"], "ignition");
+    assert_eq!(finished["variables"]["token"]["value"], "");
+    assert_eq!(finished["variables"]["token"]["isSecret"], true);
+    assert_eq!(finished["variables"]["poste"]["value"], "pompe");
+    assert!(!body.contains("ligne-clef"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "groupe introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "groupe introuvable");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["eventType"] == "library.variablegroup.deleted")
+        .collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["resource"]["name"], "Ligne");
+    assert_eq!(notes[0]["resource"]["type"], "Vsts");
+    assert_eq!(notes[0]["resource"]["variables"]["token"]["value"], "");
+    assert_eq!(notes[0]["resource"]["variables"]["token"]["isSecret"], true);
+    assert_eq!(notes[0]["resource"]["variables"]["host"]["value"], "ignition");
+    assert!(!body.contains("ligne-clef"));
+    assert!(!body.contains("voisin-clef"));
+}

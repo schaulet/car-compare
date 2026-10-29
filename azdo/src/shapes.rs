@@ -6133,11 +6133,15 @@ fn variable_groups(state: &AppState, method: &Method, org: &str, project: &str, 
         return Json(dress_group(org, project, &item)).into_response();
     }
     if method == Method::DELETE {
-        return if delete_item(state, org, project, key, &id) {
-            StatusCode::NO_CONTENT.into_response()
-        } else {
-            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        let Some(existing) = get_item(state, org, project, key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "groupe introuvable");
         };
+        let notice = dress_group(org, project, &existing);
+        if !delete_item(state, org, project, key, &id) {
+            return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+        }
+        deliver_work_item(state, org, project, "library.variablegroup.deleted", &notice);
+        return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
