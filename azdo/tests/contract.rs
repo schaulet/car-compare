@@ -22745,3 +22745,274 @@ async fn removing_one_comment_reaction_keeps_the_sibling_and_the_other_project()
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("réaction introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_feed_upstream_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn open_feed(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let pompe = open_feed(&app, &auth, "AzurzDemo", "pompe").await;
+    let ada = open_feed(&app, &auth, "AzurzDemo", "ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = open_feed(&app, &auth, "Atelier", "pompe").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let sources = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1");
+    let (status, body, _) = call(&app, "POST", &sources, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &sources, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &sources, Some(&auth), None, "application/json", Some(r#"{"name":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &sources, Some(&auth), None, "application/json", Some(r#"{"name":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &sources, Some(&auth), None, "application/json", Some(r#"{"name":"npmjs","location":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("emplacement absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &sources,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("protocole absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &sources,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/","protocol":"rocket"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("protocole inconnu"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &sources, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/feed-missing/upstreamsources?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/","protocol":"npm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    async fn open_source(app: &axum::Router, auth: &str, project: &str, feed: &str, name: &str, location: &str, protocol: &str) -> serde_json::Value {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds/{feed}/upstreamsources?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":" {name} ","location":" {location} ","protocol":" {protocol} "}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let npm = open_source(&app, &auth, "AzurzDemo", &pompe, "npmjs", "https://registry.npmjs.org/", "npm").await;
+    assert_eq!(npm["id"], 1);
+    assert_eq!(npm["name"], "npmjs");
+    assert_eq!(npm["location"], "https://registry.npmjs.org/");
+    assert_eq!(npm["protocol"], "npm");
+    assert_eq!(npm["displayLocation"], "https://registry.npmjs.org/");
+    assert_eq!(npm["upstreamSourceType"], "public");
+    assert_eq!(npm["status"], "ok");
+    assert!(npm["url"].as_str().unwrap().ends_with(&format!("/feeds/{pompe}/upstreamsources/1")), "{npm}");
+    let again = open_source(&app, &auth, "AzurzDemo", &pompe, "npmjs", "https://example.invalid/", "npm").await;
+    assert_eq!(again["id"], 1);
+    assert_eq!(again["location"], "https://registry.npmjs.org/");
+    let pypi = open_source(&app, &auth, "AzurzDemo", &pompe, "pypi", "https://pypi.org/simple/", "pypi").await;
+    assert_eq!(pypi["id"], 2);
+    let ada_npm = open_source(&app, &auth, "AzurzDemo", &ada, "npmjs", "https://registry.npmjs.org/", "npm").await;
+    assert_eq!(ada_npm["id"], 1);
+    let atelier_npm = open_source(&app, &auth, "Atelier", &atelier, "npmjs", "https://registry.npmjs.org/", "npm").await;
+    assert_eq!(atelier_npm["id"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/9?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("source introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/abc?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("source introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/1/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &sources, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], 2);
+    assert_eq!(left["value"][0]["name"], "pypi");
+    let maven = open_source(&app, &auth, "AzurzDemo", &pompe, "maven", "https://repo1.maven.org/maven2/", "maven").await;
+    assert_eq!(maven["id"], 3);
+    let (status, body, _) = call(&app, "GET", &sources, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again_list: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again_list["count"], 2);
+    assert_eq!(again_list["value"][0]["id"], 2);
+    assert_eq!(again_list["value"][1]["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("source introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_feed["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let packages: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(packages["value"][0]["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/upstreamsources/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["name"], "npmjs");
+    assert_eq!(ada_kept["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier}/upstreamsources/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["name"], "npmjs");
+    assert_eq!(other["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("source introuvable"), "{body}");
+}

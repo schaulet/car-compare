@@ -5909,6 +5909,9 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         }
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("upstreamsources") {
+        return feed_upstreams(state, method, org, project, feed_id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("views") {
         return feed_views(state, method, org, project, feed_id, rest, body);
     }
@@ -5942,6 +5945,125 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "flux introuvable")
+}
+
+fn feed_upstreams(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(feed) = get_item(state, org, project, "packaging/feeds", feed_id) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let stored_feed = text_of(&feed, "id").unwrap_or_default();
+    let key = format!("packaging/feeds/{stored_feed}/upstreams");
+    if rest.len() == 4 {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by_key(|item| json_i64(&item["id"]).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_feed_upstream(org, project, &stored_feed, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, location, protocol) = match upstream_fields(body) {
+                Ok(fields) => fields,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if let Some(existing) = list(state, org, project, &key)
+                .into_iter()
+                .find(|item| text_of(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name)))
+            {
+                return Json(dress_feed_upstream(org, project, &stored_feed, existing)).into_response();
+            }
+            let next = list(state, org, project, &key)
+                .into_iter()
+                .filter_map(|item| json_i64(&item["id"]))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let item = json!({ "id": next, "name": name, "location": location, "protocol": protocol });
+            put_item(state, org, project, &key, item.clone());
+            return Json(dress_feed_upstream(org, project, &stored_feed, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 5 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "source introuvable");
+    }
+    let Ok(source_id) = rest[4].parse::<i64>() else {
+        return fail(StatusCode::NOT_FOUND, "source introuvable");
+    };
+    let id = source_id.to_string();
+    let Some(item) = get_item(state, org, project, &key, &id) else {
+        return fail(StatusCode::NOT_FOUND, "source introuvable");
+    };
+    if json_i64(&item["id"]) != Some(source_id) {
+        return fail(StatusCode::NOT_FOUND, "source introuvable");
+    }
+    if method == Method::GET {
+        return Json(dress_feed_upstream(org, project, &stored_feed, item)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, &key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "source introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn upstream_fields(body: &[u8]) -> Result<(String, String, &'static str), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("nom absent");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim) else {
+        return Err("nom absent");
+    };
+    if name.is_empty() {
+        return Err("nom absent");
+    }
+    let Some(location) = object.get("location").and_then(|value| value.as_str()).map(str::trim) else {
+        return Err("emplacement absent");
+    };
+    if location.is_empty() {
+        return Err("emplacement absent");
+    }
+    let Some(protocol) = object.get("protocol").and_then(|value| value.as_str()).map(str::trim) else {
+        return Err("protocole absent");
+    };
+    if protocol.is_empty() {
+        return Err("protocole absent");
+    }
+    let protocol = match protocol.to_ascii_lowercase().as_str() {
+        "nuget" => "nuget",
+        "npm" => "npm",
+        "maven" => "maven",
+        "pypi" => "pypi",
+        "upack" => "upack",
+        _ => return Err("protocole inconnu"),
+    };
+    Ok((name.to_string(), location.to_string(), protocol))
+}
+
+fn dress_feed_upstream(org: &str, project: &str, feed_id: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    let location = text_of(&item, "location").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("displayLocation".into(), json!(location));
+        object.insert("upstreamSourceType".into(), json!("public"));
+        object.insert("status".into(), json!("ok"));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/packaging/feeds/{feed_id}/upstreamsources/{id}")),
+        );
+    }
+    item
 }
 
 fn feed_views(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
