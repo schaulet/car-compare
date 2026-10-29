@@ -188,10 +188,16 @@
       return page.value || [];
     }
     function titleOf(item) { return item.fields?.["System.Title"] || "(sans titre)"; }
+    function assignedName(item) {
+      const value = item.fields?.["System.AssignedTo"];
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      return value.displayName || value.uniqueName || "";
+    }
     function rows(items) {
       if (!items.length) return "<p class='sub'>Aucun élément de travail.</p>";
-      return "<table><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th>État</th></tr></thead><tbody>" +
-        items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='type'>" + esc(item.fields?.["System.WorkItemType"]) + "</td><td><span class='pill " + stateClass(item.fields?.["System.State"]) + "'>" + esc(item.fields?.["System.State"] || "New") + "</span></td></tr>").join("") +
+      return "<table><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th>État</th><th>Assigné</th></tr></thead><tbody>" +
+        items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='type'>" + esc(item.fields?.["System.WorkItemType"]) + "</td><td><span class='pill " + stateClass(item.fields?.["System.State"]) + "'>" + esc(item.fields?.["System.State"] || "New") + "</span></td><td>" + esc(assignedName(item)) + "</td></tr>").join("") +
         "</tbody></table>";
     }
     async function openItem(id) {
@@ -201,7 +207,26 @@
       const updates = await api("GET", root + "/wit/workItems/" + id + "/updates?api-version=7.1");
       const panel = document.createElement("section");
       panel.className = "panel";
+      const areas = await api("GET", root + "/wit/classificationnodes/areas?$depth=10&api-version=7.1");
+      const iterations = await api("GET", root + "/wit/classificationnodes/iterations?$depth=10&api-version=7.1");
+      function fieldPath(nodePath) {
+        const parts = String(nodePath || "").split("\\").filter(Boolean);
+        if (parts.length < 2) return project;
+        return [parts[0]].concat(parts.slice(2)).join("\\");
+      }
+      function collectPaths(node, acc) {
+        if (!node || !node.path) return acc;
+        acc.push(fieldPath(node.path));
+        (node.children || []).forEach((child) => collectPaths(child, acc));
+        return acc;
+      }
+      function options(paths, current) {
+        const values = paths.slice();
+        if (current && values.indexOf(current) < 0) values.unshift(current);
+        return values.map((path) => "<option" + (path === current ? " selected" : "") + ">" + esc(path) + "</option>").join("");
+      }
       const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
+      const assigned = assignedName(item);
       const notes = (comments.comments || []).map((note) => "<li>" + esc(note.text) + "</li>").join("") || "<li>Aucun commentaire.</li>";
       const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
       const history = (updates.value || []).map((update) => {
@@ -209,8 +234,9 @@
         const bits = Object.keys(fields).map((key) => {
           const change = fields[key] || {};
           const name = key.split(".").pop();
-          if (change.oldValue != null && change.newValue != null) return name + " " + change.oldValue + " → " + change.newValue;
-          if (change.newValue != null) return name + " " + change.newValue;
+          const shown = (value) => value && typeof value === "object" ? (value.displayName || value.uniqueName || "") : value;
+          if (change.oldValue != null && change.newValue != null) return name + " " + shown(change.oldValue) + " → " + shown(change.newValue);
+          if (change.newValue != null) return name + " " + shown(change.newValue);
           return name + " retiré";
         });
         const added = update.relations && update.relations.added ? update.relations.added.length : 0;
@@ -222,7 +248,11 @@
       panel.innerHTML = "<div class='form'><div><h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
         "<div class='row'><input id='wi-title' value='" + esc(fields["System.Title"] || "") + "' style='flex:1' />" +
         "<select id='wi-state'>" + states + "</select></div>" +
+        "<div class='row'><select id='wi-area' aria-label='Zone'>" + options(collectPaths(areas, []), fields["System.AreaPath"] || project) + "</select>" +
+        "<select id='wi-iteration' aria-label='Itération'>" + options(collectPaths(iterations, []), fields["System.IterationPath"] || "") + "</select></div>" +
+        "<div class='row'><input id='wi-assigned' placeholder='Assigné à' value='" + esc(assigned) + "' /><input id='wi-tags' placeholder='Étiquettes' value='" + esc(fields["System.Tags"] || "") + "' /></div>" +
         "<textarea id='wi-desc' rows='6'>" + esc(fields["System.Description"] || "") + "</textarea>" +
+        "<p id='wi-error' class='error' hidden></p>" +
         "<div class='command'><button id='wi-save' type='button'>Enregistrer</button></div>" +
         "<h3>Liens</h3><ul>" + links + "</ul>" +
         "<h3>Historique</h3><ul id='wi-updates'>" + history + "</ul></div>" +
@@ -234,8 +264,19 @@
           { op: "replace", path: "/fields/System.Title", value: panel.querySelector("#wi-title").value },
           { op: "replace", path: "/fields/System.State", value: panel.querySelector("#wi-state").value },
           { op: "replace", path: "/fields/System.Description", value: panel.querySelector("#wi-desc").value },
+          { op: "replace", path: "/fields/System.AreaPath", value: panel.querySelector("#wi-area").value },
+          { op: "replace", path: "/fields/System.IterationPath", value: panel.querySelector("#wi-iteration").value },
+          { op: "replace", path: "/fields/System.AssignedTo", value: panel.querySelector("#wi-assigned").value },
+          { op: "replace", path: "/fields/System.Tags", value: panel.querySelector("#wi-tags").value },
         ]);
-        await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+        try {
+          await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+        } catch (error) {
+          const note = panel.querySelector("#wi-error");
+          note.hidden = false;
+          note.textContent = error.message;
+          return;
+        }
         location.reload();
       };
       panel.querySelector("#wi-comment").onclick = async () => {
@@ -402,7 +443,10 @@
                 if (placed.has(item.id) || laneOf(item) !== (lane.name || "") || mappedState(column, item) !== (item.fields?.["System.State"] || "New")) return false;
                 placed.add(item.id);
                 return true;
-              }).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
+              }).map((item) => {
+              const meta = [assignedName(item), item.fields?.["System.Tags"] || ""].filter(Boolean).join(" · ");
+              return "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div>" + (meta ? "<div class='sub'>" + esc(meta) + "</div>" : "") + "</article>";
+            }).join("") || "<p class='sub empty'>Vide</p>";
               const columnRemove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
               return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + columnRemove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
             }).join("") + "</div>";

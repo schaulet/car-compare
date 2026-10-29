@@ -298,6 +298,10 @@ impl ProjectData {
         for (key, value) in fields {
             stored.insert(key, value);
         }
+        stored.entry("System.AreaPath").or_insert(json!(project));
+        stored
+            .entry("System.IterationPath")
+            .or_insert(json!(format!("{project}\\Sprint 1")));
         let item = json!({
             "id": id,
             "rev": 1,

@@ -395,6 +395,10 @@ impl AppState {
             let kind = rest[2].trim_start_matches('$').replace("%20", " ");
             let ops = parse_json(body).unwrap_or(json!([]));
             let ops = ops.as_array().cloned().unwrap_or_default();
+            let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &ops) {
+                Ok(ops) => ops,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
             let fields = match fields_from_patch(&ops) {
                 Ok(fields) => fields,
                 Err(message) => return fail(StatusCode::BAD_REQUEST, &message),
@@ -501,7 +505,19 @@ impl AppState {
                 };
             }
             if method == Method::PATCH {
+                let exists = self.read(|db| {
+                    db.project(org, project)
+                        .and_then(|stored| stored.work_items.get(&id).cloned())
+                        .is_some()
+                });
+                if !exists {
+                    return fail(StatusCode::NOT_FOUND, "work item introuvable");
+                }
                 let ops = parse_json(body).unwrap_or(json!([])).as_array().cloned().unwrap_or_default();
+                let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &ops) {
+                    Ok(ops) => ops,
+                    Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+                };
                 let updated = self.write(|db| {
                     db.project_mut(org, project)
                         .and_then(|stored| stored.patch_work_item(id, &ops).ok())

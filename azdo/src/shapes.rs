@@ -4596,6 +4596,135 @@ pub fn classification_nodes(
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
+pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, ops: &[Value]) -> Result<Vec<Value>, &'static str> {
+    ensure_classification(state, org, project);
+    let areas = work_item_paths(state, org, project, "areas");
+    let iterations = work_item_paths(state, org, project, "iterations");
+    let mut prepared = Vec::new();
+    for op in ops {
+        let mut op = op.clone();
+        let path = op.get("path").and_then(|value| value.as_str()).unwrap_or("");
+        let Some(field) = path.strip_prefix("/fields/") else {
+            prepared.push(op);
+            continue;
+        };
+        let Some(value) = op.get("value").cloned() else {
+            prepared.push(op);
+            continue;
+        };
+        if field == "System.AssignedTo" && identity_is_blank(&value) {
+            if let Some(object) = op.as_object_mut() {
+                object.insert("op".into(), json!("remove"));
+                object.remove("value");
+            }
+            prepared.push(op);
+            continue;
+        }
+        let next = match field {
+            "System.AreaPath" => json!(canonical_tree_path(&areas, &value, "chemin de zone absent", "zone inconnue")?),
+            "System.IterationPath" => json!(canonical_tree_path(
+                &iterations,
+                &value,
+                "chemin d'itération absent",
+                "itération inconnue"
+            )?),
+            "System.AssignedTo" => canonical_identity(&value)?,
+            "System.Tags" => json!(canonical_tags(&value)?),
+            _ => value,
+        };
+        if let Some(object) = op.as_object_mut() {
+            object.insert("value".into(), next);
+        }
+        prepared.push(op);
+    }
+    Ok(prepared)
+}
+
+fn work_item_paths(state: &AppState, org: &str, project: &str, kind: &str) -> Vec<String> {
+    classification_nodes_of(state, org, project, kind)
+        .iter()
+        .filter_map(|node| {
+            let path = text_of(node, "path")?;
+            work_item_path(project, kind, &path)
+        })
+        .collect()
+}
+
+fn work_item_path(project: &str, kind: &str, node_path: &str) -> Option<String> {
+    let marker = if kind == "iterations" { "Iteration" } else { "Area" };
+    let root = format!("\\{project}\\{marker}");
+    if node_path.eq_ignore_ascii_case(&root) {
+        return Some(project.to_string());
+    }
+    let prefix = format!("{root}\\");
+    if node_path.len() > prefix.len() && node_path[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+        return Some(format!("{project}\\{}", &node_path[prefix.len()..]));
+    }
+    None
+}
+
+fn canonical_tree_path(known: &[String], value: &Value, absent: &'static str, unknown: &'static str) -> Result<String, &'static str> {
+    let text = value.as_str().unwrap_or("").trim();
+    if text.is_empty() {
+        return Err(absent);
+    }
+    known
+        .iter()
+        .find(|path| path.eq_ignore_ascii_case(text))
+        .cloned()
+        .ok_or(unknown)
+}
+
+fn identity_is_blank(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.trim().is_empty(),
+        Value::Null => true,
+        Value::Object(object) => {
+            let display = object.get("displayName").and_then(|item| item.as_str()).unwrap_or("").trim();
+            let unique = object.get("uniqueName").and_then(|item| item.as_str()).unwrap_or("").trim();
+            display.is_empty() && unique.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn canonical_identity(value: &Value) -> Result<Value, &'static str> {
+    let (display, unique) = match value {
+        Value::String(text) => {
+            let name = text.trim();
+            if name.is_empty() {
+                return Err("assigné absent");
+            }
+            (name.to_string(), name.to_string())
+        }
+        Value::Object(object) => {
+            let display = object.get("displayName").and_then(|item| item.as_str()).unwrap_or("").trim().to_string();
+            let unique = object.get("uniqueName").and_then(|item| item.as_str()).unwrap_or("").trim().to_string();
+            let display = if display.is_empty() { unique.clone() } else { display };
+            let unique = if unique.is_empty() { display.clone() } else { unique };
+            if display.is_empty() {
+                return Err("assigné absent");
+            }
+            (display, unique)
+        }
+        _ => return Err("assigné absent"),
+    };
+    Ok(json!({"displayName": display, "uniqueName": unique}))
+}
+
+fn canonical_tags(value: &Value) -> Result<String, &'static str> {
+    let text = value.as_str().ok_or("étiquettes illisibles")?;
+    let mut tags = Vec::new();
+    for tag in text.split(';') {
+        let tag = tag.trim();
+        if tag.is_empty() || tags.iter().any(|existing: &String| existing == tag) {
+            continue;
+        }
+        tags.push(tag.to_string());
+    }
+    Ok(tags.join("; "))
+}
+
 fn ensure_classification(state: &AppState, org: &str, project: &str) {
     state.write(|db| {
         db.ensure_project(org, project);

@@ -8681,3 +8681,153 @@ async fn board_rows_replace_for_one_team_and_keep_the_other() {
     assert_eq!(board["rows"][1]["name"], "Urgent");
     assert!(board["rows"][0]["name"].is_null());
 }
+
+#[tokio::test]
+async fn work_item_paths_identity_and_tags_follow_the_classification() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Hors zone"},{"op":"add","path":"/fields/System.AreaPath","value":"AzurzDemo\\Inconnue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "zone inconnue");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Sans zone"},{"op":"add","path":"/fields/System.AreaPath","value":" "}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "chemin de zone absent");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"},{"op":"add","path":"/fields/System.AreaPath","value":"azurzdemo\\ligne"},{"op":"add","path":"/fields/System.IterationPath","value":"AzurzDemo\\Sprint 1"},{"op":"add","path":"/fields/System.AssignedTo","value":"ada"},{"op":"add","path":"/fields/System.Tags","value":" pompe ; pompe ; ligne "}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!(created["fields"]["System.AreaPath"], "AzurzDemo\\Ligne");
+    assert_eq!(created["fields"]["System.IterationPath"], "AzurzDemo\\Sprint 1");
+    assert_eq!(created["fields"]["System.AssignedTo"]["displayName"], "ada");
+    assert_eq!(created["fields"]["System.AssignedTo"]["uniqueName"], "ada");
+    assert_eq!(created["fields"]["System.Tags"], "pompe; ligne");
+    assert_eq!(created["rev"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.Title","value":"Pompe changée"},{"op":"replace","path":"/fields/System.AreaPath","value":"AzurzDemo\\Absente"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "zone inconnue");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["rev"], 1);
+    assert_eq!(kept["fields"]["System.Title"], "Pompe");
+    assert_eq!(kept["fields"]["System.AreaPath"], "AzurzDemo\\Ligne");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.IterationPath","value":"AzurzDemo\\Sprint 9"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "itération inconnue");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.Tags","value":4}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "étiquettes illisibles");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.AssignedTo","value":{"displayName":"Ligne","uniqueName":"ligne@azurz"}},{"op":"replace","path":"/fields/System.AreaPath","value":"AzurzDemo"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated["fields"]["System.AreaPath"], "AzurzDemo");
+    assert_eq!(updated["fields"]["System.AssignedTo"]["displayName"], "Ligne");
+    assert_eq!(updated["fields"]["System.AssignedTo"]["uniqueName"], "ligne@azurz");
+    assert_eq!(updated["fields"]["System.IterationPath"], "AzurzDemo\\Sprint 1");
+    assert_eq!(updated["fields"]["System.Tags"], "pompe; ligne");
+    assert_eq!(updated["rev"], 2);
+}
