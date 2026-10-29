@@ -142,13 +142,23 @@ fn git_repositories(
             let stored = db.project_mut(org, project)?;
             let item = {
                 let bucket = stored.buckets.entry("git/repositories".into()).or_insert_with(Bucket::empty);
-                let id = format!("repo-{}", bucket.next);
+                let from_items = bucket
+                    .items
+                    .values()
+                    .filter_map(|item| value_key(&item["id"]).strip_prefix("repo-")?.parse::<i64>().ok())
+                    .max()
+                    .unwrap_or(0);
+                let next = bucket.next.max(from_items + 1);
+                let id = format!("repo-{next}");
                 let item = dress_repo(
                     org,
                     project,
                     json!({"id": id, "name": name, "defaultBranch": "refs/heads/main", "size": 0}),
                 );
                 bucket.put(item.clone());
+                if next >= bucket.next {
+                    bucket.next = next + 1;
+                }
                 item
             };
             stored.seed_missing(project);
@@ -159,12 +169,54 @@ fn git_repositories(
             None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         };
     }
+    if method == Method::DELETE && rest.len() == 2 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let repo_id = rest.get(2).map(String::as_str).unwrap_or("");
+    if method == Method::DELETE && rest.len() > 3 {
+        let sub = rest[3].to_ascii_lowercase();
+        let known = matches!(
+            sub.as_str(),
+            "refs"
+                | "annotatedtags"
+                | "commits"
+                | "pushes"
+                | "cherrypicks"
+                | "reverts"
+                | "pullrequests"
+                | "labels"
+                | "items"
+                | "diffs"
+        );
+        if !known {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+    }
+    if method == Method::DELETE && rest.len() == 3 {
+        let Some(found) = find_repo(state, org, project, repo_id) else {
+            return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        if stored_id == "11111111-1111-1111-1111-111111111111" {
+            return fail(StatusCode::BAD_REQUEST, "dépôt par défaut");
+        }
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut("git/repositories") {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if rest.len() == 3 && method == Method::GET {
         return match find_repo(state, org, project, repo_id) {
             Some(item) => Json(dress_repo(org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
         };
+    }
+    if rest.len() > 3 && find_repo(state, org, project, repo_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
     }
     let sub = rest.get(3).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     match sub.as_str() {

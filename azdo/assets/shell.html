@@ -847,7 +847,14 @@
             files = page.value || [];
           }
           const table = files.length ? "<table id='files'><thead><tr><th>Chemin</th><th>Type</th></tr></thead><tbody>" + files.map((item) => "<tr class='file' data-path='" + esc(item.path) + "' data-kind='" + esc(item.gitObjectType) + "'><td>" + esc(item.path) + "</td><td>" + esc(item.gitObjectType) + "</td></tr>").join("") + "</tbody></table>" : "<p id='files-empty' class='sub'>Dépôt vide.</p>";
-          view.innerHTML = "<h1>Fichiers</h1><p class='sub'>" + esc(repo ? repo.name + " · " + (repo.defaultBranch || "") : "Aucun dépôt") + "</p><div class='command'><input id='file-path' placeholder='/src/pompe.txt' /><input id='file-draft' placeholder='Contenu' /><button id='file-create' type='button'>Créer</button></div><p id='file-create-error' class='error' hidden></p>" + table + "<section id='file' class='panel' hidden></section>";
+          const seeded = "11111111-1111-1111-1111-111111111111";
+          const repoRows = repos.map((item) => {
+            const remove = item.id === seeded ? "" : "<button type='button' class='repo-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button>";
+            return "<tr><td>" + remove + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.id) + "</td></tr>";
+          }).join("");
+          const repoTable = repos.length ? "<table id='repos'><thead><tr><th></th><th>Nom</th><th>ID</th></tr></thead><tbody>" + repoRows + "</tbody></table>" : "<p id='repo-empty' class='sub'>Aucun dépôt.</p>";
+          const origin = repos.length === 1 && repos[0].id === seeded ? "<p id='repo-origin' class='sub'>Seul le dépôt d'origine.</p>" : "";
+          view.innerHTML = "<h1>Fichiers</h1><div class='command'><input id='repo-name' placeholder='Pompe' /><button id='repo-create' type='button'>Créer</button></div><p id='repo-error' class='sub'></p>" + repoTable + origin + "<p class='sub'>" + esc(repo ? repo.name + " · " + (repo.defaultBranch || "") : "Aucun dépôt") + "</p><div class='command'><input id='file-path' placeholder='/src/pompe.txt' /><input id='file-draft' placeholder='Contenu' /><button id='file-create' type='button'>Créer</button></div><p id='file-create-error' class='error' hidden></p>" + table + "<section id='file' class='panel' hidden></section>";
           async function pushChange(path, changeType, content) {
             const refs = await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs");
             const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
@@ -899,6 +906,28 @@
                 }
                 location.reload();
               };
+            };
+          });
+          document.getElementById("repo-create").onclick = async () => {
+            const note = document.getElementById("repo-error");
+            try {
+              await api("POST", root + "/git/repositories?api-version=7.1", { name: document.getElementById("repo-name").value || "Pompe" });
+            } catch (error) {
+              note.textContent = error.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.repo-remove").forEach((button) => {
+            button.onclick = async () => {
+              const note = document.getElementById("repo-error");
+              try {
+                await api("DELETE", root + "/git/repositories/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
             };
           });
           return;
