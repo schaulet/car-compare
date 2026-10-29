@@ -25078,3 +25078,227 @@ async fn removing_one_shelveset_keeps_the_sibling_the_group_and_the_other_projec
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("étagère introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_tfvc_label_keeps_the_sibling_the_shelveset_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/AzurzDemo/_apis/tfvc/labels?api-version=7.1";
+
+    async fn create(
+        app: &axum::Router,
+        auth: &str,
+        project: &str,
+        name: &str,
+        comment: Option<&str>,
+        scope: Option<(&str, bool)>,
+    ) -> String {
+        let path = format!("/azurz/{project}/_apis/tfvc/labels?api-version=7.1");
+        let comment_json = match comment {
+            Some(comment) => format!(r#","comment":"{comment}""#),
+            None => String::new(),
+        };
+        let scope_json = match scope {
+            Some((path, recursive)) => format!(r#","labelScope":{{"scope":"{path}","recursive":{recursive}}}"#),
+            None => String::new(),
+        };
+        let body = format!(r#"{{"name":"{name}"{comment_json}{scope_json}}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("label-"), "{created}");
+        assert_eq!(created["name"], name);
+        assert_eq!(created["comment"], comment.unwrap_or(""));
+        assert_eq!(created["owner"]["displayName"], "azurz");
+        assert_eq!(created["owner"]["uniqueName"], "azurz");
+        assert_eq!(created["modifiedDate"], "2026-10-29T00:00:00Z");
+        let (expected_scope, expected_recursive) = scope.unwrap_or(("$/", true));
+        assert_eq!(created["labelScope"]["scope"], expected_scope);
+        assert_eq!(created["labelScope"]["recursive"], expected_recursive);
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!("/tfvc/labels/{}", created["id"].as_str().unwrap())),
+            "{created}"
+        );
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null"] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("étiquette illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","comment":1}"#, r#"{"name":"Pompe","comment":null}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("commentaire absent"), "{body}");
+    }
+    for payload in [
+        r#"{"name":"Pompe","labelScope":"x"}"#,
+        r#"{"name":"Pompe","labelScope":null}"#,
+        r#"{"name":"Pompe","labelScope":{"scope":1}}"#,
+        r#"{"name":"Pompe","labelScope":{"scope":"$/","recursive":"yes"}}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("portée absente"), "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pompe = create(&app, &auth, "AzurzDemo", "Pompe", Some("Pompe"), None).await;
+    let relais = create(&app, &auth, "AzurzDemo", "Relais", None, Some(("$/Relais", false))).await;
+    let atelier = create(&app, &auth, "Atelier", "Atelier", Some("Atelier"), None).await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","comment":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("étiquette existante"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/tfvc/shelvesets?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","comment":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shelveset: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let shelveset_id = shelveset["id"].as_str().unwrap().to_string();
+    assert_eq!(shelveset["name"], "Pompe");
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["comment"], "Pompe");
+    assert_eq!(pompe_row["labelScope"]["scope"], "$/");
+    assert_eq!(pompe_row["labelScope"]["recursive"], true);
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais);
+    assert_eq!(relais_row["comment"], "");
+    assert_eq!(relais_row["labelScope"]["scope"], "$/Relais");
+    assert_eq!(relais_row["labelScope"]["recursive"], false);
+    let one = format!("/azurz/AzurzDemo/_apis/tfvc/labels/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["name"], "Pompe");
+    assert_eq!(fetched["comment"], "Pompe");
+    assert_eq!(fetched["owner"]["displayName"], "azurz");
+    assert!(fetched["url"].as_str().unwrap().ends_with(&format!("/tfvc/labels/{pompe}")), "{fetched}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/tfvc/labels/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/tfvc/labels/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/tfvc/labels/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &one, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["comment"], "");
+    assert_eq!(sibling["labelScope"]["scope"], "$/Relais");
+    let other = format!("/azurz/Atelier/_apis/tfvc/labels/{atelier}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &other, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["id"], atelier);
+    assert_eq!(kept_other["name"], "Atelier");
+    assert_eq!(kept_other["comment"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/tfvc/shelvesets/{shelveset_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_shelveset: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_shelveset["id"], shelveset_id);
+    assert_eq!(kept_shelveset["name"], "Pompe");
+    assert_eq!(kept_shelveset["comment"], "Pompe");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+}

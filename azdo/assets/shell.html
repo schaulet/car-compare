@@ -132,6 +132,7 @@
       <a href="/__ORG__/__PROJECT__/_policies">Stratégies</a>
       <a href="/__ORG__/__PROJECT__/_tfvc">TFVC</a>
       <a href="/__ORG__/__PROJECT__/_shelves">Étagères</a>
+      <a href="/__ORG__/__PROJECT__/_tflabels">Étiquettes TFVC</a>
       <div class="group">Pipelines</div>
       <a href="/__ORG__/__PROJECT__/_build">Pipelines</a>
       <a href="/__ORG__/__PROJECT__/_yaml">Pipelines YAML</a>
@@ -1689,6 +1690,38 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/tfvc/shelvesets/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_tflabels") {
+          const page = await api("GET", root + "/tfvc/labels?api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='tflabels'><thead><tr><th></th><th>Nom</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='tflabel-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='tflabel-empty' class='sub'>Aucune étiquette.</p>";
+          view.innerHTML = "<h1>Étiquettes TFVC</h1><div class='command'><input id='tflabel-name' placeholder='Pompe' /><button id='tflabel-add' type='button'>Ajouter</button></div>" + table + "<p id='tflabel-error' class='error' hidden></p>";
+          document.getElementById("tflabel-add").onclick = async () => {
+            const error = document.getElementById("tflabel-error");
+            error.hidden = true;
+            const name = document.getElementById("tflabel-name").value;
+            try {
+              await api("POST", root + "/tfvc/labels?api-version=7.1", { name: name, comment: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.tflabel-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("tflabel-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/tfvc/labels/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
