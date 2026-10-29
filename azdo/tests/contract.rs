@@ -2386,3 +2386,168 @@ async fn pool_agent_comes_online_and_finishes_a_job() {
     assert_eq!(finished["status"], "completed");
     assert_eq!(finished["result"], "succeeded");
 }
+
+#[tokio::test]
+async fn service_hook_delivers_a_work_item_to_the_consumer() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut total = Vec::new();
+        let mut buffer = [0u8; 2048];
+        loop {
+            match socket.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    total.extend_from_slice(&buffer[..count]);
+                    let text = String::from_utf8_lossy(&total);
+                    let Some(header_end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = text
+                        .lines()
+                        .find_map(|line| line.split_once(':').and_then(|(name, value)| name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())))
+                        .flatten()
+                        .unwrap_or(0);
+                    if total.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = socket.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = sender.send(String::from_utf8_lossy(&total).into_owned());
+    });
+
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"publisherId":"tfs","eventType":"workitem.created","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{{"url":"http://127.0.0.1:{port}/consumer"}},"publisherInputs":{{"projectId":"AzurzDemo"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created_hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let created_id = created_hook["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"workitem.updated","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated_hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let updated_id = updated_hook["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"eventType":"workitem.created","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"Autre"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_id = other["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe hook"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let item: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let item_id = item["id"].as_i64().unwrap();
+    let delivered = receiver.recv_timeout(Duration::from_secs(2)).expect("consommateur");
+    assert!(delivered.contains("workitem.created"), "{delivered}");
+    assert!(delivered.contains("Pompe hook"), "{delivered}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{created_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(notes["value"][0]["status"], "succeeded");
+    assert_eq!(notes["value"][0]["details"], "HTTP 204");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{other_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let skipped: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(skipped["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{item_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.Title","value":"Pompe mise a jour"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/inbox?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(inbox["value"][0]["eventType"], "workitem.updated");
+    assert_eq!(inbox["value"][0]["resource"]["fields"]["System.Title"], "Pompe mise a jour");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{updated_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated_notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated_notes["value"][0]["status"], "succeeded");
+    assert_eq!(updated_notes["value"][0]["details"], "livré");
+}

@@ -29,6 +29,9 @@ pub async fn dispatch(
     if path == "/_signout" && method == Method::POST {
         return sign_out(&state, &headers);
     }
+    if path == "/_hooks/inbox" && method == Method::POST {
+        return crate::shapes::receive_hook(&state, &body);
+    }
 
     let auth = state.identify(&headers);
     if path_is_api(&path) {
@@ -317,7 +320,10 @@ impl AppState {
                     .map(|stored| stored.create_work_item(project, &kind, fields))
             });
             return match item {
-                Some(item) => Json(item).into_response(),
+                Some(item) => {
+                    crate::shapes::deliver_work_item(self, org, project, "workitem.created", &item);
+                    Json(item).into_response()
+                }
                 None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
             };
         }
@@ -397,7 +403,10 @@ impl AppState {
                         .and_then(|stored| stored.patch_work_item(id, &ops).ok())
                 });
                 return match updated {
-                    Some(item) => Json(item).into_response(),
+                    Some(item) => {
+                        crate::shapes::deliver_work_item(self, org, project, "workitem.updated", &item);
+                        Json(item).into_response()
+                    }
                     None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
                 };
             }

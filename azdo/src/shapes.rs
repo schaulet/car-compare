@@ -54,6 +54,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     let resource = rest.get(1)?.to_ascii_lowercase();
     let response = match (area.as_str(), resource.as_str()) {
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
+        ("hooks", "inbox") => hooks_inbox(state, method, org),
         ("distributedtask", "pools") | ("distributedtask", "queues") => {
             task_agents(state, method, org, None, rest, query, body)
         }
@@ -1235,6 +1236,7 @@ fn suite_cases(state: &AppState, method: &Method, org: &str, project: &str, plan
             let Some(item) = created else {
                 return fail(StatusCode::NOT_FOUND, "projet inconnu");
             };
+            deliver_work_item(state, org, project, "workitem.created", &item);
             work_id = item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
             title = item
                 .get("fields")
@@ -1719,17 +1721,23 @@ fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], 
         org_put(state, org, key, item.clone());
         return Json(item).into_response();
     }
-    if method == Method::GET {
-        let id = rest.get(2).map(String::as_str).unwrap_or("");
-        return match org_get(state, org, key, id) {
+    let id = rest.get(2).cloned().unwrap_or_default();
+    if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("notifications")) && method == Method::GET {
+        return Json(page(org_list(state, org, &format!("hooks/subscriptions/{id}/notifications")))).into_response();
+    }
+    if method == Method::GET && rest.len() == 3 {
+        return match org_get(state, org, key, &id) {
             Some(item) => Json(item).into_response(),
             None => fail(StatusCode::NOT_FOUND, "abonnement introuvable"),
         };
     }
-    if method == Method::DELETE {
-        let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
+    if method == Method::DELETE && rest.len() == 3 {
         let removed = state.write(|db| {
-            db.orgs.get_mut(org).and_then(|organization| organization.buckets.get_mut(key)).map(|bucket| bucket.remove(&id)).unwrap_or(false)
+            db.orgs
+                .get_mut(org)
+                .and_then(|organization| organization.buckets.get_mut(key))
+                .map(|bucket| bucket.remove(&id))
+                .unwrap_or(false)
         });
         return if removed {
             StatusCode::NO_CONTENT.into_response()
@@ -1738,6 +1746,139 @@ fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], 
         };
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+pub fn receive_hook(state: &AppState, body: &[u8]) -> Response {
+    let (org, _) = state.names();
+    let payload = parse_json(body).unwrap_or(json!({"raw": String::from_utf8_lossy(body)}));
+    store_inbox(state, &org, payload);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn hooks_inbox(state: &AppState, method: &Method, org: &str) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    Json(page(org_list(state, org, "hooks/inbox"))).into_response()
+}
+
+pub fn deliver_work_item(state: &AppState, org: &str, project: &str, event_type: &str, resource: &Value) {
+    let matches = org_list(state, org, "hooks/subscriptions")
+        .into_iter()
+        .filter(|item| subscription_matches(item, event_type, project))
+        .collect::<Vec<_>>();
+    for subscription in matches {
+        let id = text_of(&subscription, "id").unwrap_or_default();
+        let url = subscription
+            .get("consumerInputs")
+            .and_then(|value| text_of(value, "url"))
+            .unwrap_or_default();
+        let key = format!("hooks/subscriptions/{id}/notifications");
+        let next = org_list(state, org, &key).len() as i64 + 1;
+        let payload = json!({
+            "subscriptionId": id,
+            "notificationId": next,
+            "eventType": event_type,
+            "publisherId": text_of(&subscription, "publisherId").unwrap_or_else(|| "tfs".into()),
+            "resource": resource,
+            "createdDate": "2026-10-29T00:00:00Z"
+        });
+        let (ok, detail) = dispatch_consumer(state, org, &url, &payload);
+        org_put(
+            state,
+            org,
+            &key,
+            json!({
+                "id": next,
+                "subscriptionId": id,
+                "eventType": event_type,
+                "status": if ok { "succeeded" } else { "failed" },
+                "result": if ok { "succeeded" } else { "failed" },
+                "details": detail,
+                "resource": resource,
+                "createdDate": "2026-10-29T00:00:00Z"
+            }),
+        );
+    }
+}
+
+fn subscription_matches(item: &Value, event_type: &str, project: &str) -> bool {
+    if text_of(item, "status").as_deref() == Some("disabled") {
+        return false;
+    }
+    if text_of(item, "eventType").as_deref() != Some(event_type) {
+        return false;
+    }
+    let Some(inputs) = item.get("publisherInputs").and_then(|value| value.as_object()) else {
+        return true;
+    };
+    for key in ["projectId", "projectName"] {
+        if let Some(value) = inputs.get(key).and_then(|value| value.as_str()) {
+            if !value.is_empty() && value != project {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn dispatch_consumer(state: &AppState, org: &str, url: &str, payload: &Value) -> (bool, String) {
+    if url.is_empty() {
+        return (false, "url absente".into());
+    }
+    if url == "/_hooks/inbox" {
+        store_inbox(state, org, payload.clone());
+        return (true, "livré".into());
+    }
+    if let Some(target) = url.strip_prefix("http://") {
+        return match post_http(target, payload) {
+            Ok(code) => (true, format!("HTTP {code}")),
+            Err(message) => (false, message),
+        };
+    }
+    (false, "url inconnue".into())
+}
+
+fn store_inbox(state: &AppState, org: &str, mut payload: Value) {
+    let next = org_list(state, org, "hooks/inbox").len() as i64 + 1;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("id".into(), json!(next));
+    }
+    org_put(state, org, "hooks/inbox", payload);
+}
+
+fn post_http(target: &str, payload: &Value) -> Result<u16, String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+    let (authority, path) = target.split_once('/').map(|(host, path)| (host, format!("/{path}"))).unwrap_or((target, "/".into()));
+    let (host, port) = authority.rsplit_once(':').unwrap_or((authority, "80"));
+    let port = port.parse::<u16>().map_err(|_| format!("port invalide: {authority}"))?;
+    let address = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|error| error.to_string())?
+        .next()
+        .ok_or_else(|| format!("adresse introuvable: {host}:{port}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1)).map_err(|error| error.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(1))).map_err(|error| error.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(1))).map_err(|error| error.to_string())?;
+    let body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".into());
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).map_err(|error| error.to_string())?;
+    let mut buffer = [0u8; 128];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    let head = String::from_utf8_lossy(&buffer[..read]);
+    let code = head.split_whitespace().nth(1).and_then(|value| value.parse().ok()).unwrap_or(0);
+    if (200..300).contains(&code) {
+        Ok(code)
+    } else if read == 0 {
+        Err("réponse vide".into())
+    } else {
+        Err(format!("HTTP {code}"))
+    }
 }
 
 fn graph(state: &AppState, method: &Method, org: &str, key: &str, name: impl AsRef<str>) -> Response {

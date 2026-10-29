@@ -123,6 +123,7 @@
       <div class="group">Artefacts</div>
       <a href="/__ORG__/__PROJECT__/_artifacts">Artefacts</a>
       <a href="/__ORG__/__PROJECT__/_wiki">Wiki</a>
+      <a href="/__ORG__/__PROJECT__/_hooks">Abonnements</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
     <main id="view"></main>
@@ -823,6 +824,36 @@
               location.href = location.pathname + "?run=" + encodeURIComponent(runId);
             };
           }
+          return;
+        }
+        if (hub === "/_hooks") {
+          const subscriptions = await api("GET", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1");
+          const inbox = await api("GET", "/" + org + "/_apis/hooks/inbox?api-version=7.1");
+          const rows = (subscriptions.value || []).length ? "<table id='subs'><thead><tr><th>ID</th><th>Événement</th><th>URL</th><th>Dernier envoi</th></tr></thead><tbody>" + (await Promise.all((subscriptions.value || []).map(async (item) => {
+            const notes = await api("GET", "/" + org + "/_apis/hooks/subscriptions/" + encodeURIComponent(item.id) + "/notifications?api-version=7.1");
+            const list = notes.value || [];
+            const last = list[list.length - 1];
+            return "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.eventType) + "</td><td>" + esc(item.consumerInputs && item.consumerInputs.url) + "</td><td class='hook-status'>" + esc(last ? last.status : "") + "</td></tr>";
+          }))).join("") + "</tbody></table>" : "<p class='sub'>Aucun abonnement.</p>";
+          const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Titre</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(item.resource && item.resource.fields && item.resource.fields["System.Title"]) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre' /><button id='hook-fire' type='button'>Créer le ticket</button></div><h2>Réceptions</h2>" + received;
+          document.getElementById("hook-add").onclick = async () => {
+            await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
+              publisherId: "tfs",
+              eventType: document.getElementById("hook-event").value,
+              consumerId: "webHooks",
+              consumerActionId: "httpRequest",
+              consumerInputs: { url: document.getElementById("hook-url").value || "/_hooks/inbox" },
+              publisherInputs: { projectId: project },
+            });
+            location.reload();
+          };
+          document.getElementById("hook-fire").onclick = async () => {
+            await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [
+              { op: "add", path: "/fields/System.Title", value: document.getElementById("hook-title").value || "Élément" },
+            ], "application/json-patch+json");
+            location.reload();
+          };
           return;
         }
         if (hub === "/_settings") {
