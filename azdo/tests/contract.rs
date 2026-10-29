@@ -25302,3 +25302,282 @@ async fn removing_one_tfvc_label_keeps_the_sibling_the_shelveset_and_the_other_p
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("étiquette introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_delivery_plan_keeps_the_sibling_the_tfvc_label_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/AzurzDemo/_apis/work/plans?api-version=7.1";
+
+    async fn create(
+        app: &axum::Router,
+        auth: &str,
+        project: &str,
+        name: &str,
+        description: Option<&str>,
+        category: Option<&str>,
+        team_id: Option<&str>,
+    ) -> String {
+        let path = format!("/azurz/{project}/_apis/work/plans?api-version=7.1");
+        let description_json = match description {
+            Some(description) => format!(r#","description":"{description}""#),
+            None => String::new(),
+        };
+        let properties_json = match category {
+            Some(category) => {
+                let team = match team_id {
+                    Some(team_id) => format!(r#","teamId":"{team_id}""#),
+                    None => String::new(),
+                };
+                format!(r#","properties":{{"teamBacklogMappings":[{{"categoryReferenceName":"{category}"{team}}}]}}"#)
+            }
+            None => String::new(),
+        };
+        let body = format!(r#"{{"name":"{name}"{description_json}{properties_json}}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("dplan-"), "{created}");
+        assert_eq!(created["name"], name);
+        assert_eq!(created["description"], description.unwrap_or(""));
+        assert_eq!(created["type"], "deliveryTimelineView");
+        assert_eq!(created["revision"], 1);
+        assert_eq!(created["createdBy"]["displayName"], "azurz");
+        assert_eq!(created["createdBy"]["uniqueName"], "azurz");
+        assert_eq!(created["createdDate"], "2026-10-29T00:00:00Z");
+        assert_eq!(created["properties"]["teamBacklogMappings"][0]["teamId"], team_id.unwrap_or("1"));
+        assert_eq!(
+            created["properties"]["teamBacklogMappings"][0]["categoryReferenceName"],
+            category.unwrap_or("Microsoft.RequirementCategory")
+        );
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!("/work/plans/{}", created["id"].as_str().unwrap())),
+            "{created}"
+        );
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null"] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("plan illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","description":1}"#, r#"{"name":"Pompe","description":null}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("description absente"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","type":1}"#, r#"{"name":"Pompe","type":null}"#, r#"{"name":"Pompe","type":"kanban"}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("type absent"), "{body}");
+    }
+    for payload in [
+        r#"{"name":"Pompe","properties":null}"#,
+        r#"{"name":"Pompe","properties":[]}"#,
+        r#"{"name":"Pompe","properties":"x"}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":"x"}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[1]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[{}]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[{"categoryReferenceName":"inconnu"}]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[{"categoryReferenceName":1}]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[{"categoryReferenceName":"Microsoft.TaskCategory","teamId":1}]}}"#,
+        r#"{"name":"Pompe","properties":{"teamBacklogMappings":[{"categoryReferenceName":"Microsoft.TaskCategory","teamId":" "}]}}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("backlog absent"), "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pompe = create(&app, &auth, "AzurzDemo", "Pompe", Some("Pompe"), None, None).await;
+    let relais = create(
+        &app,
+        &auth,
+        "AzurzDemo",
+        "Relais",
+        None,
+        Some("Microsoft.TaskCategory"),
+        None,
+    )
+    .await;
+    let atelier = create(
+        &app,
+        &auth,
+        "Atelier",
+        "Atelier",
+        Some("Atelier"),
+        Some("Microsoft.FeatureCategory"),
+        Some("9"),
+    )
+    .await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","description":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("plan existant"), "{body}");
+    let same_name = create(&app, &auth, "Atelier", "Pompe", Some("Pompe"), None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/Atelier/_apis/work/plans/{same_name}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/tfvc/labels?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","comment":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let label: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let label_id = label["id"].as_str().unwrap().to_string();
+    assert_eq!(label["name"], "Pompe");
+    assert_eq!(label["comment"], "Pompe");
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["description"], "Pompe");
+    assert_eq!(pompe_row["properties"]["teamBacklogMappings"][0]["categoryReferenceName"], "Microsoft.RequirementCategory");
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais);
+    assert_eq!(relais_row["description"], "");
+    assert_eq!(relais_row["properties"]["teamBacklogMappings"][0]["categoryReferenceName"], "Microsoft.TaskCategory");
+    let one = format!("/azurz/AzurzDemo/_apis/work/plans/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["name"], "Pompe");
+    assert_eq!(fetched["description"], "Pompe");
+    assert_eq!(fetched["type"], "deliveryTimelineView");
+    assert!(fetched["url"].as_str().unwrap().ends_with(&format!("/work/plans/{pompe}")), "{fetched}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/plans/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("plan de livraison introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/plans/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/plans/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("plan de livraison introuvable"), "{body}");
+    let (status, body, _) = call(&app, "PUT", &one, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("plan de livraison introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["name"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["description"], "");
+    assert_eq!(sibling["properties"]["teamBacklogMappings"][0]["categoryReferenceName"], "Microsoft.TaskCategory");
+    assert_eq!(sibling["properties"]["teamBacklogMappings"][0]["teamId"], "1");
+    let other = format!("/azurz/Atelier/_apis/work/plans/{atelier}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &other, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["id"], atelier);
+    assert_eq!(kept_other["name"], "Atelier");
+    assert_eq!(kept_other["description"], "Atelier");
+    assert_eq!(kept_other["properties"]["teamBacklogMappings"][0]["categoryReferenceName"], "Microsoft.FeatureCategory");
+    assert_eq!(kept_other["properties"]["teamBacklogMappings"][0]["teamId"], "9");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/tfvc/labels/{label_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_label: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_label["id"], label_id);
+    assert_eq!(kept_label["name"], "Pompe");
+    assert_eq!(kept_label["comment"], "Pompe");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("plan de livraison introuvable"), "{body}");
+}

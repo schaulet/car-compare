@@ -20,6 +20,7 @@ pub fn dispatch(
     let response = match (area.as_str(), resource.as_str()) {
         ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
+        ("work", "plans") => delivery_plans(state, method, org, project, rest, body),
         ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
         ("serviceendpoint", "types") if rest.len() == 2 => endpoint_types(method),
@@ -1593,6 +1594,184 @@ fn backlog_matches(backlog: &str, item: &Value) -> bool {
         "Microsoft.RequirementCategory" => kind == "User Story" || kind == "Bug",
         _ => true,
     }
+}
+
+fn delivery_plans(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "work/plans";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = state
+                .read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default());
+            rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+            let value = rows.into_iter().map(|item| dress_delivery_plan(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, description, mappings) = match delivery_plan_create(body) {
+                Ok(fields) => fields,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let existing = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default());
+            if existing.iter().any(|item| item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name))) {
+                return fail(StatusCode::BAD_REQUEST, "plan existant");
+            }
+            let next = existing
+                .iter()
+                .filter_map(|item| item_id(item).strip_prefix("dplan-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let id = format!("dplan-{next}");
+            let mappings = mappings
+                .into_iter()
+                .map(|(team_id, category)| json!({"teamId": team_id, "categoryReferenceName": category}))
+                .collect::<Vec<_>>();
+            let item = json!({
+                "id": id,
+                "revision": 1,
+                "name": name,
+                "description": description,
+                "type": "deliveryTimelineView",
+                "createdBy": {"displayName": "azurz", "uniqueName": "azurz"},
+                "createdDate": "2026-10-29T00:00:00Z",
+                "properties": {"teamBacklogMappings": mappings}
+            });
+            state.write(|db| {
+                db.ensure_project(org, project);
+                if let Some(stored) = db.project_mut(org, project) {
+                    stored.put_bucket(key, item.clone());
+                }
+            });
+            return Json(dress_delivery_plan(org, project, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "plan de livraison introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, id))) {
+            Some(item) => Json(dress_delivery_plan(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "plan de livraison introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, id))) else {
+            return fail(StatusCode::NOT_FOUND, "plan de livraison introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| {
+            db.project_mut(org, project)
+                .and_then(|stored| stored.buckets.get_mut(key))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "plan de livraison introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn delivery_plan_create(body: &[u8]) -> Result<(String, String, Vec<(String, String)>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("plan illisible");
+    };
+    let Some(name) = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(value) => {
+            let Some(text) = value.as_str() else {
+                return Err("description absente");
+            };
+            text.trim().to_string()
+        }
+    };
+    if let Some(kind) = object.get("type") {
+        if kind.as_str() != Some("deliveryTimelineView") {
+            return Err("type absent");
+        }
+    }
+    let mappings = match object.get("properties") {
+        None => vec![("1".to_string(), "Microsoft.RequirementCategory".to_string())],
+        Some(value) => {
+            let Some(properties) = value.as_object() else {
+                return Err("backlog absent");
+            };
+            match properties.get("teamBacklogMappings") {
+                None => vec![("1".to_string(), "Microsoft.RequirementCategory".to_string())],
+                Some(mappings) => delivery_mappings(mappings)?,
+            }
+        }
+    };
+    Ok((name, description, mappings))
+}
+
+fn delivery_mappings(value: &Value) -> Result<Vec<(String, String)>, &'static str> {
+    let Some(rows) = value.as_array() else {
+        return Err("backlog absent");
+    };
+    if rows.is_empty() {
+        return Err("backlog absent");
+    }
+    let mut mappings = Vec::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return Err("backlog absent");
+        };
+        let Some(category) = object
+            .get("categoryReferenceName")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| {
+                matches!(
+                    *item,
+                    "Microsoft.EpicCategory"
+                        | "Microsoft.FeatureCategory"
+                        | "Microsoft.RequirementCategory"
+                        | "Microsoft.TaskCategory"
+                )
+            })
+            .map(str::to_string)
+        else {
+            return Err("backlog absent");
+        };
+        let team_id = match object.get("teamId") {
+            None => "1".to_string(),
+            Some(item) => {
+                let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                    return Err("backlog absent");
+                };
+                text.to_string()
+            }
+        };
+        mappings.push((team_id, category));
+    }
+    Ok(mappings)
+}
+
+fn dress_delivery_plan(org: &str, project: &str, mut item: Value) -> Value {
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/plans/{id}")));
+    }
+    item
 }
 
 fn page(value: Vec<Value>) -> Value {
