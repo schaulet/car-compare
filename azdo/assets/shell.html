@@ -240,9 +240,47 @@
           };
           return;
         }
-        if (hub === "/_workitems" || hub === "/_backlogs" || hub === "/_sprints") {
+        if (hub === "/_sprints") {
+          const iterations = await collection("work/teamsettings/iterations");
+          const sprint = iterations.find((item) => item.attributes && item.attributes.timeFrame === "current") || iterations[0];
+          const capacities = sprint ? await collection("work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities") : [];
+          const days = sprint ? await api("GET", root + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/teamdaysoff?api-version=7.1") : { daysOff: [] };
+          const sprintItems = (await workItems()).filter((item) => {
+            const path = item.fields?.["System.IterationPath"] || "";
+            return sprint && (path === sprint.path || path.endsWith("\\" + sprint.name) || path.endsWith(sprint.name));
+          });
+          const start = sprint && sprint.attributes ? sprint.attributes.startDate : "";
+          const finish = sprint && sprint.attributes ? sprint.attributes.finishDate : "";
+          const people = capacities.length ? "<table><thead><tr><th>Membre</th><th>Activité</th><th>Heures / jour</th><th>Jours d'absence</th></tr></thead><tbody>" + capacities.map((item) => {
+            const activity = (item.activities && item.activities[0]) || {};
+            return "<tr><td>" + esc(item.teamMember && item.teamMember.displayName) + "</td><td>" + esc(activity.name) + "</td><td>" + esc(activity.capacityPerDay) + "</td><td>" + esc((item.daysOff || []).length) + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p class='sub'>Aucune capacité.</p>";
+          view.innerHTML = "<h1>Sprints</h1><p class='sub' id='sprint-name'>" + esc(sprint ? sprint.name : "Aucune itération") + " · " + esc(String(start).slice(0, 10)) + " → " + esc(String(finish).slice(0, 10)) + " · " + esc((days.daysOff || []).length) + " jour d'équipe off</p><h2>Capacité</h2><div class='command'><input id='cap-member' placeholder='Membre' value='" + esc(user) + "' /><select id='cap-activity'><option>Development</option><option>Testing</option><option>Design</option><option>Requirements</option></select><input id='cap-hours' type='number' min='0' step='0.5' value='6' /><button id='cap-save' type='button'>Enregistrer la capacité</button></div>" + people + "<h2>Éléments du sprint</h2><div class='command'><input id='sprint-title' placeholder='Tâche du sprint' /><button id='sprint-create' type='button'>Ajouter</button></div>" + rows(sprintItems);
+          bindRows();
+          document.getElementById("cap-save").onclick = async () => {
+            if (!sprint) return;
+            const member = document.getElementById("cap-member").value || user;
+            await api("PUT", root + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities/" + encodeURIComponent(member) + "?api-version=7.1", {
+              teamMember: { displayName: member, uniqueName: member },
+              activities: [{ name: document.getElementById("cap-activity").value, capacityPerDay: Number(document.getElementById("cap-hours").value || 0) }],
+              daysOff: [],
+            });
+            location.reload();
+          };
+          document.getElementById("sprint-create").onclick = async () => {
+            const title = document.getElementById("sprint-title").value || "Tâche du sprint";
+            const patch = JSON.stringify([
+              { op: "add", path: "/fields/System.Title", value: title },
+              { op: "add", path: "/fields/System.IterationPath", value: sprint ? sprint.path : project },
+            ]);
+            await api("POST", root + "/wit/workitems/$Task?api-version=7.1", patch, "application/json-patch+json");
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_workitems" || hub === "/_backlogs") {
           const items = await workItems();
-          const heading = hub === "/_backlogs" ? "Backlogs" : hub === "/_sprints" ? "Sprints" : "Éléments de travail";
+          const heading = hub === "/_backlogs" ? "Backlogs" : "Éléments de travail";
           view.innerHTML = "<h1>" + heading + "</h1><div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items);
           bindRows();
           document.getElementById("create").onclick = async () => {

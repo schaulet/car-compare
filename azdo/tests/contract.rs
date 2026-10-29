@@ -2082,3 +2082,90 @@ async fn git_diff_compares_two_commits_and_reads_a_file_at_that_version() {
     let current: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(current["content"], "debit 18");
 }
+
+#[tokio::test]
+async fn sprint_capacity_records_hours_and_team_days_off() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let iterations: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let sprint = &iterations["value"][0];
+    assert_eq!(sprint["name"], "Sprint 1");
+    assert_eq!(sprint["attributes"]["timeFrame"], "current");
+    assert!(sprint["attributes"]["startDate"].as_str().unwrap().starts_with("2026-10-26"));
+    let iteration_id = sprint["id"].as_str().unwrap_or("1");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{iteration_id}/capacities/azurz?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"teamMember":{"displayName":"azurz","uniqueName":"azurz"},"activities":[{"name":"Development","capacityPerDay":6}],"daysOff":[{"start":"2026-10-27T00:00:00Z","end":"2026-10-27T00:00:00Z"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let capacity: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(capacity["activities"][0]["capacityPerDay"], 6);
+    assert_eq!(capacity["daysOff"][0]["start"], "2026-10-27T00:00:00Z");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{iteration_id}/capacities/azurz?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"activities":[{"name":"Development","capacityPerDay":8}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{iteration_id}/capacities?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let capacities: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(capacities["value"][0]["teamMember"]["displayName"], "azurz");
+    assert_eq!(capacities["value"][0]["activities"][0]["capacityPerDay"], 8);
+    assert_eq!(capacities["value"][0]["daysOff"].as_array().unwrap().len(), 1);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{iteration_id}/teamdaysoff?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"daysOff":[{"start":"2026-10-30T00:00:00Z","end":"2026-10-30T00:00:00Z"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{iteration_id}/teamdaysoff?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let days: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(days["daysOff"][0]["start"], "2026-10-30T00:00:00Z");
+}
