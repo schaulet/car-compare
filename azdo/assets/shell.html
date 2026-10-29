@@ -2061,13 +2061,20 @@
           return;
         }
         if (hub === "/_agents") {
-          const pools = await api("GET", "/" + org + "/_apis/distributedtask/pools?api-version=7.1");
-          const pool = (pools.value || [])[0] || { id: 1, name: "Azure Pipelines", size: 0 };
+          const poolsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools?api-version=7.1");
+          const pools = poolsPage.value || [];
+          const selected = new URLSearchParams(location.search).get("pool");
+          const pool = pools.find((item) => String(item.id) === selected) || pools[0] || { id: 1, name: "Azure Pipelines", size: 0 };
           const poolId = pool.id;
           const agentsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1");
           const jobsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1");
           const agents = agentsPage.value || [];
           const jobs = jobsPage.value || [];
+          const poolTable = pools.length ? "<table id='pools'><thead><tr><th></th><th>Pool</th><th>Agents</th></tr></thead><tbody>" + pools.map((item) => {
+            const remove = String(item.id) === "1" ? "" : "<button type='button' class='pool-remove' data-id='" + esc(item.id) + "'>Retirer</button>";
+            const current = String(item.id) === String(poolId) ? " pool current" : " pool";
+            return "<tr class='" + current + "' data-id='" + esc(item.id) + "'><td>" + remove + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.size) + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='pool-empty' class='sub'>Aucun pool.</p>";
           const table = agents.length ? "<table id='agents'><thead><tr><th>Nom</th><th>Statut</th><th>Système</th><th>Version</th><th></th></tr></thead><tbody>" + agents.map((item) => {
             const action = item.status === "online"
               ? "<button type='button' class='assign' data-id='" + esc(item.id) + "'>Confier</button>"
@@ -2079,7 +2086,48 @@
             const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(id) + "'>Terminer</button>" : "";
             return "<tr><td><button type='button' class='job-remove' data-id='" + esc(id) + "'>Retirer</button></td><td>" + esc(id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
           }).join("") + "</tbody></table>" : "<p id='job-empty' class='sub'>Aucune demande de travail.</p>";
-          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work + "<p id='job-error' class='sub' hidden></p>";
+          view.innerHTML = "<h1>Agents</h1><div class='command'><input id='pool-name' placeholder='Pompe' /><button id='pool-add' type='button'>Créer</button></div>" + poolTable + "<p id='pool-error' class='error' hidden></p><h2 id='pool-heading'>" + esc(pool.name) + " · " + esc(pool.size) + "</h2><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work + "<p id='job-error' class='sub' hidden></p>";
+          document.getElementById("pool-add").onclick = async () => {
+            try {
+              await api("POST", "/" + org + "/_apis/distributedtask/pools?api-version=7.1", {
+                name: document.getElementById("pool-name").value || "Pompe",
+                autoProvision: true,
+              });
+            } catch (error) {
+              const note = document.getElementById("pool-error");
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("tr.pool").forEach((row) => {
+            row.onclick = () => {
+              const params = new URLSearchParams(location.search);
+              params.set("pool", row.dataset.id);
+              location.search = params.toString();
+            };
+          });
+          document.querySelectorAll("button.pool-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              try {
+                await api("DELETE", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("pool-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              const params = new URLSearchParams(location.search);
+              if (params.get("pool") === button.dataset.id) {
+                params.delete("pool");
+                location.search = params.toString();
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("agent-add").onclick = async () => {
             try {
               await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1", {

@@ -7016,28 +7016,132 @@ fn task_agents(
         return fail(StatusCode::NOT_FOUND, "ressource introuvable");
     }
     if rest.len() <= 2 {
-        if method != Method::GET {
-            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        if method == Method::GET {
+            let value = org_list(state, org, "distributedtask/pools")
+                .into_iter()
+                .map(|item| dress_pool(state, org, item))
+                .collect();
+            return Json(page(value)).into_response();
         }
-        let value = org_list(state, org, "distributedtask/pools")
-            .into_iter()
-            .map(|item| dress_pool(state, org, item))
-            .collect();
-        return Json(page(value)).into_response();
+        if method == Method::POST {
+            return create_pool(state, org, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     let pool_id = &rest[2];
     let Some(pool) = org_get(state, org, "distributedtask/pools", pool_id) else {
         return fail(StatusCode::NOT_FOUND, "pool introuvable");
     };
     let pool_key = value_key(&pool["id"]);
-    if rest.len() == 3 && method == Method::GET {
-        return Json(dress_pool(state, org, pool)).into_response();
+    if rest.len() == 3 {
+        if method == Method::GET {
+            return Json(dress_pool(state, org, pool)).into_response();
+        }
+        if method == Method::DELETE {
+            return delete_pool(state, org, &pool);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     match rest.get(3).map(|value| value.to_ascii_lowercase()).as_deref() {
         Some("agents") => pool_agents(state, method, org, &pool_key, rest, body),
         Some("jobrequests") => pool_jobs(state, method, org, &pool_key, rest, query, body),
+        _ if method == Method::DELETE => fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée"),
         _ => fail(StatusCode::NOT_FOUND, "ressource introuvable"),
     }
+}
+
+fn create_pool(state: &AppState, org: &str, body: &[u8]) -> Response {
+    if !body.is_empty() && parse_json(body).is_none() {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    }
+    let payload = parse_json(body).unwrap_or(Value::Null);
+    let name = text_of(&payload, "name").unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom de pool absent");
+    }
+    let auto_provision = payload.get("autoProvision").and_then(|value| value.as_bool()).unwrap_or(false);
+    let Some(item) = state.write(|db| {
+        db.ensure_org(org);
+        let organization = db.orgs.get_mut(org)?;
+        let bucket = organization
+            .buckets
+            .entry("distributedtask/pools".into())
+            .or_insert_with(Bucket::empty);
+        let next = bucket
+            .items
+            .values()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let item = json!({
+            "id": next,
+            "name": name,
+            "isHosted": false,
+            "poolType": "automation",
+            "size": 0,
+            "autoProvision": auto_provision,
+            "createdOn": "2026-10-29T00:00:00Z",
+            "url": format!("/{org}/_apis/distributedtask/pools/{next}")
+        });
+        bucket.put(item.clone());
+        if auto_provision {
+            for project in organization.projects.values_mut() {
+                let queues = project
+                    .buckets
+                    .entry("distributedtask/queues".into())
+                    .or_insert_with(Bucket::empty);
+                let queue_id = queues
+                    .items
+                    .values()
+                    .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                queues.put(json!({
+                    "id": queue_id,
+                    "name": name,
+                    "pool": {"id": next, "name": name}
+                }));
+            }
+        }
+        Some(item)
+    }) else {
+        return fail(StatusCode::NOT_FOUND, "pool introuvable");
+    };
+    Json(item).into_response()
+}
+
+fn delete_pool(state: &AppState, org: &str, pool: &Value) -> Response {
+    let id = value_key(&pool["id"]);
+    if id == "1" {
+        return fail(StatusCode::BAD_REQUEST, "pool par défaut");
+    }
+    state.write(|db| {
+        let Some(organization) = db.orgs.get_mut(org) else {
+            return;
+        };
+        if let Some(bucket) = organization.buckets.get_mut("distributedtask/pools") {
+            bucket.remove(&id);
+        }
+        organization.buckets.remove(&format!("distributedtask/pools/{id}/agents"));
+        organization.buckets.remove(&format!("distributedtask/pools/{id}/jobrequests"));
+        for project in organization.projects.values_mut() {
+            let Some(queues) = project.buckets.get_mut("distributedtask/queues") else {
+                continue;
+            };
+            let doomed: Vec<String> = queues
+                .items
+                .iter()
+                .filter(|(_, item)| value_key(&item["pool"]["id"]) == id)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in doomed {
+                queues.items.remove(&key);
+            }
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
 }
 
 fn dress_pool(state: &AppState, org: &str, mut pool: Value) -> Value {
