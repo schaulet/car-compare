@@ -30,6 +30,7 @@ pub fn project(state: &AppState, method: &Method, org: &str, project: &str, rest
                 value.eq_ignore_ascii_case("maven")
                     || value.eq_ignore_ascii_case("pypi")
                     || value.eq_ignore_ascii_case("npm")
+                    || value.eq_ignore_ascii_case("nuget")
             }) && rest.get(4).is_some_and(|value| value.eq_ignore_ascii_case("packages")) =>
         {
             protocol_packages(state, method, org, project, rest)
@@ -290,7 +291,13 @@ fn nuget(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &
     let stored_id = format!("{id}/{version}");
     if method == Method::PUT {
         let content = String::from_utf8_lossy(body).into_owned();
-        put_project(state, org, project, &key, json!({"id": stored_id, "version": version, "content": content}));
+        put_project(
+            state,
+            org,
+            project,
+            &key,
+            json!({"id": stored_id, "name": id, "version": version, "content": content}),
+        );
         return octets(&content);
     }
     if method == Method::GET {
@@ -298,6 +305,9 @@ fn nuget(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &
             Some(item) => octets(&text(&item, "content").unwrap_or_default()),
             None => fail(StatusCode::NOT_FOUND, "paquet NuGet introuvable"),
         };
+    }
+    if method == Method::DELETE {
+        return remove_package(state, org, project, &key, &stored_id, "nuget", "paquet NuGet introuvable");
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }

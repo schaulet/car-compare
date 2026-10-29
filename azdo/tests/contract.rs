@@ -12725,3 +12725,225 @@ async fn universal_package_version_can_be_removed() {
     assert_eq!(notes[0]["resource"]["version"], "1.0.0");
     assert!(notes[0]["resource"].get("content").is_none());
 }
+
+#[tokio::test]
+async fn nuget_package_version_can_be_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/absent/nuget/v3/flat2/oee/1.0.0/oee.1.0.0.nupkg",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/absent/nuget/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    for name in ["ligne-nuget", "autre-nuget"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let publish = |feed: &'static str, name: &'static str, version: &'static str, content: &'static str| {
+        let app = app.clone();
+        let auth = auth.clone();
+        async move {
+            let filename = format!("{name}.{version}.nupkg");
+            call(
+                &app,
+                "PUT",
+                &format!("/azurz/AzurzDemo/_packaging/{feed}/nuget/v3/flat2/{name}/{version}/{filename}"),
+                Some(&auth),
+                None,
+                "application/octet-stream",
+                Some(content),
+            )
+            .await
+        }
+    };
+    let (status, body, _) = publish("ligne-nuget", "oee", "1.0.0", "secret-nupkg").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-nupkg");
+    let (status, body, _) = publish("ligne-nuget", "oee", "1.1.0", "secret-voisin").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = publish("ligne-nuget", "pompe", "1.0.0", "secret-pompe").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = publish("autre-nuget", "oee", "1.0.0", "secret-autre").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-nuget/nuget/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-nupkg"), "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3);
+    assert!(listed["value"].as_array().unwrap().iter().all(|item| item.get("content").is_none()));
+    assert!(listed["value"].as_array().unwrap().iter().any(|item| item["name"] == "oee" && item["version"] == "1.0.0"));
+    assert!(listed["value"].as_array().unwrap().iter().any(|item| item["name"] == "oee" && item["version"] == "1.1.0"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/oee/index.json",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let versions: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(versions["versions"], serde_json::json!(["1.0.0", "1.1.0"]));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"packaging.package.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/OEE/1.0.0/oee.1.0.0.nupkg",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/oee/1.0.0/oee.1.0.0.nupkg",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet NuGet introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/oee/1.1.0/oee.1.1.0.nupkg",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-voisin");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/oee/index.json",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left_versions: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left_versions["versions"], serde_json::json!(["1.1.0"]));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-nuget/nuget/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-"), "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 2);
+    assert!(left["value"].as_array().unwrap().iter().all(|item| item["version"] != "1.0.0" || item["name"] != "oee"));
+    assert!(left["value"].as_array().unwrap().iter().any(|item| item["name"] == "oee" && item["version"] == "1.1.0"));
+    assert!(left["value"].as_array().unwrap().iter().any(|item| item["name"] == "pompe" && item["version"] == "1.0.0"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/autre-nuget/nuget/v3/flat2/oee/1.0.0/oee.1.0.0.nupkg",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "secret-autre");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_packaging/ligne-nuget/nuget/v3/flat2/oee/1.0.0/oee.1.0.0.nupkg",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paquet NuGet introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("secret-nupkg"), "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "packaging.package.deleted").collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["resource"]["protocol"], "nuget");
+    assert_eq!(notes[0]["resource"]["name"], "oee");
+    assert_eq!(notes[0]["resource"]["version"], "1.0.0");
+    assert!(notes[0]["resource"].get("content").is_none());
+}
