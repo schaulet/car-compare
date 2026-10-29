@@ -2271,7 +2271,47 @@
               const badges = statuses.map((status) => "<span class='pill " + statusClass(status.state) + "'>" + esc(status.context && status.context.name) + " " + esc(status.state) + "</span>").join(" ");
               return "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "' data-parent='" + esc((item.parents && item.parents[0]) || "") + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td><td class='statuses'>" + (badges || "") + "</td></tr>";
             }).join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
-            view.innerHTML = "<h1>Commits</h1><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<section id='diff' class='panel' hidden></section>";
+            const noted = commits[0];
+            const notedId = noted ? (noted.commitId || noted.id) : "";
+            let notes = [];
+            if (repo && notedId) {
+              const listed = await api("GET", repoPath + "/commits/" + encodeURIComponent(notedId) + "/comments?api-version=7.1");
+              notes = listed.value || [];
+            }
+            const noteTable = notes.length ? "<table id='commit-comments'><thead><tr><th></th><th>Contenu</th></tr></thead><tbody>" + notes.map((item) => "<tr><td><button type='button' class='ccomment-remove' data-id='" + esc(item.id) + "' data-content='" + esc(item.content) + "' data-commit='" + esc(notedId) + "' data-repo='" + esc(repo.id) + "'>Retirer</button></td><td>" + esc(item.content) + "</td></tr>").join("") + "</tbody></table>" : "<p id='ccomment-empty' class='sub'>Aucun commentaire.</p>";
+            view.innerHTML = "<h1>Commits</h1><h2>Commentaires</h2><div class='command'><input id='ccomment-commit' value='" + esc(notedId) + "' /><input id='ccomment-content' placeholder='release' /><button id='ccomment-add' type='button'>Ajouter</button></div>" + noteTable + "<p id='ccomment-error' class='sub'></p><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<section id='diff' class='panel' hidden></section>";
+            document.getElementById("ccomment-add").onclick = async () => {
+              const error = document.getElementById("ccomment-error");
+              error.textContent = "";
+              const commitId = document.getElementById("ccomment-commit").value.trim() || notedId;
+              const current = commits.find((item) => String(item.commitId || item.id) === commitId);
+              if (!repo || !current) {
+                error.textContent = "commit introuvable";
+                return;
+              }
+              try {
+                await api("POST", repoPath + "/commits/" + encodeURIComponent(current.commitId || current.id) + "/comments?api-version=7.1", {
+                  content: document.getElementById("ccomment-content").value.trim() || "release",
+                });
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+            document.querySelectorAll("button.ccomment-remove").forEach((button) => {
+              button.onclick = async () => {
+                const error = document.getElementById("ccomment-error");
+                error.textContent = "";
+                try {
+                  await api("DELETE", repoPath + "/commits/" + encodeURIComponent(button.dataset.commit) + "/comments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                } catch (err) {
+                  error.textContent = err.message;
+                  return;
+                }
+                location.reload();
+              };
+            });
             function diffText(changes) {
               return (changes || []).map((change) => {
                 const head = (change.changeType || "") + " " + ((change.item && change.item.path) || "");

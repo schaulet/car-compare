@@ -22228,3 +22228,247 @@ async fn removing_one_pull_request_status_keeps_the_sibling_and_the_other_projec
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("statut introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_commit_comment_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn repo_of(app: &axum::Router, auth: &str, project: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "GET",
+            &format!("/azurz/{project}/_apis/git/repositories?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        repos["value"][0]["id"].as_str().unwrap().to_string()
+    }
+
+    async fn open_commit(app: &axum::Router, auth: &str, project: &str, repo: &str, comment: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/git/repositories/{repo}/commits?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"comment":"{comment}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let commit: serde_json::Value = serde_json::from_str(&body).unwrap();
+        commit["commitId"].as_str().unwrap().to_string()
+    }
+
+    let repo = repo_of(&app, &auth, "AzurzDemo").await;
+    let pompe = open_commit(&app, &auth, "AzurzDemo", &repo, "Pompe").await;
+    let ada = open_commit(&app, &auth, "AzurzDemo", &repo, "Ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_repo = repo_of(&app, &auth, "Atelier").await;
+    let atelier = open_commit(&app, &auth, "Atelier", &atelier_repo, "Pompe").await;
+
+    let comments = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments?api-version=7.1");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contenu absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some(r#"{"content":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contenu absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some(r#"{"content":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contenu absent"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &comments, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/missing/comments?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"content":"release"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commit introuvable"), "{body}");
+
+    async fn note(app: &axum::Router, auth: &str, project: &str, repo: &str, commit: &str, content: &str) -> serde_json::Value {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/git/repositories/{repo}/commits/{commit}/comments?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"content":" {content} "}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let release = note(&app, &auth, "AzurzDemo", &repo, &pompe, "release").await;
+    assert_eq!(release["id"], 1);
+    assert_eq!(release["content"], "release");
+    assert!(release["url"].as_str().unwrap().contains(&format!("/commits/{pompe}/comments/1")), "{release}");
+    let preprod = note(&app, &auth, "AzurzDemo", &repo, &pompe, "preprod").await;
+    assert_eq!(preprod["id"], 2);
+    assert_eq!(preprod["content"], "preprod");
+    let ada_note = note(&app, &auth, "AzurzDemo", &repo, &ada, "release").await;
+    assert_eq!(ada_note["id"], 1);
+    let atelier_note = note(&app, &auth, "Atelier", &atelier_repo, &atelier, "release").await;
+    assert_eq!(atelier_note["id"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/9?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/abc?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/1/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &comments, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], 2);
+    assert_eq!(left["value"][0]["content"], "preprod");
+    let annexe = note(&app, &auth, "AzurzDemo", &repo, &pompe, "annexe").await;
+    assert_eq!(annexe["id"], 3);
+    let (status, body, _) = call(&app, "GET", &comments, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["count"], 2);
+    assert_eq!(again["value"][0]["id"], 2);
+    assert_eq!(again["value"][1]["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["comment"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{ada}/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["content"], "release");
+    assert_eq!(ada_kept["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{ada}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_commit: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_commit["comment"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/git/repositories/{atelier_repo}/commits/{atelier}/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["content"], "release");
+    assert_eq!(other["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/commits/{pompe}/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+}

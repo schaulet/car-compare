@@ -474,6 +474,9 @@ fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id:
         if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("statuses")) {
             return commit_statuses(state, method, org, project, repo_id, commit_id, query, body);
         }
+        if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("comments")) {
+            return commit_comments(state, method, org, project, repo_id, commit_id, &tail[2..], body);
+        }
         if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("changes")) && method == Method::GET {
             let changes = list(state, org, project, &format!("{key}/{commit_id}/changes"));
             return Json(json!({
@@ -511,6 +514,99 @@ fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id:
     });
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn commit_comment_content(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(text) = payload.as_object().and_then(|object| object.get("content")).and_then(|value| value.as_str()) else {
+        return Err("contenu absent");
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("contenu absent");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn dress_commit_comment(org: &str, project: &str, repo_id: &str, commit_id: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{commit_id}/comments/{id}")),
+        );
+    }
+    item
+}
+
+fn commit_comments(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    commit_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let commits_key = format!("git/repositories/{repo_id}/commits");
+    if get_item(state, org, project, &commits_key, commit_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "commit introuvable");
+    }
+    let key = format!("{commits_key}/{commit_id}/comments");
+    if rest.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by_key(|item| json_i64(&item["id"]).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_commit_comment(org, project, repo_id, commit_id, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let content = match commit_comment_content(body) {
+                Ok(content) => content,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = list(state, org, project, &key)
+                .into_iter()
+                .filter_map(|item| json_i64(&item["id"]))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let item = json!({ "id": next, "content": content });
+            put_item(state, org, project, &key, item.clone());
+            return Json(dress_commit_comment(org, project, repo_id, commit_id, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() == 1 {
+        let Ok(comment_id) = rest[0].parse::<i64>() else {
+            return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+        };
+        let id = comment_id.to_string();
+        let Some(item) = get_item(state, org, project, &key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+        };
+        if method == Method::GET {
+            return Json(dress_commit_comment(org, project, repo_id, commit_id, item)).into_response();
+        }
+        if method == Method::DELETE {
+            return if delete_item(state, org, project, &key, &id) {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "commentaire introuvable")
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "commentaire introuvable")
 }
 
 fn commit_statuses(
