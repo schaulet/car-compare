@@ -81,6 +81,30 @@ pub fn wit_catalog(method: &Method, _org: &str, _project: &str, rest: &[String])
     if resource == "workitemtypes" && rest.len() == 2 {
         return Some(Json(work_item_types()).into_response());
     }
+    if resource == "workitemtypes" && rest.len() >= 3 {
+        let Some(kind) = canonical_work_item_type(&rest[2]) else {
+            return Some(fail(StatusCode::NOT_FOUND, "type introuvable"));
+        };
+        if rest.len() == 3 {
+            return Some(Json(work_item_type_document(kind)).into_response());
+        }
+        if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("states")) {
+            let states = type_state_values();
+            if rest.len() == 4 {
+                return Some(Json(page(states)).into_response());
+            }
+            if rest.len() == 5 {
+                let wanted = rest[4].trim();
+                return Some(match states.iter().find(|state| {
+                    state.get("name").and_then(|value| value.as_str()).is_some_and(|name| name.eq_ignore_ascii_case(wanted))
+                }) {
+                    Some(state) => Json(state.clone()).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "état introuvable"),
+                });
+            }
+        }
+        return Some(fail(StatusCode::NOT_FOUND, "type introuvable"));
+    }
     if resource == "fields" && rest.len() == 2 {
         return Some(Json(wit_fields()).into_response());
     }
@@ -5279,8 +5303,8 @@ fn graph(state: &AppState, method: &Method, org: &str, key: &str, name: impl AsR
     Json(page(org_list(state, org, key))).into_response()
 }
 
-fn work_item_types() -> Value {
-    let kinds = [
+fn work_item_kind_rows() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
         ("Epic", "Microsoft.VSTS.WorkItemTypes.Epic", "E06C00"),
         ("Feature", "Microsoft.VSTS.WorkItemTypes.Feature", "773B93"),
         ("User Story", "Microsoft.VSTS.WorkItemTypes.UserStory", "0098C7"),
@@ -5288,22 +5312,114 @@ fn work_item_types() -> Value {
         ("Task", "Microsoft.VSTS.WorkItemTypes.Task", "F2CB1D"),
         ("Issue", "Microsoft.VSTS.WorkItemTypes.Issue", "B4009E"),
         ("Test Case", "Microsoft.VSTS.WorkItemTypes.TestCase", "004B50"),
-    ];
-    let value: Vec<Value> = kinds
+    ]
+}
+
+fn canonical_work_item_type(name: &str) -> Option<&'static str> {
+    let name = name.trim();
+    work_item_kind_rows()
         .iter()
-        .map(|(name, reference, color)| {
-            json!({
-                "name": name,
-                "referenceName": reference,
-                "description": name,
-                "color": color,
-                "isDisabled": false,
-                "xmlForm": "",
-                "fields": []
-            })
-        })
+        .find(|(kind, _, _)| kind.eq_ignore_ascii_case(name))
+        .map(|(kind, _, _)| *kind)
+}
+
+fn work_item_type_body(name: &str, reference: &str, color: &str, states: bool) -> Value {
+    let mut item = json!({
+        "name": name,
+        "referenceName": reference,
+        "description": name,
+        "color": color,
+        "isDisabled": false,
+        "xmlForm": "",
+        "fields": []
+    });
+    if states {
+        item["states"] = json!(type_state_values());
+    }
+    item
+}
+
+fn work_item_type_document(name: &str) -> Value {
+    let (_, reference, color) = work_item_kind_rows()
+        .iter()
+        .find(|(kind, _, _)| *kind == name)
+        .copied()
+        .unwrap_or(("User Story", "Microsoft.VSTS.WorkItemTypes.UserStory", "0098C7"));
+    work_item_type_body(name, reference, color, true)
+}
+
+fn work_item_types() -> Value {
+    let value = work_item_kind_rows()
+        .iter()
+        .map(|(name, reference, color)| work_item_type_body(name, reference, color, false))
         .collect();
     page(value)
+}
+
+fn type_state_values() -> Vec<Value> {
+    [
+        ("New", "b2b2b2", "Proposed"),
+        ("Active", "007acc", "InProgress"),
+        ("Resolved", "ff9d00", "Resolved"),
+        ("Closed", "339933", "Completed"),
+    ]
+    .into_iter()
+    .map(|(name, color, category)| json!({"name": name, "color": color, "category": category}))
+    .collect()
+}
+
+fn canonical_work_item_state(value: &Value, extras: &[String]) -> Result<String, &'static str> {
+    let text = value.as_str().ok_or("état illisible")?.trim();
+    if text.is_empty() {
+        return Err("état absent");
+    }
+    if let Some(name) = type_state_values()
+        .iter()
+        .find_map(|state| state.get("name").and_then(|value| value.as_str()).filter(|name| name.eq_ignore_ascii_case(text)))
+    {
+        return Ok(name.to_string());
+    }
+    if let Some(extra) = extras.iter().find(|extra| extra.eq_ignore_ascii_case(text)) {
+        return Ok(extra.clone());
+    }
+    Err("état inconnu")
+}
+
+fn mapped_work_item_states(state: &AppState, org: &str, project: &str, kind: &str) -> Vec<String> {
+    state.read(|db| {
+        let Some(stored) = db.project(org, project) else {
+            return Vec::new();
+        };
+        let mut extras = Vec::new();
+        for (key, bucket) in &stored.buckets {
+            if !key.starts_with("work/boards/") {
+                continue;
+            }
+            for item in bucket.items.values() {
+                let Some(columns) = item.get("columns").and_then(|value| value.as_array()) else {
+                    continue;
+                };
+                for column in columns {
+                    let Some(mappings) = column.get("stateMappings").and_then(|value| value.as_object()) else {
+                        continue;
+                    };
+                    for (mapped_kind, mapped) in mappings {
+                        if !mapped_kind.eq_ignore_ascii_case(kind) {
+                            continue;
+                        }
+                        let Some(text) = mapped.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                            continue;
+                        };
+                        if extras.iter().any(|extra: &String| extra.eq_ignore_ascii_case(text)) {
+                            continue;
+                        }
+                        extras.push(text.to_string());
+                    }
+                }
+            }
+        }
+        extras
+    })
 }
 
 fn wit_fields() -> Value {
@@ -5488,10 +5604,11 @@ pub fn classification_nodes(
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
-pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, ops: &[Value]) -> Result<Vec<Value>, &'static str> {
+pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, kind: &str, ops: &[Value]) -> Result<Vec<Value>, &'static str> {
     ensure_classification(state, org, project);
     let areas = work_item_paths(state, org, project, "areas");
     let iterations = work_item_paths(state, org, project, "iterations");
+    let mapped = mapped_work_item_states(state, org, project, kind);
     let mut prepared = Vec::new();
     for op in ops {
         let mut op = op.clone();
@@ -5522,6 +5639,7 @@ pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, ops: &[
             )?),
             "System.AssignedTo" => canonical_identity(&value)?,
             "System.Tags" => json!(canonical_tags(&value)?),
+            "System.State" => json!(canonical_work_item_state(&value, &mapped)?),
             _ => value,
         };
         if let Some(object) = op.as_object_mut() {

@@ -230,7 +230,12 @@
         if (current && values.indexOf(current) < 0) values.unshift(current);
         return values.map((path) => "<option" + (path === current ? " selected" : "") + ">" + esc(path) + "</option>").join("");
       }
-      const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
+      const typeName = fields["System.WorkItemType"] || "User Story";
+      const catalog = await api("GET", root + "/wit/workitemtypes/" + encodeURIComponent(typeName) + "/states?api-version=7.1");
+      const names = (catalog.value || []).map((state) => state.name);
+      const currentState = fields["System.State"] || "New";
+      if (currentState && names.indexOf(currentState) < 0) names.unshift(currentState);
+      const states = names.map((state) => "<option" + (state === currentState ? " selected" : "") + ">" + esc(state) + "</option>").join("");
       const assigned = assignedName(item);
       const notes = (comments.comments || []).map((note) => "<li class='note' data-id='" + note.id + "'><span class='note-text'>" + esc(note.text) + "</span><button class='note-edit' type='button'>Modifier</button><button class='note-delete' type='button'>Retirer</button></li>").join("") || "<li>Aucun commentaire.</li>";
       const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
