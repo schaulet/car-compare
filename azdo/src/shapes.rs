@@ -6324,18 +6324,30 @@ fn policy_configurations(state: &AppState, method: &Method, org: &str, project: 
         if policy_type_catalog().iter().all(|item| text_of(item, "id").as_deref() != Some(type_id.as_str())) {
             return fail(StatusCode::BAD_REQUEST, "type de stratégie inconnu");
         }
-        let next = list(state, org, project, key).len() as i64 + 1;
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let settings = payload.get("settings").cloned().unwrap_or(json!({}));
+        let name = policy_type_catalog()
+            .into_iter()
+            .find(|item| text_of(item, "id").as_deref() == Some(type_id.as_str()))
+            .and_then(|item| text_of(&item, "displayName"))
+            .unwrap_or_else(|| type_id.clone());
         let item = dress_policy(
             org,
             project,
             json!({
                 "id": next,
+                "name": name,
                 "revision": 1,
                 "isEnabled": payload.get("isEnabled").cloned().unwrap_or(json!(true)),
                 "isBlocking": payload.get("isBlocking").cloned().unwrap_or(json!(true)),
                 "isDeleted": false,
                 "type": {"id": type_id},
-                "settings": payload.get("settings").cloned().unwrap_or(json!({})),
+                "settings": settings,
                 "createdDate": "2026-10-29T00:00:00Z",
                 "createdBy": {"displayName": "azurz"}
             }),
@@ -6343,18 +6355,28 @@ fn policy_configurations(state: &AppState, method: &Method, org: &str, project: 
         put_item(state, org, project, key, item.clone());
         return Json(item).into_response();
     }
+    if method == Method::DELETE {
+        if rest.len() != 3 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(found) = get_item(state, org, project, key, &rest[2]) else {
+            return fail(StatusCode::NOT_FOUND, "stratégie introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
     if method == Method::GET {
         return match get_item(state, org, project, key, id) {
             Some(item) => Json(dress_policy(org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "stratégie introuvable"),
-        };
-    }
-    if method == Method::DELETE {
-        return if delete_item(state, org, project, key, id) {
-            StatusCode::NO_CONTENT.into_response()
-        } else {
-            fail(StatusCode::NOT_FOUND, "stratégie introuvable")
         };
     }
     if method == Method::PUT || method == Method::PATCH {

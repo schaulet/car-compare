@@ -2138,11 +2138,20 @@
             collection("git/repositories"),
           ]);
           const repo = repos[0];
-          const rows = configurations.length ? "<table><thead><tr><th>ID</th><th>Stratégie</th><th>Bloquante</th><th>Branche</th></tr></thead><tbody>" + configurations.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.type && item.type.displayName) + "</td><td>" + esc(item.isBlocking ? "oui" : "non") + "</td><td>" + esc((item.settings && item.settings.scope && item.settings.scope[0] && item.settings.scope[0].refName) || "toutes") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune stratégie.</p>";
+          const rows = configurations.length ? "<table id='policies'><thead><tr><th>ID</th><th></th><th>Stratégie</th><th>Bloquante</th><th>Branche</th></tr></thead><tbody>" + configurations.map((item) => {
+            const refName = (item.settings && item.settings.scope && item.settings.scope[0] && item.settings.scope[0].refName) || "toutes";
+            return "<tr><td>" + esc(item.id) + "</td><td><button type='button' class='policy-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name || "") + "' data-ref='" + esc(refName) + "'>Retirer</button></td><td>" + esc(item.type && item.type.displayName) + "</td><td>" + esc(item.isBlocking ? "oui" : "non") + "</td><td>" + esc(refName) + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='policy-empty' class='sub'>Aucune stratégie.</p>";
           const requests = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>Cible</th><th></th></tr></thead><tbody>" + pulls.map((item) => "<tr><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title) + "</td><td>" + esc(item.targetRefName) + "</td><td><button type='button' class='evaluate' data-id='" + esc(item.pullRequestId || item.id) + "'>Évaluer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
-          view.innerHTML = "<h1>Stratégies de branche</h1><div class='command'><select id='policy-type'><option value='fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'>Relecteurs minimum</option><option value='0609b952-1397-4640-95ec-e00a01b2c241'>Build</option><option value='cbdc66da-9728-4af8-aada-9a5a32e4a226'>Statut</option><option value='c6a1889d-b943-4856-b76f-9e46bb6b0df2'>Commentaires</option></select><input id='policy-ref' placeholder='refs/heads/main' value='refs/heads/main' /><input id='policy-count' type='number' min='1' value='1' /><button id='policy-create' type='button'>Créer</button></div>" + rows + "<h2>Évaluation</h2>" + requests + "<section id='policy-result' class='panel' hidden></section>";
+          view.innerHTML = "<h1>Stratégies de branche</h1><div class='command'><select id='policy-type'><option value='fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'>Relecteurs minimum</option><option value='0609b952-1397-4640-95ec-e00a01b2c241'>Build</option><option value='cbdc66da-9728-4af8-aada-9a5a32e4a226'>Statut</option><option value='c6a1889d-b943-4856-b76f-9e46bb6b0df2'>Commentaires</option></select><input id='policy-ref' placeholder='refs/heads/main' value='refs/heads/main' /><input id='policy-count' type='number' min='1' value='1' /><button id='policy-create' type='button'>Créer</button></div>" + rows + "<p id='policy-error' class='error' hidden></p><h2>Évaluation</h2>" + requests + "<section id='policy-result' class='panel' hidden></section>";
           document.getElementById("policy-create").onclick = async () => {
-            if (!repo) return;
+            const note = document.getElementById("policy-error");
+            note.hidden = true;
+            if (!repo) {
+              note.hidden = false;
+              note.textContent = "dépôt absent";
+              return;
+            }
             const typeId = document.getElementById("policy-type").value;
             const refName = document.getElementById("policy-ref").value || "refs/heads/main";
             const settings = { scope: [{ repositoryId: repo.id, refName: refName, matchKind: "Exact" }] };
@@ -2152,9 +2161,29 @@
               settings.statusName = "azurz";
               settings.statusGenre = "continuous-integration";
             }
-            await api("POST", root + "/policy/configurations?api-version=7.1", { isEnabled: true, isBlocking: true, type: { id: typeId }, settings: settings });
+            try {
+              await api("POST", root + "/policy/configurations?api-version=7.1", { isEnabled: true, isBlocking: true, type: { id: typeId }, settings: settings });
+            } catch (error) {
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
             location.reload();
           };
+          document.querySelectorAll("button.policy-remove").forEach((button) => {
+            button.onclick = async () => {
+              const note = document.getElementById("policy-error");
+              note.hidden = true;
+              try {
+                await api("DELETE", root + "/policy/configurations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.querySelectorAll("button.evaluate").forEach((button) => {
             button.onclick = async () => {
               const artifactId = "vstfs:///CodeReview/CodeReviewId/" + project + "/" + button.dataset.id;

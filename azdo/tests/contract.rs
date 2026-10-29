@@ -16463,3 +16463,217 @@ async fn removing_one_yaml_pipeline_keeps_the_sibling_and_its_run() {
     assert!(names.iter().any(|name| name == "CI"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_branch_policy_keeps_the_sibling_and_its_evaluation() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let scope = format!(r#"{{"repositoryId":"{repo_id}","refName":"refs/heads/main","matchKind":"Exact"}}"#);
+    let mut pompe_id = 0_i64;
+    let mut ada_id = 0_i64;
+    for (label, type_id) in [
+        ("Pompe", "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"),
+        ("Ada", "c6a1889d-b943-4856-b76f-9e46bb6b0df2"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"isEnabled":true,"isBlocking":true,"type":{{"id":"{type_id}"}},"settings":{{"minimumApproverCount":1,"scope":[{scope}]}}}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if label == "Pompe" {
+            pompe_id = created["id"].as_i64().unwrap();
+            assert_eq!(created["name"], "Minimum number of reviewers");
+            assert_eq!(created["type"]["displayName"], "Minimum number of reviewers");
+        } else {
+            ada_id = created["id"].as_i64().unwrap();
+            assert_eq!(created["name"], "Comment requirements");
+            assert_eq!(created["type"]["displayName"], "Comment requirements");
+        }
+        assert_eq!(created["settings"]["scope"][0]["refName"], "refs/heads/main");
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Strategie","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let artifact = format!("vstfs:///CodeReview/CodeReviewId/azurz-demo/{pull_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/evaluations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"{artifact}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(before["count"], 2, "{body}");
+    let reviewers = before["value"].as_array().unwrap().iter().find(|item| item["configuration"]["name"] == "Minimum number of reviewers").unwrap();
+    let comments = before["value"].as_array().unwrap().iter().find(|item| item["configuration"]["name"] == "Comment requirements").unwrap();
+    assert_eq!(reviewers["status"], "rejected");
+    assert_eq!(comments["status"], "approved");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/policy/configurations/999?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("stratégie introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/policy/configurations/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/policy/configurations/Minimum%20number%20of%20reviewers?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/policy/configurations/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("stratégie introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/policy/configurations/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Comment requirements");
+    assert_eq!(kept["settings"]["scope"][0]["refName"], "refs/heads/main");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/evaluations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"{artifact}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(after["count"], 1, "{body}");
+    assert_eq!(after["value"][0]["configuration"]["name"], "Comment requirements");
+    assert_eq!(after["value"][0]["status"], "approved");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_pull["title"], "Strategie");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Comment requirements"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Minimum number of reviewers"), "{names:?}");
+}
