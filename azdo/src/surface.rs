@@ -25,6 +25,12 @@ pub fn project(state: &AppState, method: &Method, org: &str, project: &str, rest
         "packaging" if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("upack")) => {
             upack(state, method, org, project, rest, body)
         }
+        "packaging"
+            if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("maven") || value.eq_ignore_ascii_case("pypi"))
+                && rest.get(4).is_some_and(|value| value.eq_ignore_ascii_case("packages")) =>
+        {
+            protocol_packages(state, method, org, project, rest)
+        }
         _ => return None,
     };
     Some(response)
@@ -46,12 +52,19 @@ pub fn packaging(state: &AppState, method: &Method, path: &str, body: &[u8]) -> 
     };
     let protocol = parts.get(index + 2).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     let tail = if parts.len() > index + 3 { &parts[index + 3..] } else { &[] };
+    let feed_id = value_text(&feed["id"]);
     if protocol == "nuget" {
-        return nuget(state, method, org, project, &value_text(&feed["id"]), feed_name, tail, body);
+        return nuget(state, method, org, project, &feed_id, feed_name, tail, body);
     }
     if protocol == "npm" && (method == Method::GET || method == Method::PUT) {
         let name = parts.get(index + 3).cloned().unwrap_or_default();
-        return npm_package(state, method, org, project, &value_text(&feed["id"]), &name, body);
+        return npm_package(state, method, org, project, &feed_id, &name, body);
+    }
+    if protocol == "maven" {
+        return maven(state, method, org, project, &feed_id, tail, body);
+    }
+    if protocol == "pypi" {
+        return pypi(state, method, org, project, &feed_id, tail, body);
     }
     fail(StatusCode::NOT_FOUND, "protocole inconnu")
 }
@@ -317,11 +330,7 @@ fn upack(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
 }
 
 fn octets(content: &str) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(axum::body::Body::from(content.to_string()))
-        .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"))
+    typed("application/octet-stream", content)
 }
 
 fn nuget_index(org: &str, project: &str, feed: &str) -> Response {
@@ -336,6 +345,237 @@ fn nuget_index(org: &str, project: &str, feed: &str) -> Response {
         ]
     }))
     .into_response()
+}
+
+fn protocol_packages(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(feed) = find_feed(state, org, project, &rest[2]) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let protocol = rest[3].to_ascii_lowercase();
+    let key = format!("packaging/feeds/{}/{protocol}", value_text(&feed["id"]));
+    let value = list_project(state, org, project, &key).into_iter().map(without_content).collect();
+    Json(page(value)).into_response()
+}
+
+fn without_content(mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        object.remove("content");
+    }
+    item
+}
+
+fn maven(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, tail: &[String], body: &[u8]) -> Response {
+    let segments = strip_prefix(tail, "v1");
+    if segments.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "paquet Maven introuvable");
+    }
+    let key = format!("packaging/feeds/{feed_id}/maven");
+    if segments.last().is_some_and(|value| value.eq_ignore_ascii_case("maven-metadata.xml")) {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        if segments.len() < 2 {
+            return fail(StatusCode::NOT_FOUND, "paquet Maven introuvable");
+        }
+        let artifact = segments[segments.len() - 2].clone();
+        let group = segments[..segments.len() - 2].join(".");
+        let prefix = maven_prefix(&group, &artifact);
+        let mut versions = list_project(state, org, project, &key)
+            .into_iter()
+            .filter_map(|item| {
+                let stored = text(&item, "id")?;
+                let rest = stored.strip_prefix(&prefix)?.split('/').next()?;
+                (!rest.is_empty()).then(|| rest.to_string())
+            })
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions.dedup();
+        let latest = versions.last().cloned().unwrap_or_default();
+        let listed = versions
+            .iter()
+            .map(|version| format!("<version>{}</version>", xml_escape(version)))
+            .collect::<String>();
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><metadata><groupId>{}</groupId><artifactId>{}</artifactId><versioning><latest>{}</latest><release>{}</release><versions>{}</versions></versioning></metadata>",
+            xml_escape(&group),
+            xml_escape(&artifact),
+            xml_escape(&latest),
+            xml_escape(&latest),
+            listed
+        );
+        return typed("application/xml", &xml);
+    }
+    if segments.len() < 3 {
+        return fail(StatusCode::NOT_FOUND, "paquet Maven introuvable");
+    }
+    let filename = segments[segments.len() - 1].clone();
+    let version = segments[segments.len() - 2].clone();
+    let artifact = segments[segments.len() - 3].clone();
+    let group = if segments.len() > 3 { segments[..segments.len() - 3].join(".") } else { String::new() };
+    let stored_id = format!("{}{artifact}/{version}/{filename}", maven_prefix(&group, ""));
+    if method == Method::PUT {
+        let content = String::from_utf8_lossy(body).into_owned();
+        put_project(
+            state,
+            org,
+            project,
+            &key,
+            json!({
+                "id": stored_id,
+                "groupId": group,
+                "artifactId": artifact,
+                "version": version,
+                "filename": filename,
+                "content": content
+            }),
+        );
+        return octets(&content);
+    }
+    if method == Method::GET {
+        return match get_project(state, org, project, &key, &stored_id) {
+            Some(item) => octets(&text(&item, "content").unwrap_or_default()),
+            None => fail(StatusCode::NOT_FOUND, "paquet Maven introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn pypi(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, tail: &[String], body: &[u8]) -> Response {
+    let segments = strip_prefix(tail, "simple");
+    if segments.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "paquet PyPI introuvable");
+    }
+    let package = normalize_pypi(&segments[0]);
+    let key = format!("packaging/feeds/{feed_id}/pypi");
+    if segments.len() == 1 {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let prefix = format!("{package}/");
+        let mut files = list_project(state, org, project, &key)
+            .into_iter()
+            .filter(|item| text(item, "id").is_some_and(|id| id.starts_with(&prefix)))
+            .filter_map(|item| text(&item, "filename"))
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        let links = files
+            .iter()
+            .map(|file| format!("<a href=\"{}\">{}</a>", html_escape(file), html_escape(file)))
+            .collect::<Vec<_>>()
+            .join("");
+        let html = format!(
+            "<!DOCTYPE html><html><head><title>Links for {}</title></head><body><h1>Links for {}</h1>{}</body></html>",
+            html_escape(&package),
+            html_escape(&package),
+            links
+        );
+        return typed("text/html; charset=utf-8", &html);
+    }
+    let (version, filename) = if segments.len() == 2 {
+        let filename = segments[1].clone();
+        (pypi_version(&package, &filename), filename)
+    } else {
+        (segments[1].clone(), segments[2].clone())
+    };
+    let stored_id = format!("{package}/{version}/{filename}");
+    if method == Method::PUT {
+        let content = String::from_utf8_lossy(body).into_owned();
+        put_project(
+            state,
+            org,
+            project,
+            &key,
+            json!({
+                "id": stored_id,
+                "name": package,
+                "version": version,
+                "filename": filename,
+                "content": content
+            }),
+        );
+        return octets(&content);
+    }
+    if method == Method::GET {
+        return match get_project(state, org, project, &key, &stored_id) {
+            Some(item) => octets(&text(&item, "content").unwrap_or_default()),
+            None => fail(StatusCode::NOT_FOUND, "paquet PyPI introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn strip_prefix<'a>(tail: &'a [String], prefix: &str) -> &'a [String] {
+    if tail.first().is_some_and(|value| value.eq_ignore_ascii_case(prefix)) {
+        &tail[1..]
+    } else {
+        tail
+    }
+}
+
+fn maven_prefix(group: &str, artifact: &str) -> String {
+    if group.is_empty() {
+        return if artifact.is_empty() { String::new() } else { format!("{artifact}/") };
+    }
+    if artifact.is_empty() {
+        format!("{group}/")
+    } else {
+        format!("{group}/{artifact}/")
+    }
+}
+
+fn pypi_version(package: &str, filename: &str) -> String {
+    let lower = filename.to_ascii_lowercase();
+    let stem = lower
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".zip")
+        .trim_end_matches(".whl");
+    let prefix = format!("{package}-");
+    stem.strip_prefix(&prefix)
+        .and_then(|rest| rest.split('-').next())
+        .filter(|version| !version.is_empty())
+        .unwrap_or("0.0.0")
+        .to_string()
+}
+
+fn normalize_pypi(name: &str) -> String {
+    let mut normalized = String::new();
+    let mut dash = false;
+    for character in name.chars() {
+        if character == '-' || character == '_' || character == '.' {
+            if !dash && !normalized.is_empty() {
+                normalized.push('-');
+                dash = true;
+            }
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+            dash = false;
+        }
+    }
+    normalized
+}
+
+fn xml_escape(value: &str) -> String {
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn typed(content_type: &str, content: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(axum::body::Body::from(content.to_string()))
+        .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"))
 }
 
 fn npm_package(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, name: &str, body: &[u8]) -> Response {

@@ -2169,3 +2169,114 @@ async fn sprint_capacity_records_hours_and_team_days_off() {
     let days: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(days["daysOff"][0]["start"], "2026-10-30T00:00:00Z");
 }
+
+#[tokio::test]
+async fn maven_and_pypi_publish_then_read_the_package() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne-packages"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pom = "<project><groupId>com.azurz</groupId><artifactId>oee</artifactId><version>1.0.0</version></project>";
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/1.0.0/oee-1.0.0.pom",
+        Some(&auth),
+        None,
+        "application/xml",
+        Some(pom),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, pom);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/maven/v1/com/azurz/oee/maven-metadata.xml",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<artifactId>oee</artifactId>"), "{body}");
+    assert!(body.contains("<version>1.0.0</version>"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-packages/maven/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let maven: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(maven["value"][0]["artifactId"], "oee");
+    assert_eq!(maven["value"][0]["version"], "1.0.0");
+    assert!(maven["value"][0].get("content").is_none());
+    let archive = "paquet-pypi-lab";
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.2.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some(archive),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, archive);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("oee-1.2.0.tar.gz"), "{body}");
+    assert!(body.contains("Links for oee"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/ligne-packages/pypi/simple/oee/oee-1.2.0.tar.gz",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, archive);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/ligne-packages/pypi/packages?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pypi: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pypi["value"][0]["name"], "oee");
+    assert_eq!(pypi["value"][0]["version"], "1.2.0");
+    assert_eq!(pypi["value"][0]["filename"], "oee-1.2.0.tar.gz");
+}
