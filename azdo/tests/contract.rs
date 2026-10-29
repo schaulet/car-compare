@@ -2551,3 +2551,151 @@ async fn service_hook_delivers_a_work_item_to_the_consumer() {
     assert_eq!(updated_notes["value"][0]["status"], "succeeded");
     assert_eq!(updated_notes["value"][0]["details"], "livré");
 }
+
+#[tokio::test]
+async fn dashboard_widgets_render_markdown_query_and_build() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/dashboard/dashboards?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Vue ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let dashboard: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let dashboard_id = dashboard["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Note","contributionId":"ms.vss-dashboards.MarkdownWidget","settings":{"content":"Debit nominal"},"size":{"rowSpan":1,"columnSpan":2}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let markdown: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(markdown["rendered"]["kind"], "markdown");
+    assert_eq!(markdown["rendered"]["text"], "Debit nominal");
+    let widget_id = markdown["id"].as_str().unwrap();
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Tache tableau"},{"op":"add","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Work items actifs","contributionId":"ms.vss-dashboards.QueryScalarWidget","settings":{"state":"Active"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let query: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(query["rendered"]["kind"], "query");
+    assert_eq!(query["rendered"]["value"], 1);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = build["id"].as_i64().unwrap();
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Build CI","contributionId":"ms.vss-dashboards.BuildWidget","settings":{"definitionId":1}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build_widget: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(build_widget["rendered"]["kind"], "build");
+    assert_eq!(build_widget["rendered"]["value"], "succeeded");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets/{widget_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"settings":{"content":"Debit 18"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(edited["rendered"]["text"], "Debit 18");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let widgets: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(widgets["count"], 3);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}/widgets/{widget_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/dashboard/dashboards/{dashboard_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(stored["widgets"].as_array().unwrap().len(), 2);
+    assert_eq!(stored["widgets"][0]["rendered"]["value"], 1);
+}

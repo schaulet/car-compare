@@ -69,6 +69,11 @@
     .col.drop { outline: 2px solid var(--blue); }
     .card:hover { border-color: var(--blue); }
     .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .canvas { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .widget { border: 1px solid var(--line); background: #fff; padding: 12px 14px; min-height: 120px; }
+    .widget h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+    .widget .metric { font-size: 32px; color: var(--blue); font-weight: 600; line-height: 1.1; }
+    .widget pre { margin: 0; white-space: pre-wrap; font: inherit; }
     .tile { border: 1px solid var(--line); padding: 14px 16px; background: #fff; text-decoration: none; color: inherit; }
     .tile b { display: block; font-size: 28px; color: var(--blue); }
     .panel { margin-top: 16px; border: 1px solid var(--line); background: #fff; padding: 16px; }
@@ -81,7 +86,8 @@
       nav { display: flex; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       nav .group { display: none; }
       nav a { white-space: nowrap; }
-      .board { grid-template-columns: 1fr; }
+      .board, .canvas { grid-template-columns: 1fr; }
+      .widget { grid-column: 1 / -1 !important; }
       .form { grid-template-columns: 1fr; }
       table { display: block; overflow-x: auto; }
     }
@@ -97,6 +103,7 @@
   <div class="layout">
     <nav>
       <a href="/__ORG__/__PROJECT__">Vue d'ensemble</a>
+      <a href="/__ORG__/__PROJECT__/_dashboards">Tableau de bord</a>
       <div class="group">Boards</div>
       <a href="/__ORG__/__PROJECT__/_workitems">Éléments de travail</a>
       <a href="/__ORG__/__PROJECT__/_boards">Tableaux</a>
@@ -239,6 +246,51 @@
             const found = await api("POST", root + "/search/workitemsearchresults?api-version=7.1", { searchText: document.getElementById("search").value, $top: 25 });
             const rows = found.results || [];
             document.getElementById("search-result").innerHTML = rows.length ? "<ul>" + rows.map((row) => "<li>" + esc(row.fields?.["system.title"]) + "</li>").join("") + "</ul>" : "<p class='sub'>Aucun résultat.</p>";
+          };
+          return;
+        }
+        if (hub === "/_dashboards") {
+          const dashboards = await collection("dashboard/dashboards");
+          const dashboard = dashboards[0];
+          const widgets = dashboard ? (await api("GET", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "/widgets?api-version=7.1")).value || [] : [];
+          const canvas = widgets.length ? "<div class='canvas' id='canvas'>" + widgets.map((widget) => {
+            const rendered = widget.rendered || {};
+            const span = Math.min(4, Math.max(1, (widget.size && widget.size.columnSpan) || 2));
+            const body = rendered.kind === "markdown"
+              ? "<pre>" + esc(rendered.text) + "</pre>"
+              : "<div class='metric'>" + esc(rendered.value ?? "") + "</div><p class='sub'>" + esc(rendered.text) + "</p>";
+            return "<article class='widget' data-kind='" + esc(rendered.kind) + "' style='grid-column: span " + span + "'><h2>" + esc(widget.name) + "</h2>" + body + "</article>";
+          }).join("") + "</div>" : "<p class='sub'>Aucun widget.</p>";
+          const create = dashboard ? "" : "<div class='command'><input id='dash-name' placeholder='Nom du tableau' value='Vue ligne' /><button id='dash-create' type='button'>Créer le tableau</button></div>";
+          view.innerHTML = "<h1>Tableau de bord</h1><p class='sub' id='dash-title'>" + esc(dashboard ? dashboard.name : "Aucun tableau") + "</p>" + create + "<div class='command'><select id='widget-kind'><option value='markdown'>Markdown</option><option value='query'>Requête</option><option value='build'>Build</option></select><input id='widget-name' placeholder='Nom' /><input id='widget-setting' placeholder='Texte, état ou définition' /><button id='widget-add' type='button'>Ajouter</button></div>" + canvas;
+          const dashCreate = document.getElementById("dash-create");
+          if (dashCreate) {
+            dashCreate.onclick = async () => {
+              await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+              location.reload();
+            };
+          }
+          document.getElementById("widget-add").onclick = async () => {
+            let current = dashboard;
+            if (!current) {
+              current = await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+            }
+            const kind = document.getElementById("widget-kind").value;
+            const setting = document.getElementById("widget-setting").value;
+            const name = document.getElementById("widget-name").value || (kind === "build" ? "Build CI" : kind === "query" ? "Work items" : "Note");
+            const payload = { name: name, size: { rowSpan: 1, columnSpan: kind === "markdown" ? 2 : 1 } };
+            if (kind === "markdown") {
+              payload.contributionId = "ms.vss-dashboards.MarkdownWidget";
+              payload.settings = { content: setting || "Note" };
+            } else if (kind === "query") {
+              payload.contributionId = "ms.vss-dashboards.QueryScalarWidget";
+              payload.settings = setting ? { state: setting } : {};
+            } else {
+              payload.contributionId = "ms.vss-dashboards.BuildWidget";
+              payload.settings = { definitionId: Number(setting || "1") };
+            }
+            await api("POST", root + "/dashboard/dashboards/" + encodeURIComponent(current.id) + "/widgets?api-version=7.1", payload);
+            location.reload();
           };
           return;
         }

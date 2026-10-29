@@ -294,7 +294,11 @@ fn dashboards(
 ) -> Response {
     let key = "dashboard/dashboards";
     if rest.len() == 2 && method == Method::GET {
-        let value = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default());
+        let value = state
+            .read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default())
+            .into_iter()
+            .map(|item| dress_dashboard(state, org, project, item))
+            .collect();
         return Json(page(value)).into_response();
     }
     if rest.len() == 2 && method == Method::POST {
@@ -304,7 +308,15 @@ fn dashboards(
             let stored = db.project_mut(org, project)?;
             let next = stored.list_bucket(key).len() + 1;
             let name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("Tableau de bord");
-            let widgets = payload.get("widgets").cloned().unwrap_or(json!([]));
+            let widgets = payload
+                .get("widgets")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(index, widget)| normalize_widget(widget, index as i64 + 1))
+                .collect::<Vec<_>>();
             let item = json!({
                 "id": format!("dash-{next}"),
                 "name": name,
@@ -317,18 +329,204 @@ fn dashboards(
             Some(stored.put_bucket(key, item))
         });
         return match created {
-            Some(item) => Json(item).into_response(),
+            Some(item) => Json(dress_dashboard(state, org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         };
     }
-    if method == Method::GET {
-        let id = rest.get(2).map(String::as_str).unwrap_or("");
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("widgets")) {
+        return dashboard_widgets(state, method, org, project, id, rest, body);
+    }
+    if rest.len() == 3 && method == Method::GET {
         return match state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, id))) {
-            Some(item) => Json(item).into_response(),
+            Some(item) => Json(dress_dashboard(state, org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "tableau de bord introuvable"),
         };
     }
-    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+    fail(StatusCode::NOT_FOUND, "tableau de bord introuvable")
+}
+
+fn dashboard_widgets(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    dashboard_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(dashboard) = load_dashboard(state, org, project, dashboard_id) else {
+        return fail(StatusCode::NOT_FOUND, "tableau de bord introuvable");
+    };
+    if rest.len() == 4 && method == Method::GET {
+        let value = widget_list(&dashboard)
+            .into_iter()
+            .map(|widget| dress_widget(state, org, project, widget))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 4 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let mut widgets = widget_list(&dashboard);
+        let widget = normalize_widget(payload, widgets.len() as i64 + 1);
+        widgets.push(widget.clone());
+        save_widgets(state, org, project, dashboard, widgets);
+        return Json(dress_widget(state, org, project, widget)).into_response();
+    }
+    if rest.len() >= 5 {
+        let widget_id = &rest[4];
+        let mut widgets = widget_list(&dashboard);
+        let Some(index) = widgets.iter().position(|widget| item_id(widget) == *widget_id) else {
+            return fail(StatusCode::NOT_FOUND, "widget introuvable");
+        };
+        if method == Method::GET {
+            return Json(dress_widget(state, org, project, widgets[index].clone())).into_response();
+        }
+        if method == Method::DELETE {
+            widgets.remove(index);
+            save_widgets(state, org, project, dashboard, widgets);
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        if method == Method::PUT || method == Method::PATCH {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            if let Some(object) = widgets[index].as_object_mut() {
+                for field in ["name", "contributionId", "settings", "position", "size"] {
+                    if let Some(value) = payload.get(field) {
+                        object.insert(field.to_string(), value.clone());
+                    }
+                }
+            }
+            let updated = widgets[index].clone();
+            save_widgets(state, org, project, dashboard, widgets);
+            return Json(dress_widget(state, org, project, updated)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "widget introuvable")
+}
+
+fn load_dashboard(state: &AppState, org: &str, project: &str, id: &str) -> Option<Value> {
+    state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket("dashboard/dashboards", id)))
+}
+
+fn save_widgets(state: &AppState, org: &str, project: &str, mut dashboard: Value, widgets: Vec<Value>) {
+    if let Some(object) = dashboard.as_object_mut() {
+        object.insert("widgets".into(), json!(widgets));
+    }
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket("dashboard/dashboards", dashboard);
+        }
+    });
+}
+
+fn widget_list(dashboard: &Value) -> Vec<Value> {
+    dashboard.get("widgets").and_then(|value| value.as_array()).cloned().unwrap_or_default()
+}
+
+fn normalize_widget(mut widget: Value, index: i64) -> Value {
+    if let Some(object) = widget.as_object_mut() {
+        let id = object.get("id").map(value_text).filter(|value| !value.is_empty()).unwrap_or_else(|| format!("widget-{index}"));
+        object.insert("id".into(), json!(id));
+        object.entry("name").or_insert(json!("Widget"));
+        object.entry("position").or_insert(json!({"row": 1, "column": index}));
+        object.entry("size").or_insert(json!({"rowSpan": 1, "columnSpan": 2}));
+    }
+    widget
+}
+
+fn dress_dashboard(state: &AppState, org: &str, project: &str, mut dashboard: Value) -> Value {
+    let widgets = widget_list(&dashboard)
+        .into_iter()
+        .map(|widget| dress_widget(state, org, project, widget))
+        .collect::<Vec<_>>();
+    if let Some(object) = dashboard.as_object_mut() {
+        object.insert("widgets".into(), json!(widgets));
+    }
+    dashboard
+}
+
+fn dress_widget(state: &AppState, org: &str, project: &str, mut widget: Value) -> Value {
+    let rendered = render_widget(state, org, project, &widget);
+    if let Some(object) = widget.as_object_mut() {
+        object.insert("rendered".into(), rendered);
+    }
+    widget
+}
+
+fn render_widget(state: &AppState, org: &str, project: &str, widget: &Value) -> Value {
+    let title = item_text(widget, "name").unwrap_or_else(|| "Widget".into());
+    let settings = widget_settings(widget);
+    match widget_kind(widget) {
+        "markdown" => {
+            let text = settings.get("content").and_then(|value| value.as_str()).unwrap_or("").to_string();
+            json!({"kind": "markdown", "title": title, "text": text, "value": Value::Null})
+        }
+        "build" => {
+            let definition_id = settings.get("definitionId").and_then(|value| value.as_i64());
+            let builds = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket("build/builds")).unwrap_or_default());
+            let latest = builds
+                .into_iter()
+                .filter(|item| {
+                    definition_id
+                        .map(|id| item.get("definition").and_then(|definition| definition.get("id")).and_then(|value| value.as_i64()) == Some(id))
+                        .unwrap_or(true)
+                })
+                .max_by_key(|item| item.get("id").and_then(|value| value.as_i64()).unwrap_or(0));
+            match latest {
+                Some(build) => {
+                    let number = item_text(&build, "buildNumber").unwrap_or_default();
+                    let status = item_text(&build, "status").unwrap_or_else(|| "notStarted".into());
+                    let result = item_text(&build, "result").unwrap_or_default();
+                    json!({"kind": "build", "title": title, "text": format!("{number} {status} {result}").trim().to_string(), "value": if result.is_empty() { status } else { result }})
+                }
+                None => json!({"kind": "build", "title": title, "text": "aucune build", "value": Value::Null}),
+            }
+        }
+        "query" => {
+            let wanted = settings.get("state").and_then(|value| value.as_str()).map(str::to_string);
+            let count = state.read(|db| {
+                db.project(org, project)
+                    .map(|stored| {
+                        stored
+                            .work_items
+                            .values()
+                            .filter(|item| {
+                                wanted.as_ref().map(|state_name| {
+                                    item.get("fields").and_then(|fields| fields.get("System.State")).and_then(|value| value.as_str()) == Some(state_name.as_str())
+                                }).unwrap_or(true)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            });
+            json!({"kind": "query", "title": title, "text": "éléments", "value": count})
+        }
+        _ => json!({"kind": "note", "title": title, "text": "", "value": Value::Null}),
+    }
+}
+
+fn widget_kind(widget: &Value) -> &'static str {
+    let name = item_text(widget, "name").unwrap_or_default().to_ascii_lowercase();
+    let contribution = item_text(widget, "contributionId").unwrap_or_default().to_ascii_lowercase();
+    let haystack = format!("{name} {contribution}");
+    if haystack.contains("markdown") {
+        "markdown"
+    } else if haystack.contains("build") {
+        "build"
+    } else if haystack.contains("query") || haystack.contains("work item") || haystack.contains("scalar") {
+        "query"
+    } else {
+        "note"
+    }
+}
+
+fn widget_settings(widget: &Value) -> Value {
+    match widget.get("settings") {
+        Some(Value::String(text)) => serde_json::from_str(text).unwrap_or_else(|_| json!({"content": text})),
+        Some(value) => value.clone(),
+        None => json!({}),
+    }
 }
 
 fn endpoints(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
