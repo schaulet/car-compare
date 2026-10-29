@@ -122,8 +122,8 @@ fn git_repositories(
     let sub = rest.get(3).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     match sub.as_str() {
         "refs" => refs(state, method, org, project, repo_id, body),
-        "commits" => commits(state, method, org, project, repo_id, body),
-        "pushes" => pushes(state, method, org, project, repo_id, body),
+        "commits" => commits(state, method, org, project, repo_id, tail_after(rest, "commits"), body),
+        "pushes" => pushes(state, method, org, project, repo_id, tail_after(rest, "pushes"), body),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
         "items" => items(state, org, project, repo_id, query),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
@@ -136,8 +136,8 @@ fn git_alias(state: &AppState, method: &Method, org: &str, project: &str, kind: 
     };
     match kind {
         "refs" => refs(state, method, org, project, &repo_id, body),
-        "commits" => commits(state, method, org, project, &repo_id, body),
-        "pushes" => pushes(state, method, org, project, &repo_id, body),
+        "commits" => commits(state, method, org, project, &repo_id, &[], body),
+        "pushes" => pushes(state, method, org, project, &repo_id, &[], body),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
     }
 }
@@ -180,8 +180,25 @@ fn refs(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &s
     }
 }
 
-fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, body: &[u8]) -> Response {
+fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], body: &[u8]) -> Response {
     let key = format!("git/repositories/{repo_id}/commits");
+    if let Some(commit_id) = tail.first() {
+        if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("changes")) && method == Method::GET {
+            let changes = list(state, org, project, &format!("{key}/{commit_id}/changes"));
+            return Json(json!({
+                "changeCounts": change_counts(&changes),
+                "changes": changes
+            }))
+            .into_response();
+        }
+        if method == Method::GET {
+            return match get_item(state, org, project, &key, commit_id) {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "commit introuvable"),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
     }
@@ -205,8 +222,17 @@ fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id:
     Json(item).into_response()
 }
 
-fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, body: &[u8]) -> Response {
+fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], body: &[u8]) -> Response {
     let key = format!("git/repositories/{repo_id}/pushes");
+    if let Some(push_id) = tail.first() {
+        if method == Method::GET {
+            return match get_item(state, org, project, &key, push_id) {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "poussée introuvable"),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
     }
@@ -214,20 +240,209 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     let payload = parse_json(body).unwrap_or(json!({}));
-    let ref_name = text_of(&payload, "refName")
-        .or_else(|| text_of(&payload, "name"))
-        .unwrap_or_else(|| "refs/heads/main".into());
-    let next = list(state, org, project, &key).len() as i64 + 1;
-    let item = json!({
-        "id": next,
-        "pushId": next,
-        "date": "2026-10-29T00:00:00Z",
-        "refName": ref_name,
-        "repository": {"id": repo_id, "name": repo_name(state, org, project, repo_id)},
-        "pushedBy": {"displayName": "azurz"}
-    });
-    put_item(state, org, project, &key, item.clone());
-    Json(item).into_response()
+    if payload.get("commits").is_none() && payload.get("refUpdates").is_none() {
+        let ref_name = text_of(&payload, "refName")
+            .or_else(|| text_of(&payload, "name"))
+            .unwrap_or_else(|| "refs/heads/main".into());
+        let next = list(state, org, project, &key).len() as i64 + 1;
+        let item = json!({
+            "id": next,
+            "pushId": next,
+            "date": "2026-10-29T00:00:00Z",
+            "refName": ref_name,
+            "repository": {"id": repo_id, "name": repo_name(state, org, project, repo_id)},
+            "pushedBy": {"displayName": "azurz"}
+        });
+        put_item(state, org, project, &key, item.clone());
+        return Json(item).into_response();
+    }
+    match apply_push(state, org, project, repo_id, &payload) {
+        PushOutcome::Created(item) => Json(item).into_response(),
+        PushOutcome::Conflict => fail(StatusCode::CONFLICT, "la référence a changé"),
+        PushOutcome::Missing => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
+    }
+}
+
+enum PushOutcome {
+    Created(Value),
+    Conflict,
+    Missing,
+}
+
+fn apply_push(state: &AppState, org: &str, project: &str, repo_id: &str, payload: &Value) -> PushOutcome {
+    let repository_name = repo_name(state, org, project, repo_id);
+    state.write(|db| {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return PushOutcome::Missing;
+        };
+        let refs_key = format!("git/repositories/{repo_id}/refs");
+        let commits_key = format!("git/repositories/{repo_id}/commits");
+        let items_key = format!("git/repositories/{repo_id}/items");
+        let pushes_key = format!("git/repositories/{repo_id}/pushes");
+        let updates = payload
+            .get("refUpdates")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"name": "refs/heads/main"})]);
+        for update in &updates {
+            let name = text_of(update, "name").unwrap_or_else(|| "refs/heads/main".into());
+            let current = stored
+                .get_bucket(&refs_key, &name)
+                .and_then(|item| text_of(&item, "objectId"));
+            if let Some(old) = text_of(update, "oldObjectId") {
+                if ref_conflict(current.as_deref(), &old) {
+                    return PushOutcome::Conflict;
+                }
+            }
+        }
+        let mut parent = updates.first().and_then(|update| {
+            let name = text_of(update, "name").unwrap_or_else(|| "refs/heads/main".into());
+            stored.get_bucket(&refs_key, &name).and_then(|item| text_of(&item, "objectId"))
+        });
+        let mut created_commits = Vec::new();
+        let commit_rows = payload.get("commits").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+        for commit in commit_rows {
+            let comment = text_of(&commit, "comment").unwrap_or_else(|| "Mise à jour".into());
+            let commit_id = object_id(&format!(
+                "{repo_id}:{comment}:{}",
+                stored.list_bucket(&commits_key).len()
+            ));
+            let changes = commit.get("changes").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+            let mut stored_changes = Vec::new();
+            for change in changes {
+                let path = change
+                    .get("item")
+                    .and_then(|item| text_of(item, "path"))
+                    .unwrap_or_else(|| "/fichier.txt".into());
+                let path = if path.starts_with('/') { path } else { format!("/{path}") };
+                let change_type = text_of(&change, "changeType").unwrap_or_else(|| "add".into());
+                if change_type.eq_ignore_ascii_case("delete") {
+                    if let Some(bucket) = stored.buckets.get_mut(&items_key) {
+                        bucket.remove(&path);
+                    }
+                } else {
+                    ensure_tree(stored, &items_key, &path);
+                    let content = change
+                        .get("newContent")
+                        .and_then(|value| text_of(value, "content").or_else(|| value.as_str().map(str::to_string)))
+                        .unwrap_or_default();
+                    stored.put_bucket(
+                        &items_key,
+                        json!({
+                            "id": path,
+                            "path": path,
+                            "isFolder": false,
+                            "gitObjectType": "blob",
+                            "content": content
+                        }),
+                    );
+                }
+                stored_changes.push(json!({
+                    "id": path,
+                    "changeType": change_type,
+                    "item": {"path": path, "gitObjectType": "blob"}
+                }));
+            }
+            let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+            let item = json!({
+                "id": commit_id,
+                "commitId": commit_id,
+                "comment": comment,
+                "author": {"name": "azurz", "email": "azurz@lab", "date": "2026-10-29T00:00:00Z"},
+                "committer": {"name": "azurz", "email": "azurz@lab", "date": "2026-10-29T00:00:00Z"},
+                "parents": parents,
+                "changeCounts": change_counts(&stored_changes),
+                "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{commit_id}")
+            });
+            stored.put_bucket(&commits_key, item.clone());
+            for change in stored_changes {
+                stored.put_bucket(&format!("{commits_key}/{commit_id}/changes"), change);
+            }
+            parent = Some(commit_id.clone());
+            created_commits.push(item);
+        }
+        let mut applied = Vec::new();
+        for update in updates {
+            let name = text_of(&update, "name").unwrap_or_else(|| "refs/heads/main".into());
+            let old = text_of(&update, "oldObjectId")
+                .unwrap_or_else(|| "0000000000000000000000000000000000000000".into());
+            let explicit = text_of(&update, "newObjectId")
+                .filter(|value| !value.is_empty() && !value.chars().all(|ch| ch == '0'));
+            let object = parent.clone().or(explicit).unwrap_or_else(|| object_id(&format!("{repo_id}:{name}")));
+            let item = json!({
+                "id": name,
+                "name": name,
+                "objectId": object,
+                "oldObjectId": old,
+                "newObjectId": object,
+                "success": true
+            });
+            stored.put_bucket(&refs_key, item.clone());
+            applied.push(item);
+        }
+        let next = stored.list_bucket(&pushes_key).len() as i64 + 1;
+        let item = json!({
+            "id": next,
+            "pushId": next,
+            "date": "2026-10-29T00:00:00Z",
+            "commits": created_commits,
+            "refUpdates": applied,
+            "repository": {"id": repo_id, "name": repository_name},
+            "pushedBy": {"displayName": "azurz", "uniqueName": "azurz"},
+            "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/pushes/{next}")
+        });
+        stored.put_bucket(&pushes_key, item.clone());
+        PushOutcome::Created(item)
+    })
+}
+
+fn ref_conflict(current: Option<&str>, old: &str) -> bool {
+    let zeros = old.is_empty() || old.chars().all(|ch| ch == '0');
+    if zeros {
+        current.is_some()
+    } else {
+        current != Some(old)
+    }
+}
+
+fn ensure_tree(stored: &mut crate::store::ProjectData, key: &str, path: &str) {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() <= 1 {
+        return;
+    }
+    let mut prefix = String::new();
+    for part in &parts[..parts.len() - 1] {
+        prefix.push('/');
+        prefix.push_str(part);
+        if stored.get_bucket(key, &prefix).is_none() {
+            stored.put_bucket(
+                key,
+                json!({"id": prefix, "path": prefix, "isFolder": true, "gitObjectType": "tree"}),
+            );
+        }
+    }
+}
+
+fn change_counts(changes: &[Value]) -> Value {
+    let mut add = 0;
+    let mut edit = 0;
+    let mut delete = 0;
+    for change in changes {
+        match text_of(change, "changeType").unwrap_or_default().to_ascii_lowercase().as_str() {
+            "delete" => delete += 1,
+            "edit" => edit += 1,
+            _ => add += 1,
+        }
+    }
+    json!({"Add": add, "Edit": edit, "Delete": delete})
+}
+
+fn tail_after<'a>(rest: &'a [String], name: &str) -> &'a [String] {
+    rest.iter()
+        .position(|part| part.eq_ignore_ascii_case(name))
+        .map(|index| &rest[index + 1..])
+        .unwrap_or(&[])
 }
 
 fn items(state: &AppState, org: &str, project: &str, repo_id: &str, query: &str) -> Response {
@@ -290,7 +505,13 @@ fn pull_requests(
             let id = rest.last().cloned().unwrap_or_default();
             let payload = parse_json(body).unwrap_or(json!({}));
             return match patch_item(state, org, project, key, &id, &payload) {
-                Some(item) => Json(item).into_response(),
+                Some(item) => {
+                    if text_of(&item, "status").as_deref() == Some("completed") {
+                        Json(finish_pull(state, org, project, &id).unwrap_or(item)).into_response()
+                    } else {
+                        Json(item).into_response()
+                    }
+                }
                 None => fail(StatusCode::NOT_FOUND, "demande de tirage introuvable"),
             };
         }
@@ -332,7 +553,7 @@ fn pull_requests(
 
 fn pull_child(rest: &[String]) -> Option<(String, String)> {
     let index = rest.iter().position(|part| {
-        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations")
+        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations" | "reviewers")
     })?;
     let id = rest.get(index.checked_sub(1)?)?.clone();
     if id.eq_ignore_ascii_case("pullrequests") || id.eq_ignore_ascii_case("repositories") {
@@ -351,6 +572,9 @@ fn pull_child_resource(
     body: &[u8],
 ) -> Response {
     let key = format!("git/pullrequests/{pull_id}/{kind}");
+    if kind == "reviewers" {
+        return reviewers(state, method, org, project, pull_id, body);
+    }
     if kind == "iterations" && method == Method::GET {
         let pull = get_item(state, org, project, "git/pullrequests", pull_id);
         let source = pull.as_ref().and_then(|item| text_of(item, "sourceRefName")).unwrap_or_else(|| "refs/heads/feature".into());
@@ -408,6 +632,91 @@ fn pull_child_resource(
     };
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, body: &[u8]) -> Response {
+    let key = format!("git/pullrequests/{pull_id}/reviewers");
+    if method == Method::GET {
+        return Json(Value::Array(list(state, org, project, &key))).into_response();
+    }
+    if method != Method::POST && method != Method::PUT {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let rows = payload.as_array().cloned().unwrap_or_else(|| vec![payload]);
+    let mut stored = Vec::new();
+    for row in rows {
+        let name = text_of(&row, "displayName")
+            .or_else(|| text_of(&row, "uniqueName"))
+            .or_else(|| text_of(&row, "id"))
+            .unwrap_or_else(|| "azurz".into());
+        let vote = row.get("vote").and_then(|value| value.as_i64()).unwrap_or(0);
+        let item = json!({
+            "id": name,
+            "displayName": name,
+            "uniqueName": text_of(&row, "uniqueName").unwrap_or_else(|| name.clone()),
+            "vote": vote,
+            "isRequired": row.get("isRequired").cloned().unwrap_or(json!(false)),
+            "isContainer": false
+        });
+        put_item(state, org, project, &key, item.clone());
+        stored.push(item);
+    }
+    if stored.len() == 1 {
+        Json(stored.pop().unwrap_or(json!({}))).into_response()
+    } else {
+        Json(Value::Array(stored)).into_response()
+    }
+}
+
+fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str) -> Option<Value> {
+    state.write(|db| {
+        let stored = db.project_mut(org, project)?;
+        let mut pull = stored.get_bucket("git/pullrequests", pull_id)?;
+        if pull
+            .get("lastMergeCommit")
+            .and_then(|commit| text_of(commit, "commitId"))
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Some(pull);
+        }
+        let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+        let source = text_of(&pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
+        let target = text_of(&pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+        let refs_key = format!("git/repositories/{repo_id}/refs");
+        let commits_key = format!("git/repositories/{repo_id}/commits");
+        let parent = stored.get_bucket(&refs_key, &target).and_then(|item| text_of(&item, "objectId"));
+        let commit_id = object_id(&format!("merge:{pull_id}:{}", parent.clone().unwrap_or_default()));
+        let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+        stored.put_bucket(
+            &commits_key,
+            json!({
+                "id": commit_id,
+                "commitId": commit_id,
+                "comment": format!("Fusion de {source} dans {target}"),
+                "author": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                "committer": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                "parents": parents
+            }),
+        );
+        stored.put_bucket(
+            &refs_key,
+            json!({
+                "id": target,
+                "name": target,
+                "objectId": commit_id,
+                "newObjectId": commit_id,
+                "success": true
+            }),
+        );
+        pull["status"] = json!("completed");
+        pull["mergeStatus"] = json!("succeeded");
+        pull["closedDate"] = json!("2026-10-29T00:00:00Z");
+        pull["closedBy"] = json!({"displayName": "azurz", "uniqueName": "azurz"});
+        pull["lastMergeCommit"] = json!({"commitId": commit_id});
+        pull["lastMergeSourceCommit"] = json!({"commitId": parent.unwrap_or_default()});
+        Some(stored.put_bucket("git/pullrequests", pull))
+    })
 }
 
 fn security_namespaces(org: &str) -> Value {

@@ -397,6 +397,13 @@ impl Bucket {
                 self.next = numeric + 1;
             }
         }
+        if let Some(previous) = self.items.iter().find_map(|(stored, item)| {
+            (stored == &key || value_key(&item["id"]) == key).then(|| stored.clone())
+        }) {
+            if previous != key {
+                self.items.remove(&previous);
+            }
+        }
         self.items.insert(key, body.clone());
         body
     }
@@ -407,7 +414,7 @@ impl Bucket {
         if let Some(object) = item.as_object_mut() {
             object.entry("id").or_insert(json!("1"));
         }
-        bucket.items.insert("1".into(), item);
+        bucket.put(item);
         bucket
     }
 

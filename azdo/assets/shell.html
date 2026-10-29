@@ -322,10 +322,22 @@
               const threads = await api("GET", root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id + "/threads?api-version=7.1");
               const panel = document.getElementById("thread");
               panel.hidden = false;
+              const threadsPath = root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id;
+              const reviewers = await api("GET", threadsPath + "/reviewers?api-version=7.1");
+              const people = (Array.isArray(reviewers) ? reviewers : reviewers.value || []).map((person) => "<li>" + esc(person.displayName) + " · " + esc(person.vote) + "</li>").join("") || "<li>Aucun relecteur.</li>";
               const notes = (threads.value || []).flatMap((thread) => thread.comments || []).map((note) => "<li>" + esc(note.content) + "</li>").join("") || "<li>Aucun commentaire.</li>";
-              panel.innerHTML = "<h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div>";
+              panel.innerHTML = "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><button id='reviewer-add' type='button'>Ajouter</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div>";
+              panel.querySelector("#reviewer-add").onclick = async () => {
+                await api("POST", threadsPath + "/reviewers?api-version=7.1", { displayName: panel.querySelector("#reviewer-name").value || "azurz", vote: Number(panel.querySelector("#reviewer-vote").value) });
+                row.click();
+              };
+              panel.querySelector("#pr-complete").onclick = async () => {
+                const done = await api("PATCH", threadsPath + "?api-version=7.1", { status: "completed" });
+                row.cells[2].textContent = done.status;
+                row.click();
+              };
               panel.querySelector("#thread-add").onclick = async () => {
-                await api("POST", root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
+                await api("POST", threadsPath + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
                 row.click();
               };
             };
@@ -453,10 +465,58 @@
           };
           return;
         }
+        if (hub === "/_git/commits" || hub === "/_git/pushes" || hub === "/_git/branches") {
+          const repos = await collection("git/repositories");
+          const repo = repos[0];
+          const repoPath = repo ? root + "/git/repositories/" + encodeURIComponent(repo.id) : "";
+          if (hub === "/_git/commits") {
+            const commits = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/commits") : [];
+            const table = commits.length ? "<table><thead><tr><th>Commit</th><th>Commentaire</th><th>Auteur</th></tr></thead><tbody>" + commits.map((item) => "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 8)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
+            view.innerHTML = "<h1>Commits</h1><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<pre id='diff' class='panel' hidden></pre>";
+            document.querySelectorAll("tr.commit").forEach((row) => {
+              row.onclick = async () => {
+                const diff = await api("GET", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/changes?api-version=7.1");
+                const panel = document.getElementById("diff");
+                panel.hidden = false;
+                const lines = (diff.changes || []).map((change) => esc(change.changeType) + " " + esc(change.item?.path)).join("\n") || "Aucun changement.";
+                panel.textContent = lines;
+              };
+            });
+            document.getElementById("push").onclick = async () => {
+              if (!repo) return;
+              const refs = await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs");
+              const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
+              await api("POST", repoPath + "/pushes?api-version=7.1", {
+                refUpdates: [{ name: "refs/heads/main", oldObjectId: main ? main.objectId : "" }],
+                commits: [{
+                  comment: document.getElementById("commit-comment").value || "Mise à jour",
+                  changes: [{ changeType: "add", item: { path: document.getElementById("commit-path").value || "/notes.txt" }, newContent: { content: document.getElementById("commit-content").value || "", contentType: "rawtext" } }],
+                }],
+              });
+              location.reload();
+            };
+            return;
+          }
+          if (hub === "/_git/branches") {
+            const refs = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs") : [];
+            const table = refs.length ? "<table><thead><tr><th>Branche</th><th>Commit</th></tr></thead><tbody>" + refs.map((item) => "<tr><td>" + esc(item.name) + "</td><td><code>" + esc(String(item.objectId || "").slice(0, 8)) + "</code></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune branche.</p>";
+            view.innerHTML = "<h1>Branches</h1><div class='command'><input id='branch-name' placeholder='feature' /><button id='create' type='button'>Créer</button></div>" + table;
+            document.getElementById("create").onclick = async () => {
+              if (!repo) return;
+              const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
+              const name = document.getElementById("branch-name").value || "feature";
+              const refName = name.startsWith("refs/") ? name : "refs/heads/" + name;
+              await api("POST", repoPath + "/refs?api-version=7.1", [{ name: refName, oldObjectId: "0000000000000000000000000000000000000000", newObjectId: main ? main.objectId : "" }]);
+              location.reload();
+            };
+            return;
+          }
+          const pushes = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/pushes") : [];
+          const table = pushes.length ? "<table><thead><tr><th>ID</th><th>Référence</th><th>Commit</th></tr></thead><tbody>" + pushes.map((item) => "<tr><td>" + esc(item.pushId || item.id) + "</td><td>" + esc((item.refUpdates && item.refUpdates[0] && item.refUpdates[0].name) || item.refName || "") + "</td><td>" + esc((item.commits && item.commits[0] && item.commits[0].comment) || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune poussée.</p>";
+          view.innerHTML = "<h1>Poussées</h1>" + table;
+          return;
+        }
         const catalogs = {
-          "/_git/commits": ["Commits", "git/commits", "comment", "Nouveau commit"],
-          "/_git/pushes": ["Poussées", "git/pushes", "refName", "Nouvelle poussée"],
-          "/_git/branches": ["Branches", "git/refs", "name", "refs/heads/"],
           "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
           "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
           "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
