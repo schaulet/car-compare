@@ -969,8 +969,53 @@
         }
         if (hub === "/_git/pulls") {
           const pulls = await collection("git/pullrequests");
+          const wanted = new URLSearchParams(location.search).get("pull");
+          const pull = pulls.find((item) => wanted && String(item.pullRequestId || item.id) === String(wanted)) || pulls[0] || null;
+          let statuses = [];
+          if (pull && pull.repository && pull.repository.id) {
+            const listed = await api("GET", root + "/git/repositories/" + encodeURIComponent(pull.repository.id) + "/pullrequests/" + encodeURIComponent(pull.pullRequestId || pull.id) + "/statuses?api-version=7.1");
+            statuses = listed.value || [];
+          }
+          const statusTable = statuses.length ? "<table id='pr-statuses'><thead><tr><th></th><th>Contexte</th><th>État</th></tr></thead><tbody>" + statuses.map((item) => "<tr><td><button type='button' class='prstatus-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.context && item.context.name) + "' data-pull='" + esc(pull.pullRequestId || pull.id) + "' data-repo='" + esc(pull.repository.id) + "'>Retirer</button></td><td>" + esc(item.context && item.context.name) + "</td><td>" + esc(item.state) + "</td></tr>").join("") + "</tbody></table>" : "<p id='prstatus-empty' class='sub'>Aucun statut.</p>";
           const table = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>État</th><th>Source</th><th>Cible</th></tr></thead><tbody>" + pulls.map((item) => "<tr class='click pr' data-id='" + esc(item.pullRequestId || item.id) + "' data-repo='" + esc(item.repository?.id || "") + "'><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title || item.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.sourceRefName) + "</td><td>" + esc(item.targetRefName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
-          view.innerHTML = "<h1>Demandes de tirage</h1><div class='command'><input id='pr-title' placeholder='Titre' /><input id='pr-source' placeholder='refs/heads/feature' /><button id='create' type='button'>Nouvelle demande de tirage</button></div>" + table + "<section id='thread' class='panel' hidden></section>";
+          view.innerHTML = "<h1>Demandes de tirage</h1><h2>Statuts</h2><div class='command'><input id='prstatus-pull' placeholder='1' value='" + esc(pull ? (pull.pullRequestId || pull.id) : "") + "' /><input id='prstatus-name' placeholder='ci' /><input id='prstatus-genre' placeholder='integration' /><select id='prstatus-state'><option value='succeeded'>réussi</option><option value='failed'>échoué</option><option value='pending'>en attente</option><option value='error'>erreur</option></select><button id='prstatus-add' type='button'>Ajouter</button></div>" + statusTable + "<p id='prstatus-error' class='sub'></p><div class='command'><input id='pr-title' placeholder='Titre' /><input id='pr-source' placeholder='refs/heads/feature' /><button id='create' type='button'>Nouvelle demande de tirage</button></div>" + table + "<section id='thread' class='panel' hidden></section>";
+          document.getElementById("prstatus-add").onclick = async () => {
+            const error = document.getElementById("prstatus-error");
+            error.textContent = "";
+            const pullId = document.getElementById("prstatus-pull").value.trim() || (pull && String(pull.pullRequestId || pull.id)) || "";
+            const current = pulls.find((item) => String(item.pullRequestId || item.id) === pullId) || pull;
+            const name = document.getElementById("prstatus-name").value.trim() || "ci";
+            const genre = document.getElementById("prstatus-genre").value.trim() || "integration";
+            const state = document.getElementById("prstatus-state").value || "succeeded";
+            if (!current || !current.repository || !current.repository.id) {
+              error.textContent = "demande de tirage introuvable";
+              return;
+            }
+            try {
+              await api("POST", root + "/git/repositories/" + encodeURIComponent(current.repository.id) + "/pullrequests/" + encodeURIComponent(current.pullRequestId || current.id) + "/statuses?api-version=7.1", {
+                state: state,
+                description: name,
+                context: { name: name, genre: genre },
+              });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.prstatus-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("prstatus-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/git/repositories/" + encodeURIComponent(button.dataset.repo) + "/pullrequests/" + encodeURIComponent(button.dataset.pull) + "/statuses/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.querySelectorAll("tr.pr").forEach((row) => {
             row.onclick = async () => {
               const repos = await collection("git/repositories");

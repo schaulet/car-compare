@@ -21958,3 +21958,273 @@ async fn removing_one_wiki_comment_keeps_the_sibling_and_the_other_project() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("commentaire introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_pull_request_status_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn repo_of(app: &axum::Router, auth: &str, project: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "GET",
+            &format!("/azurz/{project}/_apis/git/repositories?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        repos["value"][0]["id"].as_str().unwrap().to_string()
+    }
+
+    async fn open_pull(app: &axum::Router, auth: &str, project: &str, repo: &str, title: &str) -> i64 {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/git/repositories/{repo}/pullrequests?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"title":"{title}","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+        pull["pullRequestId"].as_i64().unwrap()
+    }
+
+    let repo = repo_of(&app, &auth, "AzurzDemo").await;
+    let pompe = open_pull(&app, &auth, "AzurzDemo", &repo, "Pompe").await;
+    let ada = open_pull(&app, &auth, "AzurzDemo", &repo, "Ada").await;
+    assert_eq!(pompe, 1);
+    assert_eq!(ada, 2);
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_repo = repo_of(&app, &auth, "Atelier").await;
+    let atelier = open_pull(&app, &auth, "Atelier", &atelier_repo, "Pompe").await;
+    assert_eq!(atelier, 1);
+
+    let statuses = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses?api-version=7.1");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some(r#"{"state":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some(r#"{"state":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some(r#"{"state":"won"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état inconnu"), "{body}");
+    let (status, body, _) = call(&app, "POST", &statuses, Some(&auth), None, "application/json", Some(r#"{"state":"succeeded"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contexte absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &statuses,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded","description":1,"context":{"name":"ci","genre":"integration"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("description absente"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &statuses, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/9/statuses?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded","context":{"name":"ci","genre":"integration"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("demande de tirage introuvable"), "{body}");
+
+    async fn mark(app: &axum::Router, auth: &str, project: &str, repo: &str, pull: i64, name: &str, state_name: &str) -> serde_json::Value {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/git/repositories/{repo}/pullrequests/{pull}/statuses?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"state":"{state_name}","description":" {name} ","context":{{"name":" {name} ","genre":" integration "}}}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let ci = mark(&app, &auth, "AzurzDemo", &repo, pompe, "ci", "Succeeded").await;
+    assert_eq!(ci["id"], 1);
+    assert_eq!(ci["state"], "succeeded");
+    assert_eq!(ci["description"], "ci");
+    assert_eq!(ci["context"]["name"], "ci");
+    assert_eq!(ci["context"]["genre"], "integration");
+    assert!(ci["url"].as_str().unwrap().contains(&format!("/pullrequests/{pompe}/statuses/1")), "{ci}");
+    let audit = mark(&app, &auth, "AzurzDemo", &repo, pompe, "audit", "failed").await;
+    assert_eq!(audit["id"], 2);
+    assert_eq!(audit["state"], "failed");
+    let ada_status = mark(&app, &auth, "AzurzDemo", &repo, ada, "ci", "succeeded").await;
+    assert_eq!(ada_status["id"], 1);
+    let atelier_status = mark(&app, &auth, "Atelier", &atelier_repo, atelier, "ci", "succeeded").await;
+    assert_eq!(atelier_status["id"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/9?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("statut introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/abc?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("statut introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/1/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &statuses, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], 2);
+    assert_eq!(left["value"][0]["context"]["name"], "audit");
+    assert_eq!(left["value"][0]["state"], "failed");
+    let lint = mark(&app, &auth, "AzurzDemo", &repo, pompe, "lint", "pending").await;
+    assert_eq!(lint["id"], 3);
+    assert_eq!(lint["state"], "pending");
+    let (status, body, _) = call(&app, "GET", &statuses, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["count"], 2);
+    assert_eq!(again["value"][0]["id"], 2);
+    assert_eq!(again["value"][1]["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("statut introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["title"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{ada}/statuses/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["context"]["name"], "ci");
+    assert_eq!(ada_kept["state"], "succeeded");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{ada}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_pull["title"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/git/repositories/{atelier_repo}/pullrequests/{atelier}/statuses/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["context"]["name"], "ci");
+    assert_eq!(other["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pullrequests/{pompe}/statuses/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("statut introuvable"), "{body}");
+}

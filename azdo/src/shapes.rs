@@ -2062,6 +2062,128 @@ fn visible_thread(mut thread: Value) -> Value {
     thread
 }
 
+fn pull_statuses(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    pull_id: &str,
+    tail: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let key = format!("git/pullrequests/{pull_id}/statuses");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by_key(|item| json_i64(&item["id"]).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_pull_status(org, project, &repo_id, pull_id, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let item = match pull_status_create(body) {
+                Ok(item) => item,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = list(state, org, project, &key)
+                .into_iter()
+                .filter_map(|row| json_i64(&row["id"]))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let stored = {
+                let mut item = item;
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("id".into(), json!(next));
+                }
+                item
+            };
+            put_item(state, org, project, &key, stored.clone());
+            return Json(dress_pull_status(org, project, &repo_id, pull_id, stored)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if tail.len() != 1 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "statut introuvable");
+    }
+    let Ok(status_id) = tail[0].parse::<i64>() else {
+        return fail(StatusCode::NOT_FOUND, "statut introuvable");
+    };
+    let id = status_id.to_string();
+    let Some(item) = get_item(state, org, project, &key, &id) else {
+        return fail(StatusCode::NOT_FOUND, "statut introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_pull_status(org, project, &repo_id, pull_id, item)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, &key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "statut introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn pull_status_create(body: &[u8]) -> Result<Value, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("état absent");
+    };
+    let state_name = match object.get("state").and_then(|value| value.as_str()).map(str::trim) {
+        Some(text) if !text.is_empty() => git_status_state(text).ok_or("état inconnu")?,
+        _ => return Err("état absent"),
+    };
+    if let Some(description) = object.get("description") {
+        if !description.is_string() {
+            return Err("description absente");
+        }
+    }
+    let Some(context) = object.get("context").and_then(|value| value.as_object()) else {
+        return Err("contexte absent");
+    };
+    let name = context.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() || context.get("name").is_some_and(|value| !value.is_string()) {
+        return Err("contexte absent");
+    }
+    let genre = match context.get("genre") {
+        None => "",
+        Some(value) => value.as_str().map(str::trim).ok_or("contexte absent")?,
+    };
+    let description = object.get("description").and_then(|value| value.as_str()).unwrap_or("").trim();
+    Ok(json!({
+        "state": state_name,
+        "description": description,
+        "context": {"name": name, "genre": genre},
+        "creationDate": "2026-10-29T00:00:00Z",
+        "updatedDate": "2026-10-29T00:00:00Z",
+        "createdBy": {"displayName": "azurz", "uniqueName": "azurz"}
+    }))
+}
+
+fn dress_pull_status(org: &str, project: &str, repo_id: &str, pull_id: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/statuses/{id}")),
+        );
+    }
+    item
+}
+
 fn pull_child_resource(
     state: &AppState,
     method: &Method,
@@ -2090,6 +2212,9 @@ fn pull_child_resource(
     }
     if kind == "threads" {
         return pull_threads(state, method, org, project, pull_id, tail, body);
+    }
+    if kind == "statuses" {
+        return pull_statuses(state, method, org, project, pull_id, tail, body);
     }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
