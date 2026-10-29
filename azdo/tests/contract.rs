@@ -1768,3 +1768,187 @@ async fn build_timeline_follows_status_and_accepts_agent_records() {
         .iter()
         .any(|record| record["name"] == "Compile" && record["result"] == "succeeded"));
 }
+
+#[tokio::test]
+async fn branch_policies_reject_then_approve_a_pull_request() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/policy/types?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let types: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(types["value"].as_array().unwrap().iter().any(|item| item["displayName"] == "Minimum number of reviewers"));
+    assert!(types["value"].as_array().unwrap().iter().any(|item| item["id"] == "0609b952-1397-4640-95ec-e00a01b2c241"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"isEnabled":true,"isBlocking":true,"type":{{"id":"fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"}},"settings":{{"minimumApproverCount":1,"scope":[{{"repositoryId":"{repo_id}","refName":"refs/heads/main","matchKind":"Exact"}}]}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let configuration: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(configuration["type"]["displayName"], "Minimum number of reviewers");
+    assert_eq!(configuration["isBlocking"], true);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Strategie pompe","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let artifact = format!("vstfs:///CodeReview/CodeReviewId/azurz-demo/{pull_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/evaluations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"{artifact}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let evaluations: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reviewers = evaluations["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["configuration"]["type"]["displayName"] == "Minimum number of reviewers")
+        .unwrap();
+    assert_eq!(reviewers["status"], "rejected");
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"azurz","vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let encoded = artifact.replace('/', "%2F").replace(':', "%3A");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/policy/evaluations?artifactId={encoded}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let evaluations: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reviewers = evaluations["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["configuration"]["type"]["displayName"] == "Minimum number of reviewers")
+        .unwrap();
+    assert_eq!(reviewers["status"], "approved");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"isEnabled":true,"isBlocking":true,"type":{{"id":"0609b952-1397-4640-95ec-e00a01b2c241"}},"settings":{{"buildDefinitionId":1,"scope":[{{"repositoryId":"{repo_id}","refName":"refs/heads/main","matchKind":"Exact"}}]}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/evaluations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"{artifact}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let evaluations: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build = evaluations["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["configuration"]["type"]["displayName"] == "Build")
+        .unwrap();
+    assert_eq!(build["status"], "rejected");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/feature"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = queued["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/policy/evaluations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"{artifact}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let evaluations: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(evaluations["value"].as_array().unwrap().iter().all(|item| item["status"] == "approved"));
+}

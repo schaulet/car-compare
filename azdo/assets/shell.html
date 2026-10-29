@@ -109,6 +109,7 @@
       <a href="/__ORG__/__PROJECT__/_git/pushes">Poussées</a>
       <a href="/__ORG__/__PROJECT__/_git/branches">Branches</a>
       <a href="/__ORG__/__PROJECT__/_git/pulls">Demandes de tirage</a>
+      <a href="/__ORG__/__PROJECT__/_policies">Stratégies</a>
       <a href="/__ORG__/__PROJECT__/_tfvc">TFVC</a>
       <div class="group">Pipelines</div>
       <a href="/__ORG__/__PROJECT__/_build">Pipelines</a>
@@ -619,25 +620,69 @@
           };
           return;
         }
-        const catalogs = {
-          "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
-        };
-        if (catalogs[hub]) {
-          const heading = catalogs[hub][0];
-          const area = catalogs[hub][1];
-          const field = catalogs[hub][2];
-          const label = catalogs[hub][3];
-          const items = await collection(area);
-          const table = items.length ? "<table><thead><tr><th>ID</th><th>Nom</th></tr></thead><tbody>" + items.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item[field] || item.name || item.title || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun enregistrement.</p>";
-          view.innerHTML = "<h1>" + heading + "</h1><div class='command'><input id='new-name' placeholder='" + esc(label) + "' /><button id='create' type='button'>Créer</button></div>" + table;
-          document.getElementById("create").onclick = async () => {
-            const name = document.getElementById("new-name").value || label;
-            const payload = {};
-            payload[field] = name;
-            payload.name = name;
-            await api("POST", root + "/" + area + "?api-version=7.1", payload);
+        if (hub === "/_policies") {
+          const [configurations, pulls, repos] = await Promise.all([
+            collection("policy/configurations"),
+            collection("git/pullrequests"),
+            collection("git/repositories"),
+          ]);
+          const repo = repos[0];
+          const rows = configurations.length ? "<table><thead><tr><th>ID</th><th>Stratégie</th><th>Bloquante</th><th>Branche</th></tr></thead><tbody>" + configurations.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.type && item.type.displayName) + "</td><td>" + esc(item.isBlocking ? "oui" : "non") + "</td><td>" + esc((item.settings && item.settings.scope && item.settings.scope[0] && item.settings.scope[0].refName) || "toutes") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune stratégie.</p>";
+          const requests = pulls.length ? "<table><thead><tr><th>ID</th><th>Titre</th><th>Cible</th><th></th></tr></thead><tbody>" + pulls.map((item) => "<tr><td>" + esc(item.pullRequestId || item.id) + "</td><td>" + esc(item.title) + "</td><td>" + esc(item.targetRefName) + "</td><td><button type='button' class='evaluate' data-id='" + esc(item.pullRequestId || item.id) + "'>Évaluer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de tirage.</p>";
+          view.innerHTML = "<h1>Stratégies de branche</h1><div class='command'><select id='policy-type'><option value='fa4e907d-c16b-4a4c-9dfa-4906e5d171dd'>Relecteurs minimum</option><option value='0609b952-1397-4640-95ec-e00a01b2c241'>Build</option><option value='cbdc66da-9728-4af8-aada-9a5a32e4a226'>Statut</option><option value='c6a1889d-b943-4856-b76f-9e46bb6b0df2'>Commentaires</option></select><input id='policy-ref' placeholder='refs/heads/main' value='refs/heads/main' /><input id='policy-count' type='number' min='1' value='1' /><button id='policy-create' type='button'>Créer</button></div>" + rows + "<h2>Évaluation</h2>" + requests + "<section id='policy-result' class='panel' hidden></section>";
+          document.getElementById("policy-create").onclick = async () => {
+            if (!repo) return;
+            const typeId = document.getElementById("policy-type").value;
+            const refName = document.getElementById("policy-ref").value || "refs/heads/main";
+            const settings = { scope: [{ repositoryId: repo.id, refName: refName, matchKind: "Exact" }] };
+            if (typeId === "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd") settings.minimumApproverCount = Number(document.getElementById("policy-count").value || 1);
+            if (typeId === "0609b952-1397-4640-95ec-e00a01b2c241") settings.buildDefinitionId = 1;
+            if (typeId === "cbdc66da-9728-4af8-aada-9a5a32e4a226") {
+              settings.statusName = "azurz";
+              settings.statusGenre = "continuous-integration";
+            }
+            await api("POST", root + "/policy/configurations?api-version=7.1", { isEnabled: true, isBlocking: true, type: { id: typeId }, settings: settings });
             location.reload();
           };
+          document.querySelectorAll("button.evaluate").forEach((button) => {
+            button.onclick = async () => {
+              const artifactId = "vstfs:///CodeReview/CodeReviewId/" + project + "/" + button.dataset.id;
+              const page = await api("POST", root + "/policy/evaluations?api-version=7.1", { artifactId: artifactId });
+              const host = document.getElementById("policy-result");
+              host.hidden = false;
+              const lines = (page.value || []).map((item) => "<li data-status='" + esc(item.status) + "'>" + esc(item.configuration && item.configuration.type && item.configuration.type.displayName) + " — " + esc(item.status) + "</li>").join("") || "<li>Aucune stratégie applicable.</li>";
+              host.innerHTML = "<h2>Demande " + esc(button.dataset.id) + "</h2><ul id='policy-lines'>" + lines + "</ul>";
+            };
+          });
+          return;
+        }
+        if (hub === "/_testPlans/runs") {
+          const params = new URLSearchParams(location.search);
+          const runId = params.get("run");
+          const runs = await collection("test/runs");
+          const table = runs.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Réussis</th></tr></thead><tbody>" + runs.map((item) => "<tr class='click run' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.passedTests) + " / " + esc(item.totalTests) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
+          let detail = "";
+          if (runId) {
+            const results = await collection("test/runs/" + encodeURIComponent(runId) + "/results");
+            const resultRows = results.length ? "<table><thead><tr><th>Cas</th><th>Résultat</th><th>État</th></tr></thead><tbody>" + results.map((item) => "<tr><td>" + esc(item.testCase && item.testCase.name || item.testCaseTitle || item.id) + "</td><td>" + esc(item.outcome) + "</td><td>" + esc(item.state) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun résultat.</p>";
+            detail = "<h2>Résultats</h2><div class='command'><input id='result-name' placeholder='Cas de test' /><button id='result-add' type='button'>Enregistrer réussi</button></div>" + resultRows;
+          }
+          view.innerHTML = "<h1>Exécutions</h1><div class='command'><input id='run-name' placeholder='Nouvelle exécution' /><button id='run-create' type='button'>Créer</button></div>" + table + detail;
+          document.getElementById("run-create").onclick = async () => {
+            await api("POST", root + "/test/runs?api-version=7.1", { name: document.getElementById("run-name").value || "Exécution" });
+            location.href = location.pathname;
+          };
+          document.querySelectorAll("tr.run").forEach((row) => {
+            row.onclick = () => { location.href = location.pathname + "?run=" + encodeURIComponent(row.dataset.id); };
+          });
+          const add = document.getElementById("result-add");
+          if (add) {
+            add.onclick = async () => {
+              const name = document.getElementById("result-name").value || "Cas";
+              await api("POST", root + "/test/runs/" + encodeURIComponent(runId) + "/results?api-version=7.1", [{ outcome: "Passed", testCase: { name: name } }]);
+              location.href = location.pathname + "?run=" + encodeURIComponent(runId);
+            };
+          }
           return;
         }
         if (hub === "/_settings") {

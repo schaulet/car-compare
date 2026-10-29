@@ -38,6 +38,9 @@ pub fn dispatch(
         ("release", "definitions") => release_definitions(state, method, org, project, rest, body),
         ("release", "releases") => release_releases(state, method, org, project, rest, body),
         ("release", "approvals") => release_approvals(state, method, org, project, rest, body),
+        ("policy", "types") => policy_types(method, org, project, rest),
+        ("policy", "configurations") => policy_configurations(state, method, org, project, rest, body),
+        ("policy", "evaluations") => policy_evaluations(state, method, org, project, query, body),
         _ => return None,
     };
     Some(response)
@@ -1757,6 +1760,289 @@ fn dress_feed(org: &str, project: &str, mut item: Value) -> Value {
     item
 }
 
+fn policy_type_catalog() -> Vec<Value> {
+    vec![
+        json!({"id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd", "displayName": "Minimum number of reviewers"}),
+        json!({"id": "0609b952-1397-4640-95ec-e00a01b2c241", "displayName": "Build"}),
+        json!({"id": "cbdc66da-9728-4af8-aada-9a5a32e4a226", "displayName": "Status"}),
+        json!({"id": "c6a1889d-b943-4856-b76f-9e46bb6b0df2", "displayName": "Comment requirements"}),
+    ]
+}
+
+fn policy_types(method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let types: Vec<Value> = policy_type_catalog()
+        .into_iter()
+        .map(|mut item| {
+            let id = value_key(&item["id"]);
+            if let Some(object) = item.as_object_mut() {
+                object.insert("url".into(), json!(format!("/{org}/{project}/_apis/policy/types/{id}")));
+            }
+            item
+        })
+        .collect();
+    if rest.len() >= 3 {
+        let id = &rest[2];
+        return match types.into_iter().find(|item| value_key(&item["id"]) == *id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "type de stratégie introuvable"),
+        };
+    }
+    Json(page(types)).into_response()
+}
+
+fn policy_configurations(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "policy/configurations";
+    if rest.len() == 2 && method == Method::GET {
+        let value = list(state, org, project, key)
+            .into_iter()
+            .map(|item| dress_policy(org, project, item))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 2 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let type_id = text_of(&payload["type"], "id").unwrap_or_default();
+        if policy_type_catalog().iter().all(|item| text_of(item, "id").as_deref() != Some(type_id.as_str())) {
+            return fail(StatusCode::BAD_REQUEST, "type de stratégie inconnu");
+        }
+        let next = list(state, org, project, key).len() as i64 + 1;
+        let item = dress_policy(
+            org,
+            project,
+            json!({
+                "id": next,
+                "revision": 1,
+                "isEnabled": payload.get("isEnabled").cloned().unwrap_or(json!(true)),
+                "isBlocking": payload.get("isBlocking").cloned().unwrap_or(json!(true)),
+                "isDeleted": false,
+                "type": {"id": type_id},
+                "settings": payload.get("settings").cloned().unwrap_or(json!({})),
+                "createdDate": "2026-10-29T00:00:00Z",
+                "createdBy": {"displayName": "azurz"}
+            }),
+        );
+        put_item(state, org, project, key, item.clone());
+        return Json(item).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("");
+    if method == Method::GET {
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(dress_policy(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "stratégie introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, key, id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "stratégie introuvable")
+        };
+    }
+    if method == Method::PUT || method == Method::PATCH {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        return match get_item(state, org, project, key, id) {
+            Some(mut item) => {
+                if let Some(object) = item.as_object_mut() {
+                    if let Some(value) = payload.get("isEnabled") {
+                        object.insert("isEnabled".into(), value.clone());
+                    }
+                    if let Some(value) = payload.get("isBlocking") {
+                        object.insert("isBlocking".into(), value.clone());
+                    }
+                    if let Some(value) = payload.get("settings") {
+                        object.insert("settings".into(), value.clone());
+                    }
+                    if let Some(type_id) = text_of(&payload["type"], "id") {
+                        object.insert("type".into(), json!({"id": type_id}));
+                    }
+                    let revision = object.get("revision").and_then(|value| value.as_i64()).unwrap_or(1) + 1;
+                    object.insert("revision".into(), json!(revision));
+                }
+                let dressed = dress_policy(org, project, item);
+                put_item(state, org, project, key, dressed.clone());
+                Json(dressed).into_response()
+            }
+            None => fail(StatusCode::NOT_FOUND, "stratégie introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn policy_evaluations(state: &AppState, method: &Method, org: &str, project: &str, query: &str, body: &[u8]) -> Response {
+    if method != Method::GET && method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let artifact = if method == Method::POST {
+        text_of(&payload, "artifactId").unwrap_or_default()
+    } else {
+        query_param(query, "artifactId").map(crate::http::pct_decode).unwrap_or_default()
+    };
+    if artifact.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "artefact absent");
+    }
+    let Some(pull_id) = pull_id_from_artifact(&artifact) else {
+        return fail(StatusCode::BAD_REQUEST, "artefact inconnu");
+    };
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", &pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let target = text_of(&pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+    let value = list(state, org, project, "policy/configurations")
+        .into_iter()
+        .map(|item| dress_policy(org, project, item))
+        .filter(|item| scope_matches(item.get("settings").unwrap_or(&Value::Null), &repo_id, &target))
+        .map(|item| {
+            let configuration_id = value_key(&item["id"]);
+            let status = evaluate_policy(state, org, project, &item, &pull);
+            json!({
+                "evaluationId": format!("{configuration_id}-{pull_id}"),
+                "artifactId": artifact,
+                "configuration": item,
+                "status": status,
+                "startedDate": "2026-10-29T00:00:00Z",
+                "completedDate": "2026-10-29T00:00:01Z"
+            })
+        })
+        .collect();
+    Json(page(value)).into_response()
+}
+
+fn pull_id_from_artifact(artifact: &str) -> Option<String> {
+    let tail = artifact.rsplit('/').next().unwrap_or("").trim();
+    if tail.is_empty() || tail.eq_ignore_ascii_case("CodeReviewId") {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+fn scope_matches(settings: &Value, repo_id: &str, target_ref: &str) -> bool {
+    let Some(scopes) = settings.get("scope").and_then(|value| value.as_array()) else {
+        return true;
+    };
+    if scopes.is_empty() {
+        return true;
+    }
+    scopes.iter().any(|scope| {
+        let repository = text_of(scope, "repositoryId").unwrap_or_default();
+        if !repository.is_empty() && repository != repo_id {
+            return false;
+        }
+        let ref_name = text_of(scope, "refName").unwrap_or_default();
+        if ref_name.is_empty() {
+            return true;
+        }
+        let kind = text_of(scope, "matchKind").unwrap_or_else(|| "Exact".into());
+        if kind.eq_ignore_ascii_case("Prefix") {
+            target_ref.starts_with(&ref_name)
+        } else {
+            target_ref == ref_name
+        }
+    })
+}
+
+fn evaluate_policy(state: &AppState, org: &str, project: &str, configuration: &Value, pull: &Value) -> String {
+    if configuration.get("isEnabled").and_then(|value| value.as_bool()) == Some(false) {
+        return "notApplicable".into();
+    }
+    let type_id = text_of(&configuration["type"], "id").unwrap_or_default();
+    let settings = configuration.get("settings").cloned().unwrap_or(json!({}));
+    let pull_id = value_key(&pull["pullRequestId"]);
+    let pull_key = if pull_id.is_empty() { value_key(&pull["id"]) } else { pull_id };
+    match type_id.as_str() {
+        "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd" => {
+            let needed = settings.get("minimumApproverCount").and_then(|value| value.as_i64()).unwrap_or(1);
+            let approvers = list(state, org, project, &format!("git/pullrequests/{pull_key}/reviewers"))
+                .into_iter()
+                .filter(|reviewer| reviewer.get("vote").and_then(|value| value.as_i64()).unwrap_or(0) >= 10)
+                .count() as i64;
+            if approvers >= needed { "approved" } else { "rejected" }
+        }
+        "0609b952-1397-4640-95ec-e00a01b2c241" => build_policy_status(state, org, project, pull, &settings),
+        "cbdc66da-9728-4af8-aada-9a5a32e4a226" => status_policy_status(state, org, project, &pull_key, &settings),
+        "c6a1889d-b943-4856-b76f-9e46bb6b0df2" => comment_policy_status(state, org, project, &pull_key),
+        _ => "queued",
+    }
+    .into()
+}
+
+fn build_policy_status(state: &AppState, org: &str, project: &str, pull: &Value, settings: &Value) -> &'static str {
+    let source = text_of(pull, "sourceRefName").unwrap_or_default();
+    let definition = settings.get("buildDefinitionId").and_then(|value| value.as_i64());
+    let mut builds: Vec<Value> = list(state, org, project, "build/builds")
+        .into_iter()
+        .filter(|build| {
+            text_of(build, "sourceBranch").as_deref() == Some(source.as_str())
+                && definition
+                    .map(|id| build.get("definition").and_then(|item| item.get("id")).and_then(|value| value.as_i64()) == Some(id))
+                    .unwrap_or(true)
+        })
+        .collect();
+    builds.sort_by_key(|build| build.get("id").and_then(|value| value.as_i64()).unwrap_or(0));
+    let Some(build) = builds.last() else {
+        return "rejected";
+    };
+    match text_of(build, "status").as_deref() {
+        Some("completed") => {
+            if text_of(build, "result").as_deref() == Some("succeeded") {
+                "approved"
+            } else {
+                "rejected"
+            }
+        }
+        _ => "queued",
+    }
+}
+
+fn status_policy_status(state: &AppState, org: &str, project: &str, pull_id: &str, settings: &Value) -> &'static str {
+    let name = text_of(settings, "statusName").or_else(|| text_of(settings, "defaultDisplayName"));
+    let genre = text_of(settings, "statusGenre");
+    let statuses = list(state, org, project, &format!("git/pullrequests/{pull_id}/statuses"));
+    let latest = statuses.into_iter().filter(|item| {
+        let context = &item["context"];
+        name.as_ref().map(|wanted| text_of(context, "name").as_deref() == Some(wanted.as_str())).unwrap_or(true)
+            && genre.as_ref().map(|wanted| text_of(context, "genre").as_deref() == Some(wanted.as_str())).unwrap_or(true)
+    }).max_by_key(|item| item.get("id").and_then(|value| value.as_i64()).unwrap_or(0));
+    match latest.as_ref().and_then(|item| text_of(item, "state")).as_deref() {
+        Some("succeeded") | Some("notApplicable") => "approved",
+        Some("pending") | Some("notSet") => "queued",
+        Some(_) => "rejected",
+        None => "rejected",
+    }
+}
+
+fn comment_policy_status(state: &AppState, org: &str, project: &str, pull_id: &str) -> &'static str {
+    let threads = list(state, org, project, &format!("git/pullrequests/{pull_id}/threads"));
+    if threads.is_empty() || threads.iter().all(|thread| text_of(thread, "status").as_deref() != Some("active")) {
+        "approved"
+    } else {
+        "rejected"
+    }
+}
+
+fn dress_policy(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    let type_id = text_of(&item["type"], "id").unwrap_or_default();
+    let display = policy_type_catalog()
+        .into_iter()
+        .find(|kind| text_of(kind, "id").as_deref() == Some(type_id.as_str()))
+        .and_then(|kind| text_of(&kind, "displayName"))
+        .unwrap_or_else(|| type_id.clone());
+    if let Some(object) = item.as_object_mut() {
+        object.entry("isEnabled").or_insert(json!(true));
+        object.entry("isBlocking").or_insert(json!(true));
+        object.entry("isDeleted").or_insert(json!(false));
+        object.entry("revision").or_insert(json!(1));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/policy/configurations/{id}")));
+        object.insert("type".into(), json!({"id": type_id, "displayName": display}));
+    }
+    item
+}
+
 fn task_agents(state: &AppState, method: &Method, org: &str, project: Option<&str>, rest: &[String]) -> Response {
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
@@ -1925,6 +2211,14 @@ fn put_item(state: &AppState, org: &str, project: &str, key: &str, item: Value) 
             bucket.put(item);
         }
     });
+}
+
+fn delete_item(state: &AppState, org: &str, project: &str, key: &str, id: &str) -> bool {
+    state.write(|db| {
+        db.project_mut(org, project)
+            .and_then(|stored| stored.buckets.get_mut(key))
+            .is_some_and(|bucket| bucket.remove(id))
+    })
 }
 
 fn patch_item(state: &AppState, org: &str, project: &str, key: &str, id: &str, body: &Value) -> Option<Value> {
