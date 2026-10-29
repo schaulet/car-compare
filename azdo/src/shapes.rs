@@ -39,6 +39,7 @@ pub fn dispatch(
         }
         ("distributedtask", "variablegroups") => variable_groups(state, method, org, project, rest, body),
         ("distributedtask", "securefiles") => secure_files(state, method, org, project, rest, query, body),
+        ("distributedtask", "taskgroups") => task_groups(state, method, org, project, rest, body),
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
         ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
@@ -6963,6 +6964,144 @@ fn dress_group(org: &str, project: &str, item: &Value) -> Value {
         "variableGroupProjectReferences": [{"name": name, "projectReference": {"name": project}}],
         "url": format!("/{org}/{project}/_apis/distributedtask/variablegroups/{id}")
     })
+}
+
+fn task_groups(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "distributedtask/taskgroups";
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by_key(|item| item.get("id").and_then(json_i64).unwrap_or(0));
+            let value = rows.into_iter().map(|item| dress_task_group(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_task_group(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "groupe de tâches introuvable");
+    }
+    let id = pct_decode(&rest[2]).trim().to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "groupe de tâches introuvable");
+    }
+    if method == &Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_task_group(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "groupe de tâches introuvable"),
+        };
+    }
+    if method == &Method::DELETE {
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe de tâches introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_task_group(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    let tasks = match task_group_steps(object.get("tasks")) {
+        Ok(tasks) => tasks,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let description = object.get("description").and_then(|value| value.as_str()).unwrap_or("").trim().to_string();
+    let next = list(state, org, project, "distributedtask/taskgroups")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(json_i64))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let item = json!({
+        "id": next,
+        "name": name,
+        "description": description,
+        "tasks": tasks,
+        "category": "Build",
+        "author": "azurz",
+        "revision": 1,
+        "version": {"major": 1, "minor": 0, "patch": 0, "isTest": false}
+    });
+    put_item(state, org, project, "distributedtask/taskgroups", item.clone());
+    Json(dress_task_group(org, project, item)).into_response()
+}
+
+fn task_group_steps(value: Option<&Value>) -> Result<Vec<Value>, &'static str> {
+    let Some(value) = value else {
+        return Err("tâche absente");
+    };
+    let Some(rows) = value.as_array() else {
+        return Err("tâche absente");
+    };
+    if rows.is_empty() {
+        return Err("tâche absente");
+    }
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return Err("tâche absente");
+        };
+        let display = object.get("displayName").and_then(|item| item.as_str()).map(str::trim).unwrap_or("");
+        if display.is_empty() {
+            return Err("tâche absente");
+        }
+        let task = object.get("task").and_then(|item| item.as_object());
+        let task_id = task
+            .and_then(|item| item.get("id"))
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or("cmd");
+        let version = task
+            .and_then(|item| item.get("versionSpec"))
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .unwrap_or("1.*");
+        let inputs = object.get("inputs").cloned().filter(|item| item.is_object()).unwrap_or_else(|| json!({}));
+        let enabled = object.get("enabled").and_then(|item| item.as_bool()).unwrap_or(true);
+        out.push(json!({
+            "displayName": display,
+            "enabled": enabled,
+            "inputs": inputs,
+            "task": {"id": task_id, "versionSpec": version}
+        }));
+    }
+    Ok(out)
+}
+
+fn dress_task_group(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.entry("description").or_insert(json!(""));
+        object.entry("category").or_insert(json!("Build"));
+        object.entry("author").or_insert(json!("azurz"));
+        object.entry("revision").or_insert(json!(1));
+        object.entry("version").or_insert(json!({"major": 1, "minor": 0, "patch": 0, "isTest": false}));
+        object.entry("tasks").or_insert(json!([]));
+        object.insert("project".into(), json!({"name": project}));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/distributedtask/taskgroups/{id}")),
+        );
+    }
+    item
 }
 
 fn variable_groups(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {

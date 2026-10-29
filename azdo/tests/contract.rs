@@ -19920,3 +19920,224 @@ async fn removing_one_test_configuration_keeps_the_sibling_and_the_other_project
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("configuration introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_task_group_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let groups = "/azurz/AzurzDemo/_apis/distributedtask/taskgroups?api-version=7.1";
+    let (status, body, _) = call(&app, "POST", groups, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", groups, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        groups,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        groups,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","tasks":"echo"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("tâche absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        groups,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","tasks":[{"displayName":"  "}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("tâche absente"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", groups, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/taskgroups/1/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        groups,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" pompe ","tasks":[{"displayName":" echo ","inputs":{"script":"echo"}}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_i64().unwrap();
+    assert_eq!(pompe["name"], "pompe");
+    assert_eq!(pompe["tasks"][0]["displayName"], "echo");
+    assert_eq!(pompe["tasks"][0]["task"]["id"], "cmd");
+    assert!(pompe["url"].as_str().unwrap().contains("/_apis/distributedtask/taskgroups/"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        groups,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ada","tasks":[{"displayName":"Linux","task":{"id":"script","versionSpec":"2.*"}}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_id = ada["id"].as_i64().unwrap();
+    assert_ne!(pompe_id, ada_id);
+    assert_eq!(ada["tasks"][0]["task"]["versionSpec"], "2.*");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/distributedtask/taskgroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","tasks":[{"displayName":"nord"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_id = atelier["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","type":"Vsts","variables":{"host":{"value":"ignition","isSecret":false}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let variable_group: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let variable_id = variable_group["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/taskgroups/99?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe de tâches introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/taskgroups/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", groups, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], ada_id);
+    assert_eq!(left["value"][0]["name"], "ada");
+    assert_eq!(left["value"][0]["tasks"][0]["displayName"], "Linux");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/taskgroups/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["name"], "ada");
+    assert_eq!(sibling["project"]["name"], "AzurzDemo");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/distributedtask/taskgroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 1);
+    assert_eq!(other["value"][0]["id"], atelier_id);
+    assert_eq!(other["value"][0]["name"], "pompe");
+    assert_eq!(other["value"][0]["tasks"][0]["displayName"], "nord");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{variable_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_group: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_group["name"], "Ligne");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/taskgroups/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe de tâches introuvable"), "{body}");
+}

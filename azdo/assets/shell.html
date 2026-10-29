@@ -1840,6 +1840,9 @@
           return;
         }
         if (hub === "/_library") {
+          const taskGroups = await api("GET", root + "/distributedtask/taskgroups?api-version=7.1").catch(() => ({ value: [] }));
+          const taskRows = taskGroups.value || [];
+          const taskGroupTable = taskRows.length ? "<table id='task-groups'><thead><tr><th></th><th>Nom</th><th>Tâche</th></tr></thead><tbody>" + taskRows.map((item) => "<tr><td><button type='button' class='tgroup-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc((item.tasks && item.tasks[0] && item.tasks[0].displayName) || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='task-group-empty' class='sub'>Aucun groupe de tâches.</p>";
           const groups = await collection("distributedtask/variablegroups");
           function variableLine(key, variable) {
             const shown = variable && variable.isSecret ? "••••" : ((variable && variable.value) || "");
@@ -1852,7 +1855,7 @@
           }).join("") + "</tbody></table>" : "<p id='vg-empty' class='sub'>Aucun groupe de variables.</p>";
           const files = await collection("distributedtask/securefiles");
           const secure = files.length ? "<table id='secure-files'><thead><tr><th></th><th>Nom</th><th></th></tr></thead><tbody>" + files.map((item) => "<tr class='secure'><td><button type='button' class='secure-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td><button type='button' class='secure-read' data-id='" + esc(item.id) + "'>Lire</button></td></tr>").join("") + "</tbody></table>" : "<p id='secure-empty' class='sub'>Aucun fichier sécurisé.</p>";
-          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<p id='vg-error' class='sub'></p><section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Pompe' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div><p id='secure-error' class='sub'></p>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Bibliothèque</h1><h2>Groupes de tâches</h2><div class='command'><input id='tgroup-name' placeholder='pompe' /><input id='tgroup-task' placeholder='echo' /><button id='tgroup-add' type='button'>Ajouter</button></div>" + taskGroupTable + "<p id='tgroup-error' class='sub'></p><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><label><input id='vg-secret' type='checkbox' /> Secret</label><button id='create' type='button'>Créer</button></div>" + table + "<p id='vg-error' class='sub'></p><section id='vg-card' class='panel' hidden></section><h2>Fichiers sécurisés</h2><div class='command'><input id='secure-name' placeholder='Pompe' /><input id='secure-content' placeholder='Contenu' /><button id='secure-add' type='button'>Déposer</button></div><p id='secure-error' class='sub'></p>" + secure + "<pre id='secure-preview' class='panel' hidden></pre>";
           const selected = new URLSearchParams(location.search).get("group") || "";
           async function openGroup(id) {
             const item = await api("GET", root + "/distributedtask/variablegroups/" + encodeURIComponent(id) + "?api-version=7.1");
@@ -1889,6 +1892,35 @@
               } catch (err) {
                 error.textContent = err.message;
               }
+            };
+          });
+          document.getElementById("tgroup-add").onclick = async () => {
+            const error = document.getElementById("tgroup-error");
+            error.textContent = "";
+            const name = document.getElementById("tgroup-name").value.trim() || "pompe";
+            const task = document.getElementById("tgroup-task").value.trim() || "echo";
+            try {
+              await api("POST", root + "/distributedtask/taskgroups?api-version=7.1", {
+                name,
+                tasks: [{ displayName: task, task: { id: "cmd", versionSpec: "1.*" }, inputs: { script: task } }],
+              });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.tgroup-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("tgroup-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/distributedtask/taskgroups/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
             };
           });
           document.getElementById("create").onclick = async () => {
