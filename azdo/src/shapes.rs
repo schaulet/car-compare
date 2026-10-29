@@ -5338,16 +5338,34 @@ fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], 
     }
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
-        let next = org_list(state, org, key).len() as i64 + 1;
+        let next = org_list(state, org, key)
+            .into_iter()
+            .filter_map(|item| text_of(&item, "id"))
+            .filter_map(|id| id.strip_prefix("sub-").and_then(|number| number.parse::<i64>().ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
         let mut item = payload;
         if let Some(object) = item.as_object_mut() {
+            let explicit = object
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let event = object.get("eventType").and_then(|value| value.as_str()).unwrap_or("").trim().to_string();
+            let name = explicit.unwrap_or(if event.is_empty() { format!("sub-{next}") } else { event });
             object.insert("id".into(), json!(format!("sub-{next}")));
+            object.insert("name".into(), json!(name));
             object.entry("status").or_insert(json!("enabled"));
             object.entry("publisherId").or_insert(json!("tfs"));
             object.entry("url").or_insert(json!(format!("/{org}/_apis/hooks/subscriptions/sub-{next}")));
         }
         org_put(state, org, key, item.clone());
         return Json(item).into_response();
+    }
+    if method == Method::DELETE && rest.len() != 3 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     let id = rest.get(2).cloned().unwrap_or_default();
     if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("notifications")) && method == Method::GET {
@@ -5360,18 +5378,18 @@ fn subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], 
         };
     }
     if method == Method::DELETE && rest.len() == 3 {
-        let removed = state.write(|db| {
-            db.orgs
-                .get_mut(org)
-                .and_then(|organization| organization.buckets.get_mut(key))
-                .map(|bucket| bucket.remove(&id))
-                .unwrap_or(false)
-        });
-        return if removed {
-            StatusCode::NO_CONTENT.into_response()
-        } else {
-            fail(StatusCode::NOT_FOUND, "abonnement introuvable")
+        let Some(found) = org_get(state, org, key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "abonnement introuvable");
         };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(organization) = db.orgs.get_mut(org) {
+                if let Some(bucket) = organization.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     if (method == Method::PATCH || method == Method::PUT) && rest.len() == 3 {
         return update_subscription_status(state, org, key, &id, body);

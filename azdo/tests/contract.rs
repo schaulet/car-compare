@@ -16677,3 +16677,259 @@ async fn removing_one_branch_policy_keeps_the_sibling_and_its_evaluation() {
     assert!(names.iter().any(|name| name == "Comment requirements"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Minimum number of reviewers"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_subscription_keeps_the_sibling_and_its_notification() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let subscribe = |app: axum::Router, auth: String, name: &'static str| async move {
+        call(
+            &app,
+            "POST",
+            "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"name":"{name}","publisherId":"tfs","eventType":"workitem.created","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{{"url":"/_hooks/inbox"}},"publisherInputs":{{"projectId":"AzurzDemo"}}}}"#
+            )),
+        )
+        .await
+    };
+    let (status, body, _) = subscribe(app.clone(), auth.clone(), "Pompe").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_str().unwrap().to_string();
+    assert_eq!(pompe_id, "sub-1");
+    assert_eq!(pompe["name"], "Pompe");
+    assert_eq!(pompe["status"], "enabled");
+    let (status, body, _) = subscribe(app.clone(), auth.clone(), "Ada").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_id = ada["id"].as_str().unwrap().to_string();
+    assert_eq!(ada_id, "sub-2");
+    assert_eq!(ada["name"], "Ada");
+    assert_eq!(ada["eventType"], "workitem.created");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Sonde"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for id in [&pompe_id, &ada_id] {
+        let (status, body, _) = call(
+            &app,
+            "GET",
+            &format!("/azurz/_apis/hooks/subscriptions/{id}/notifications?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(notes["count"], 1, "{body}");
+        assert_eq!(notes["value"][0]["resource"]["fields"]["System.Title"], "Sonde");
+        assert_eq!(notes["value"][0]["status"], "succeeded");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/_apis/hooks/subscriptions/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/hooks/subscriptions/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/_apis/hooks/subscriptions/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/hooks/subscriptions/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("abonnement introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["eventType"], "workitem.created");
+    assert_eq!(kept["status"], "enabled");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Suite"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{pompe_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe_notes["count"], 1, "{body}");
+    assert_eq!(pompe_notes["value"][0]["resource"]["fields"]["System.Title"], "Sonde");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{ada_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_notes["count"], 2, "{body}");
+    let titles: Vec<_> = ada_notes["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["resource"]["fields"]["System.Title"].as_str().unwrap().to_string())
+        .collect();
+    assert!(titles.iter().any(|title| title == "Sonde"), "{titles:?}");
+    assert!(titles.iter().any(|title| title == "Suite"), "{titles:?}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/inbox?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let suite: Vec<_> = inbox["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["eventType"] == "workitem.created" && item["resource"]["fields"]["System.Title"] == "Suite")
+        .collect();
+    assert_eq!(suite.len(), 1, "{body}");
+    assert_eq!(suite[0]["subscriptionId"], ada_id);
+
+    let (status, body, _) = subscribe(app.clone(), auth.clone(), "Relais").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let relais: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(relais["id"], "sub-3");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_ada["name"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+}
