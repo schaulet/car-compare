@@ -4846,7 +4846,13 @@ fn wikis(
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
         let name = text_of(&payload, "name").unwrap_or_else(|| format!("{project}.wiki"));
-        let next = list(state, org, project, key).len() as i64 + 1;
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| text_of(&item, "id"))
+            .filter_map(|id| id.rsplit('-').next().and_then(|hex| i64::from_str_radix(hex, 16).ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
         let id = format!("00000000-0000-0000-0000-{next:012x}");
         let item = dress_wiki(org, project, json!({"id": id, "name": name, "type": "projectWiki"}));
         put_item(state, org, project, key, item.clone());
@@ -4884,6 +4890,23 @@ fn wikis(
         let item = wiki_page(org, project, &wiki_key, &path, &content);
         put_item(state, org, project, &pages, item.clone());
         return Json(item).into_response();
+    }
+    if method == Method::DELETE {
+        if rest.len() != 3 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(found) = resolve_wiki(state, org, project, wiki_id) else {
+            return fail(StatusCode::NOT_FOUND, "wiki introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method == Method::GET {
         return match resolve_wiki(state, org, project, wiki_id) {

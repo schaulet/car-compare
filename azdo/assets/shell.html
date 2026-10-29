@@ -1584,14 +1584,16 @@
         }
         if (hub === "/_wiki") {
           const wikis = await collection("wiki/wikis");
-          const wiki = wikis[0];
+          const wanted = new URLSearchParams(location.search).get("wiki");
+          const wiki = wikis.find((item) => wanted && (String(item.id) === String(wanted) || item.name === wanted)) || wikis[0] || null;
           let pages = [];
           if (wiki) {
             const listed = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?api-version=7.1");
             pages = listed.value || [];
           }
-          const list = pages.length ? "<ul id='pages'>" + pages.map((page) => "<li><button type='button' class='page' data-path='" + esc(page.path) + "'>" + esc(page.path) + "</button></li>").join("") + "</ul>" : "<p class='sub'>Aucune page.</p>";
-          view.innerHTML = "<h1>Wiki</h1><p class='sub'>" + esc(wiki ? wiki.name : "Aucun wiki") + "</p><div class='command'><input id='wiki-name' placeholder='Nouveau wiki' /><button id='wiki-create' type='button'>Créer le wiki</button></div><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button><button id='page-delete' type='button'>Supprimer</button></div><div class='command'><input id='page-new-path' placeholder='/Nouveau chemin' /><button id='page-move' type='button'>Déplacer</button></div><p id='wiki-error' class='sub'></p>";
+          const table = wikis.length ? "<table id='wikis'><thead><tr><th></th><th>Nom</th><th>ID</th></tr></thead><tbody>" + wikis.map((item) => "<tr><td><button type='button' class='wiki-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.id) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wiki-empty' class='sub'>Aucun wiki.</p>";
+          const list = pages.length ? "<ul id='pages'>" + pages.map((page) => "<li><button type='button' class='page' data-path='" + esc(page.path) + "'>" + esc(page.path) + "</button></li>").join("") + "</ul>" : "<p id='pages-empty' class='sub'>Aucune page.</p>";
+          view.innerHTML = "<h1>Wiki</h1><div class='command'><input id='wiki-name' placeholder='Pompe' /><button id='wiki-create' type='button'>Créer le wiki</button></div>" + table + "<p class='sub'>" + esc(wiki ? wiki.name : "") + "</p><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button><button id='page-delete' type='button'>Supprimer</button></div><div class='command'><input id='page-new-path' placeholder='/Nouveau chemin' /><button id='page-move' type='button'>Déplacer</button></div><p id='wiki-error' class='sub'></p>";
           async function loadPage(path) {
             if (!wiki) return;
             document.getElementById("page-path").value = path;
@@ -1600,8 +1602,28 @@
           }
           document.querySelectorAll("button.page").forEach((button) => { button.onclick = () => loadPage(button.dataset.path); });
           document.getElementById("page-load").onclick = () => loadPage(document.getElementById("page-path").value || "/Accueil");
+          document.querySelectorAll("button.wiki-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wiki-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("wiki-create").onclick = async () => {
-            await api("POST", root + "/wiki/wikis?api-version=7.1", { name: document.getElementById("wiki-name").value || (project + ".wiki") });
+            const error = document.getElementById("wiki-error");
+            error.textContent = "";
+            try {
+              await api("POST", root + "/wiki/wikis?api-version=7.1", { name: document.getElementById("wiki-name").value || (project + ".wiki") });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
             location.reload();
           };
           document.getElementById("page-save").onclick = async () => {

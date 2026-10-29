@@ -16933,3 +16933,205 @@ async fn removing_one_subscription_keeps_the_sibling_and_its_notification() {
     assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_wiki_keeps_the_sibling_and_its_page() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let mut pompe_id = String::new();
+    let mut ada_id = String::new();
+    for name in ["Pompe", "Ada"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        let id = created["id"].as_str().unwrap().to_string();
+        let (status, body, _) = call(
+            &app,
+            "PUT",
+            &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{id}/pages?path=/{name}&api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"content":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(page["path"], format!("/{name}"));
+        assert_eq!(page["content"], name);
+        if name == "Pompe" {
+            pompe_id = id;
+        } else {
+            ada_id = id;
+        }
+    }
+    assert_eq!(pompe_id, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(ada_id, "00000000-0000-0000-0000-000000000002");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wiki/wikis/absent?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("wiki introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wiki/wikis/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("wiki introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{ada_id}/pages?path=/Ada&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["content"], "Ada");
+    assert_eq!(page["path"], "/Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe_id}/pages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("wiki introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Relais"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let relais: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(relais["id"], "00000000-0000-0000-0000-000000000003");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{ada_id}/pages?path=/Ada&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still_page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still_page["content"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+}
