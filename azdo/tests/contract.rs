@@ -1634,3 +1634,137 @@ async fn release_definition_environments_wait_for_approval() {
     assert_eq!(release["environments"][0]["status"], "succeeded");
     assert_eq!(release["environments"][1]["status"], "succeeded");
 }
+
+#[tokio::test]
+async fn build_timeline_follows_status_and_accepts_agent_records() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/distributedtask/pools?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pools: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pools["value"][0]["name"], "Azure Pipelines");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queues: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queues["value"][0]["name"], "Default");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let build_id = build["id"].as_i64().unwrap();
+    assert_eq!(build["status"], "notStarted");
+    assert_eq!(build["queue"]["name"], "Default");
+    assert_eq!(build["queue"]["pool"]["name"], "Azure Pipelines");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/timeline?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let timeline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let stage = timeline["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["type"] == "Stage")
+        .unwrap();
+    assert_eq!(stage["state"], "pending");
+    assert!(stage["result"].is_null());
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(build["status"], "completed");
+    assert_eq!(build["result"], "succeeded");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/timeline?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let timeline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let records = timeline["records"].as_array().unwrap();
+    assert!(records.iter().any(|record| record["type"] == "Stage" && record["result"] == "succeeded"));
+    assert!(records.iter().any(|record| record["type"] == "Job" && record["result"] == "succeeded"));
+    let task = records.iter().find(|record| record["name"] == "Build").unwrap();
+    assert_eq!(task["type"], "Task");
+    assert_eq!(task["result"], "succeeded");
+    assert!(task["log"]["url"].as_str().unwrap().contains("/logs/1"));
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/timeline?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"records":[{"id":"task-compile","parentId":"job-1","type":"Task","name":"Compile","state":"completed","result":"succeeded"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{build_id}/timeline?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let timeline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(timeline["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|record| record["name"] == "Compile" && record["result"] == "succeeded"));
+}

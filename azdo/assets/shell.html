@@ -72,6 +72,8 @@
     .tile { border: 1px solid var(--line); padding: 14px 16px; background: #fff; text-decoration: none; color: inherit; }
     .tile b { display: block; font-size: 28px; color: var(--blue); }
     .panel { margin-top: 16px; border: 1px solid var(--line); background: #fff; padding: 16px; }
+    .timeline { list-style: none; margin: 0; padding: 0; }
+    .timeline li { padding: 4px 0; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
     .error { color: #a4262c; }
     @media (max-width: 900px) {
@@ -359,10 +361,21 @@
         if (hub === "/_build") {
           const [definitions, builds] = await Promise.all([collection("build/definitions"), collection("build/builds")]);
           const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Pipeline</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
-          const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<pre id='log' class='panel' hidden></pre>";
+          const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>File</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.queue && item.queue.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          function timelineItems(records, parent, depth) {
+            return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
+              const result = record.result ? " / " + esc(record.result) : "";
+              return "<li data-type='" + esc(record.type) + "' data-name='" + esc(record.name) + "' style='margin-left:" + (depth * 18) + "px'><span class='type'>" + esc(record.type) + "</span> " + esc(record.name) + " — " + esc(record.state) + result + "</li>" + timelineItems(records, String(record.id), depth + 1);
+            }).join("");
+          }
           document.querySelectorAll("tr.build").forEach((row) => {
             row.onclick = async () => {
+              const timeline = await api("GET", root + "/build/builds/" + row.dataset.id + "/timeline?api-version=7.1");
+              const list = document.getElementById("timeline");
+              document.getElementById("timeline-title").hidden = false;
+              list.hidden = false;
+              list.innerHTML = timelineItems(timeline.records || [], "", 0);
               const response = await fetch(root + "/build/builds/" + row.dataset.id + "/logs/1?api-version=7.1");
               const log = document.getElementById("log");
               log.hidden = false;

@@ -26,6 +26,9 @@ pub fn dispatch(
         ("git", "pullrequests") => pull_requests(state, method, org, project, None, rest, body),
         ("build", "definitions") => definitions(state, method, org, project, body),
         ("build", "builds") => builds(state, method, org, project, rest, body),
+        ("distributedtask", "queues") | ("distributedtask", "pools") => {
+            task_agents(state, method, org, Some(project), rest)
+        }
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
@@ -48,6 +51,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     let resource = rest.get(1)?.to_ascii_lowercase();
     let response = match (area.as_str(), resource.as_str()) {
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
+        ("distributedtask", "pools") | ("distributedtask", "queues") => task_agents(state, method, org, None, rest),
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
         ("graph", "groups") => graph(state, method, org, "graph/groups", format!("{org} Team")),
         _ => return None,
@@ -788,6 +792,10 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             .find(|item| item.get("id").and_then(|value| value.as_i64()) == Some(definition_id))
             .and_then(|item| text_of(&item, "name"))
             .unwrap_or_else(|| "CI".into());
+        let queue = list(state, org, project, "distributedtask/queues")
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| json!({"id": 1, "name": "Default", "pool": {"id": 1, "name": "Azure Pipelines"}}));
         let item = json!({
             "id": next,
             "buildNumber": format!("20261029.{next}"),
@@ -796,6 +804,7 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             "project": {"name": project},
             "sourceBranch": text_of(&payload, "sourceBranch").unwrap_or_else(|| "refs/heads/main".into()),
             "sourceVersion": object_id(&format!("build-{next}")),
+            "queue": queue,
             "queueTime": "2026-10-29T00:00:00Z",
             "url": format!("/{org}/{project}/_apis/build/builds/{next}"),
             "requestedBy": {"displayName": "azurz"}
@@ -804,18 +813,8 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
         return Json(item).into_response();
     }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
-    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("timeline") && method == Method::GET {
-        return Json(json!({
-            "records": [{
-                "id": "1",
-                "parentId": null,
-                "type": "Task",
-                "name": "Build",
-                "state": "completed",
-                "result": "succeeded"
-            }]
-        }))
-        .into_response();
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("timeline") {
+        return build_timeline(state, method, org, project, id, body);
     }
     if rest.len() >= 5 && rest[3].eq_ignore_ascii_case("logs") && method == Method::GET {
         let log_id = rest.get(4).map(String::as_str).unwrap_or("1");
@@ -1756,6 +1755,120 @@ fn dress_feed(org: &str, project: &str, mut item: Value) -> Value {
         object.entry("url").or_insert(json!(format!("/{org}/{project}/_apis/packaging/feeds/{name}")));
     }
     item
+}
+
+fn task_agents(state: &AppState, method: &Method, org: &str, project: Option<&str>, rest: &[String]) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let resource = rest.get(1).map(|item| item.to_ascii_lowercase()).unwrap_or_default();
+    if resource == "pools" {
+        return Json(page(org_list(state, org, "distributedtask/pools"))).into_response();
+    }
+    if resource == "queues" {
+        let Some(project) = project else {
+            return fail(StatusCode::NOT_FOUND, "file introuvable");
+        };
+        return Json(page(list(state, org, project, "distributedtask/queues"))).into_response();
+    }
+    fail(StatusCode::NOT_FOUND, "ressource introuvable")
+}
+
+fn build_timeline(state: &AppState, method: &Method, org: &str, project: &str, id: &str, body: &[u8]) -> Response {
+    if get_item(state, org, project, "build/builds", id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "build introuvable");
+    }
+    let key = format!("build/builds/{id}/timeline");
+    if method == Method::PUT || method == Method::PATCH {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let incoming = payload.get("records").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+        let mut records = stored_or_synthesized_timeline(state, org, project, id);
+        for record in incoming {
+            let record_id = text_of(&record, "id").unwrap_or_else(|| format!("record-{}", records.len() + 1));
+            if let Some(index) = records.iter().position(|item| text_of(item, "id").as_deref() == Some(record_id.as_str())) {
+                records[index] = record;
+            } else {
+                records.push(record);
+            }
+        }
+        let change_id = get_item(state, org, project, &key, "current")
+            .and_then(|item| item.get("changeId").and_then(|value| value.as_i64()))
+            .unwrap_or(0)
+            + 1;
+        let stored = json!({
+            "id": "current",
+            "changeId": change_id,
+            "url": format!("/{org}/{project}/_apis/build/builds/{id}/timeline"),
+            "records": records
+        });
+        put_item(state, org, project, &key, stored);
+        return Json(timeline_document(org, project, id, change_id, records_of(state, org, project, id))).into_response();
+    }
+    if method == Method::GET {
+        let stored = get_item(state, org, project, &key, "current");
+        let change_id = stored.as_ref().and_then(|item| item.get("changeId").and_then(|value| value.as_i64())).unwrap_or(1);
+        let records = stored_or_synthesized_timeline(state, org, project, id);
+        return Json(timeline_document(org, project, id, change_id, records)).into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn records_of(state: &AppState, org: &str, project: &str, id: &str) -> Vec<Value> {
+    let key = format!("build/builds/{id}/timeline");
+    get_item(state, org, project, &key, "current")
+        .and_then(|item| item.get("records").and_then(|value| value.as_array()).cloned())
+        .unwrap_or_default()
+}
+
+fn stored_or_synthesized_timeline(state: &AppState, org: &str, project: &str, id: &str) -> Vec<Value> {
+    let stored = records_of(state, org, project, id);
+    if stored.is_empty() {
+        synthesized_timeline(state, org, project, id)
+    } else {
+        stored
+    }
+}
+
+fn synthesized_timeline(state: &AppState, org: &str, project: &str, id: &str) -> Vec<Value> {
+    let build = get_item(state, org, project, "build/builds", id).unwrap_or(json!({}));
+    let status = text_of(&build, "status").unwrap_or_else(|| "notStarted".into());
+    let done = status == "completed";
+    let state_name = if done {
+        "completed"
+    } else if status == "notStarted" {
+        "pending"
+    } else {
+        "inProgress"
+    };
+    let result = if done {
+        json!(text_of(&build, "result").unwrap_or_else(|| "succeeded".into()))
+    } else {
+        Value::Null
+    };
+    let stage_name = build
+        .get("definition")
+        .and_then(|item| text_of(item, "name"))
+        .unwrap_or_else(|| "CI".into());
+    let log = if done {
+        json!({"id": 1, "type": "Container", "url": format!("/{org}/{project}/_apis/build/builds/{id}/logs/1")})
+    } else {
+        Value::Null
+    };
+    vec![
+        json!({"id": "stage-1", "parentId": null, "type": "Stage", "name": stage_name, "state": state_name, "result": result, "order": 1}),
+        json!({"id": "phase-1", "parentId": "stage-1", "type": "Phase", "name": "Phase 1", "state": state_name, "result": result, "order": 1}),
+        json!({"id": "job-1", "parentId": "phase-1", "type": "Job", "name": "Job", "state": state_name, "result": result, "order": 1, "workerName": "azdo-linux"}),
+        json!({"id": "task-build", "parentId": "job-1", "type": "Task", "name": "Build", "state": state_name, "result": result, "order": 1, "log": log}),
+    ]
+}
+
+fn timeline_document(org: &str, project: &str, id: &str, change_id: i64, records: Vec<Value>) -> Value {
+    json!({
+        "id": id,
+        "changeId": change_id,
+        "url": format!("/{org}/{project}/_apis/build/builds/{id}/timeline"),
+        "records": records
+    })
 }
 
 fn promote_build(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {

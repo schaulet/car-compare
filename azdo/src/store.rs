@@ -81,6 +81,19 @@ impl Db {
             projects: BTreeMap::new(),
             buckets: BTreeMap::new(),
         });
+        if let Some(organization) = self.orgs.get_mut(org) {
+            organization
+                .buckets
+                .entry("distributedtask/pools".into())
+                .or_insert_with(|| {
+                    Bucket::with(json!({
+                        "id": 1,
+                        "name": "Azure Pipelines",
+                        "isHosted": false,
+                        "size": 1
+                    }))
+                });
+        }
     }
 
     pub fn ensure_project(&mut self, org: &str, name: &str) -> bool {
@@ -194,6 +207,13 @@ impl ProjectData {
                 "name": "CI",
                 "folder": "\\",
                 "revision": 1
+            }))
+        });
+        self.buckets.entry("distributedtask/queues".into()).or_insert_with(|| {
+            Bucket::with(json!({
+                "id": 1,
+                "name": "Default",
+                "pool": {"id": 1, "name": "Azure Pipelines"}
             }))
         });
         let repo_ids: Vec<String> = self
