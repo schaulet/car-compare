@@ -18550,3 +18550,370 @@ async fn removing_one_pool_keeps_the_sibling_its_agent_its_job_and_its_queue() {
     assert!(names.iter().any(|name| name == "Relais"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_queue_keeps_the_sibling_its_pool_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de file absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sans pool"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("pool absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Inconnue","pool":{"id":9}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("pool introuvable"), "{body}");
+
+    let mut pompe_pool = 0_i64;
+    let mut ada_pool = 0_i64;
+    for name in ["Pompe", "Ada"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/_apis/distributedtask/pools?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","autoProvision":false}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if name == "Pompe" {
+            pompe_pool = created["id"].as_i64().unwrap();
+            assert_eq!(pompe_pool, 2);
+        } else {
+            ada_pool = created["id"].as_i64().unwrap();
+            assert_eq!(ada_pool, 3);
+        }
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/_apis/distributedtask/pools/{pompe_pool}/agents?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","osDescription":"Linux Pompe","status":"online","version":"3.248.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let agent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_agent = agent["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/_apis/distributedtask/pools/{pompe_pool}/jobrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"agentId":{pompe_agent},"planType":"Build","definition":{{"id":1,"name":"Pompe"}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_job = job["requestId"].as_i64().unwrap();
+
+    let mut pompe_queue = 0_i64;
+    let mut ada_queue = 0_i64;
+    for (project, pool, name) in [
+        ("AzurzDemo", pompe_pool, "Pompe"),
+        ("AzurzDemo", ada_pool, "Ada"),
+        ("Atelier", pompe_pool, "Pompe"),
+        ("Atelier", ada_pool, "Ada"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            &format!("/azurz/{project}/_apis/distributedtask/queues?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","pool":{{"id":{pool}}}}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        assert_eq!(created["pool"]["id"], pool);
+        assert_eq!(created["pool"]["name"], name);
+        assert!(created["url"].as_str().unwrap().contains(&format!("/{project}/_apis/distributedtask/queues/")));
+        if project == "AzurzDemo" && name == "Pompe" {
+            pompe_queue = created["id"].as_i64().unwrap();
+            assert_eq!(pompe_queue, 2);
+        }
+        if project == "AzurzDemo" && name == "Ada" {
+            ada_queue = created["id"].as_i64().unwrap();
+            assert_eq!(ada_queue, 3);
+        }
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/_apis/distributedtask/queues/2?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("file introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues/9?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("file introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("file par défaut"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/queues/{pompe_queue}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/queues/{pompe_queue}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/queues/{pompe_queue}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("file introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/queues/{ada_queue}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada["name"], "Ada");
+    assert_eq!(ada["pool"]["id"], ada_pool);
+    assert_eq!(ada["pool"]["name"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let demo: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = demo["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Default"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = atelier["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Default"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Pompe"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/distributedtask/pools/{pompe_pool}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pool: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pool["name"], "Pompe");
+    assert_eq!(pool["size"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/distributedtask/pools/{pompe_pool}/agents/{pompe_agent}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_agent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_agent["name"], "Pompe");
+    assert_eq!(kept_agent["status"], "online");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/distributedtask/pools/{pompe_pool}/jobrequests/{pompe_job}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_job: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_job["status"], "queued");
+    assert_eq!(kept_job["definition"]["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/distributedtask/pools/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hosted: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(hosted["name"], "Azure Pipelines");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/queues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Relais","pool":{{"id":{ada_pool}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let relais: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(relais["id"], 4);
+    assert_eq!(relais["pool"]["name"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/queues/{ada_queue}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["name"], "Ada");
+    assert_eq!(still["pool"]["id"], ada_pool);
+}

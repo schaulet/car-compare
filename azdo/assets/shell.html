@@ -2070,6 +2070,13 @@
           const jobsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1");
           const agents = agentsPage.value || [];
           const jobs = jobsPage.value || [];
+          const queuesPage = await api("GET", root + "/distributedtask/queues?api-version=7.1");
+          const queues = queuesPage.value || [];
+          const queueTable = queues.length ? "<table id='queues'><thead><tr><th></th><th>File</th><th>Pool</th></tr></thead><tbody>" + queues.map((item) => {
+            const remove = String(item.id) === "1" ? "" : "<button type='button' class='queue-remove' data-id='" + esc(item.id) + "'>Retirer</button>";
+            const poolName = item.pool && item.pool.name;
+            return "<tr class='queue' data-id='" + esc(item.id) + "'><td>" + remove + "</td><td>" + esc(item.name) + "</td><td>" + esc(poolName || "") + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='queue-empty' class='sub'>Aucune file.</p>";
           const poolTable = pools.length ? "<table id='pools'><thead><tr><th></th><th>Pool</th><th>Agents</th></tr></thead><tbody>" + pools.map((item) => {
             const remove = String(item.id) === "1" ? "" : "<button type='button' class='pool-remove' data-id='" + esc(item.id) + "'>Retirer</button>";
             const current = String(item.id) === String(poolId) ? " pool current" : " pool";
@@ -2086,7 +2093,20 @@
             const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(id) + "'>Terminer</button>" : "";
             return "<tr><td><button type='button' class='job-remove' data-id='" + esc(id) + "'>Retirer</button></td><td>" + esc(id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
           }).join("") + "</tbody></table>" : "<p id='job-empty' class='sub'>Aucune demande de travail.</p>";
-          view.innerHTML = "<h1>Agents</h1><div class='command'><input id='pool-name' placeholder='Pompe' /><button id='pool-add' type='button'>Créer</button></div>" + poolTable + "<p id='pool-error' class='error' hidden></p><h2 id='pool-heading'>" + esc(pool.name) + " · " + esc(pool.size) + "</h2><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work + "<p id='job-error' class='sub' hidden></p>";
+          view.innerHTML = "<h1>Agents</h1><h2>Files</h2>" + queueTable + "<p id='queue-error' class='error' hidden></p><div class='command'><input id='pool-name' placeholder='Pompe' /><button id='pool-add' type='button'>Créer</button></div>" + poolTable + "<p id='pool-error' class='error' hidden></p><h2 id='pool-heading'>" + esc(pool.name) + " · " + esc(pool.size) + "</h2><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work + "<p id='job-error' class='sub' hidden></p>";
+          document.querySelectorAll("button.queue-remove").forEach((button) => {
+            button.onclick = async () => {
+              try {
+                await api("DELETE", root + "/distributedtask/queues/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("queue-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("pool-add").onclick = async () => {
             try {
               await api("POST", "/" + org + "/_apis/distributedtask/pools?api-version=7.1", {

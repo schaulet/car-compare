@@ -7004,13 +7004,7 @@ fn task_agents(
 ) -> Response {
     let resource = rest.get(1).map(|item| item.to_ascii_lowercase()).unwrap_or_default();
     if resource == "queues" {
-        if method != Method::GET {
-            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
-        }
-        let Some(project) = project else {
-            return fail(StatusCode::NOT_FOUND, "file introuvable");
-        };
-        return Json(page(list(state, org, project, "distributedtask/queues"))).into_response();
+        return agent_queues(state, method, org, project, rest, body);
     }
     if resource != "pools" {
         return fail(StatusCode::NOT_FOUND, "ressource introuvable");
@@ -7048,6 +7042,102 @@ fn task_agents(
         _ if method == Method::DELETE => fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée"),
         _ => fail(StatusCode::NOT_FOUND, "ressource introuvable"),
     }
+}
+
+fn agent_queues(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(project) = project else {
+        return fail(StatusCode::NOT_FOUND, "file introuvable");
+    };
+    let key = "distributedtask/queues";
+    if rest.len() <= 2 {
+        if method == Method::GET {
+            let value = list(state, org, project, key)
+                .into_iter()
+                .map(|item| dress_queue(org, project, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            return create_queue(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "file introuvable");
+    }
+    let Some(current) = get_item(state, org, project, key, &rest[2]) else {
+        return fail(StatusCode::NOT_FOUND, "file introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_queue(org, project, current)).into_response();
+    }
+    if method == Method::DELETE {
+        if value_key(&current["id"]) == "1" {
+            return fail(StatusCode::BAD_REQUEST, "file par défaut");
+        }
+        let stored_id = value_key(&current["id"]);
+        delete_item(state, org, project, key, &stored_id);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_queue(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    if !body.is_empty() && parse_json(body).is_none() {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    }
+    let payload = parse_json(body).unwrap_or(Value::Null);
+    let name = text_of(&payload, "name").unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom de file absent");
+    }
+    let pool_id = payload
+        .get("pool")
+        .map(|pool| value_key(&pool["id"]))
+        .filter(|id| !id.is_empty())
+        .or_else(|| payload.get("poolId").map(value_key).filter(|id| !id.is_empty()));
+    let Some(pool_id) = pool_id else {
+        return fail(StatusCode::BAD_REQUEST, "pool absent");
+    };
+    let Some(pool) = org_get(state, org, "distributedtask/pools", &pool_id) else {
+        return fail(StatusCode::NOT_FOUND, "pool introuvable");
+    };
+    let pool_key = value_key(&pool["id"]);
+    let pool_name = text_of(&pool, "name").unwrap_or_default();
+    let next = list(state, org, project, "distributedtask/queues")
+        .into_iter()
+        .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let numeric_pool = pool_key.parse::<i64>().unwrap_or(1);
+    let item = json!({
+        "id": next,
+        "name": name,
+        "pool": {"id": numeric_pool, "name": pool_name}
+    });
+    put_item(state, org, project, "distributedtask/queues", item.clone());
+    Json(dress_queue(org, project, item)).into_response()
+}
+
+fn dress_queue(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object
+            .entry("url")
+            .or_insert_with(|| json!(format!("/{org}/{project}/_apis/distributedtask/queues/{id}")));
+    }
+    item
 }
 
 fn create_pool(state: &AppState, org: &str, body: &[u8]) -> Response {
