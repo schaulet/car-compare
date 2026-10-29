@@ -32,6 +32,7 @@ pub fn dispatch(
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
         }
+        ("distributedtask", "variablegroups") => variable_groups(state, method, org, project, rest, body),
         ("distributedtask", "securefiles") => secure_files(state, method, org, project, rest, query, body),
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
@@ -4427,6 +4428,179 @@ fn dress_policy(org: &str, project: &str, mut item: Value) -> Value {
         object.insert("type".into(), json!({"id": type_id, "displayName": display}));
     }
     item
+}
+
+fn canonical_group_type(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("vsts") {
+        Some("Vsts")
+    } else if name.eq_ignore_ascii_case("azurekeyvault") {
+        Some("AzureKeyVault")
+    } else {
+        None
+    }
+}
+
+fn group_variables(incoming: &Value, previous: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(object) = incoming.as_object() else {
+        return Ok(previous.cloned().unwrap_or(json!({})));
+    };
+    let mut stored = Map::new();
+    for (key, spec) in object {
+        let name = key.trim();
+        if name.is_empty() {
+            return Err("nom de variable absent");
+        }
+        let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+        let incoming_value = spec.get("value").and_then(|value| value.as_str()).unwrap_or("");
+        let previous_spec = previous.and_then(|variables| variables.get(name).or_else(|| variables.get(key)));
+        let previous_value = previous_spec.and_then(|item| item.get("value")).and_then(|value| value.as_str()).unwrap_or("");
+        let previous_secret = previous_spec.and_then(|item| item.get("isSecret")).and_then(|value| value.as_bool()).unwrap_or(false);
+        let value = if incoming_value.is_empty() && previous_secret {
+            previous_value
+        } else {
+            incoming_value
+        };
+        stored.insert(name.to_string(), json!({"value": value, "isSecret": is_secret}));
+    }
+    Ok(Value::Object(stored))
+}
+
+fn dress_group(org: &str, project: &str, item: &Value) -> Value {
+    let id = value_key(&item["id"]);
+    let name = text_of(item, "name").unwrap_or_default();
+    let variables = item.get("variables").cloned().unwrap_or(json!({}));
+    let dressed = variables
+        .as_object()
+        .map(|object| {
+            let mut shown = Map::new();
+            for (key, spec) in object {
+                let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+                let value = if is_secret {
+                    ""
+                } else {
+                    spec.get("value").and_then(|value| value.as_str()).unwrap_or("")
+                };
+                shown.insert(key.clone(), json!({"value": value, "isSecret": is_secret}));
+            }
+            Value::Object(shown)
+        })
+        .unwrap_or(json!({}));
+    json!({
+        "id": item.get("id").cloned().unwrap_or(json!(id)),
+        "name": name,
+        "description": text_of(item, "description").unwrap_or_default(),
+        "type": text_of(item, "type").unwrap_or_else(|| "Vsts".into()),
+        "variables": dressed,
+        "variableGroupProjectReferences": [{"name": name, "projectReference": {"name": project}}],
+        "url": format!("/{org}/{project}/_apis/distributedtask/variablegroups/{id}")
+    })
+}
+
+fn variable_groups(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "distributedtask/variablegroups";
+    if rest.len() == 2 && method == Method::GET {
+        let value = list(state, org, project, key).iter().map(|item| dress_group(org, project, item)).collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 2 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_default();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom de groupe absent");
+        }
+        let kind = match payload.get("type").and_then(|value| value.as_str()) {
+            Some(value) => match canonical_group_type(value) {
+                Some(kind) => kind,
+                None => return fail(StatusCode::BAD_REQUEST, "type de groupe inconnu"),
+            },
+            None => "Vsts",
+        };
+        if list(state, org, project, key)
+            .iter()
+            .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+        {
+            return fail(StatusCode::BAD_REQUEST, "groupe déjà présent");
+        }
+        let variables = match group_variables(payload.get("variables").unwrap_or(&json!({})), None) {
+            Ok(variables) => variables,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let next = list(state, org, project, key)
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let item = json!({
+            "id": next,
+            "name": name,
+            "description": text_of(&payload, "description").unwrap_or_default(),
+            "type": kind,
+            "variables": variables
+        });
+        put_item(state, org, project, key, item.clone());
+        return Json(dress_group(org, project, &item)).into_response();
+    }
+    let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+    }
+    if method == Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_group(org, project, &item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "groupe introuvable"),
+        };
+    }
+    if method == Method::PUT || method == Method::PATCH {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let Some(existing) = get_item(state, org, project, key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+        };
+        let name = text_of(&payload, "name").unwrap_or_else(|| text_of(&existing, "name").unwrap_or_default());
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom de groupe absent");
+        }
+        let kind = match payload.get("type").and_then(|value| value.as_str()) {
+            Some(value) => match canonical_group_type(value) {
+                Some(kind) => kind,
+                None => return fail(StatusCode::BAD_REQUEST, "type de groupe inconnu"),
+            },
+            None => "Vsts",
+        };
+        if list(state, org, project, key).iter().any(|item| {
+            text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name))
+                && value_key(&item["id"]) != id
+        }) {
+            return fail(StatusCode::BAD_REQUEST, "groupe déjà présent");
+        }
+        let variables = if let Some(incoming) = payload.get("variables") {
+            match group_variables(incoming, existing.get("variables")) {
+                Ok(variables) => variables,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            }
+        } else {
+            existing.get("variables").cloned().unwrap_or(json!({}))
+        };
+        let item = json!({
+            "id": existing.get("id").cloned().unwrap_or(json!(id)),
+            "name": name,
+            "description": text_of(&payload, "description").unwrap_or_else(|| text_of(&existing, "description").unwrap_or_default()),
+            "type": kind,
+            "variables": variables
+        });
+        put_item(state, org, project, key, item.clone());
+        return Json(dress_group(org, project, &item)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
 fn secure_files(

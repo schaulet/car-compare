@@ -7349,3 +7349,168 @@ async fn service_connection_hides_its_secret_and_can_be_updated() {
     let left: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(left["count"], 0);
 }
+
+#[tokio::test]
+async fn variable_group_hides_a_secret_until_it_is_cleared() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" ","type":"Vsts","variables":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de groupe absent"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"autre","type":"vault","variables":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type de groupe inconnu"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","description":"Capteurs","type":"Vsts","variables":{" ":{"value":"x"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de variable absent"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","description":"Capteurs","type":"Vsts","variables":{"host":{"value":"ignition","isSecret":false},"token":{"value":"ligne-clef","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["name"], "ligne");
+    assert_eq!(created["type"], "Vsts");
+    assert_eq!(created["description"], "Capteurs");
+    assert_eq!(created["variables"]["host"]["value"], "ignition");
+    assert_eq!(created["variables"]["token"]["value"], "");
+    assert_eq!(created["variables"]["token"]["isSecret"], true);
+    assert!(!body.contains("ligne-clef"));
+    let id = created["id"].as_i64().unwrap();
+    let path = format!("/azurz/AzurzDemo/_apis/distributedtask/variablegroups/{id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","type":"Vsts","variables":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe déjà présent"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","type":"Vsts","variables":{"host":{"value":"ignition.lab","isSecret":false},"token":{"value":"","isSecret":true},"port":{"value":"8088","isSecret":false}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated["variables"]["host"]["value"], "ignition.lab");
+    assert_eq!(updated["variables"]["port"]["value"], "8088");
+    assert_eq!(updated["variables"]["token"]["value"], "");
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","type":"Vsts","variables":{"host":{"value":"ignition.lab","isSecret":false},"token":{"value":"","isSecret":false},"port":{"value":"8088","isSecret":false}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revealed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(revealed["variables"]["token"]["isSecret"], false);
+    assert_eq!(revealed["variables"]["token"]["value"], "ligne-clef");
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 0);
+}
