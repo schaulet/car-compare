@@ -7170,3 +7170,182 @@ async fn pull_request_autocomplete_waits_for_a_required_reviewer() {
     assert_eq!(rejected["status"], "active");
     assert_eq!(rejected["autoCompleteSetBy"]["displayName"], "azurz");
 }
+
+#[tokio::test]
+async fn service_connection_hides_its_secret_and_can_be_updated() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" ","type":"generic","url":"http://ignition:8088"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de connexion absent"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"smtp","type":"smtp","url":"http://mail"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type de connexion inconnu"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ignition","type":"generic","url":"http://ignition:8088","description":"Ligne A","authorization":{"scheme":"UsernamePassword","parameters":{"username":"admin","password":"secret"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["name"], "ignition");
+    assert_eq!(created["type"], "generic");
+    assert_eq!(created["url"], "http://ignition:8088");
+    assert_eq!(created["authorization"]["scheme"], "UsernamePassword");
+    assert_eq!(created["authorization"]["parameters"]["username"], "admin");
+    assert_eq!(created["authorization"]["parameters"]["password"], "");
+    assert!(!body.contains("secret"));
+    let id = created["id"].as_str().unwrap();
+    let path = format!("/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/{id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ignition","type":"generic","url":"http://autre"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("connexion déjà présente"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["authorization"]["parameters"]["password"], "");
+    assert_eq!(fetched["description"], "Ligne A");
+    assert!(!body.contains("secret"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ignition","type":"kubernetes","url":"http://ignition:8089","authorization":{"scheme":"Token","parameters":{"username":"admin","password":""}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updated["url"], "http://ignition:8089");
+    assert_eq!(updated["type"], "kubernetes");
+    assert_eq!(updated["authorization"]["scheme"], "Token");
+    assert_eq!(updated["authorization"]["parameters"]["password"], "");
+    assert!(!body.contains("secret"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints/endpoint-missing?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ignition","type":"generic","url":"http://ignition:8088"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/types?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("generic"));
+    assert!(body.contains("github"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/serviceendpoint/types?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("kubernetes"));
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/serviceendpoint/endpoints?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 0);
+}

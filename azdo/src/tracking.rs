@@ -22,6 +22,7 @@ pub fn dispatch(
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
         ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
+        ("serviceendpoint", "types") if rest.len() == 2 => endpoint_types(method),
         ("serviceendpoint", "endpoints") => endpoints(state, method, org, project, rest, body),
         _ => return None,
     };
@@ -796,47 +797,218 @@ fn widget_settings(widget: &Value) -> Value {
     }
 }
 
+pub fn endpoint_types(method: &Method) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    Json(page(endpoint_type_catalog())).into_response()
+}
+
+fn endpoint_type_catalog() -> Vec<Value> {
+    vec![
+        json!({"name": "generic", "displayName": "Generic", "description": "Connexion générique", "authenticationSchemes": [{"scheme": "UsernamePassword"}, {"scheme": "Token"}]}),
+        json!({"name": "github", "displayName": "GitHub", "description": "Dépôt GitHub", "authenticationSchemes": [{"scheme": "Token"}, {"scheme": "UsernamePassword"}]}),
+        json!({"name": "azurerm", "displayName": "Azure Resource Manager", "description": "Abonnement Azure", "authenticationSchemes": [{"scheme": "ServicePrincipal"}]}),
+        json!({"name": "kubernetes", "displayName": "Kubernetes", "description": "Cluster Kubernetes", "authenticationSchemes": [{"scheme": "Kubernetes"}, {"scheme": "Token"}]}),
+        json!({"name": "ssh", "displayName": "SSH", "description": "Hôte SSH", "authenticationSchemes": [{"scheme": "UsernamePassword"}]}),
+        json!({"name": "dockerregistry", "displayName": "Docker Registry", "description": "Registre de conteneurs", "authenticationSchemes": [{"scheme": "UsernamePassword"}, {"scheme": "Token"}]}),
+    ]
+}
+
+fn known_endpoint_type(name: &str) -> bool {
+    endpoint_type_catalog()
+        .iter()
+        .any(|item| item.get("name").and_then(|value| value.as_str()).is_some_and(|stored| stored.eq_ignore_ascii_case(name)))
+}
+
+fn secret_parameter(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "password" | "apitoken" | "token" | "pat" | "serviceprincipalkey" | "privatekey"
+    )
+}
+
+fn authorization_from(payload: &Value, previous: Option<&Value>) -> Value {
+    let incoming = payload.get("authorization");
+    let previous_auth = previous.and_then(|item| item.get("authorization"));
+    let scheme = incoming
+        .and_then(|item| item.get("scheme"))
+        .and_then(|value| value.as_str())
+        .or_else(|| previous_auth.and_then(|item| item.get("scheme")).and_then(|value| value.as_str()))
+        .unwrap_or("UsernamePassword");
+    let mut params = previous_auth
+        .and_then(|item| item.get("parameters"))
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(incoming_params) = incoming.and_then(|item| item.get("parameters")).and_then(|value| value.as_object()) {
+        for (key, value) in incoming_params {
+            let blank_secret = value.as_str().is_some_and(|text| text.is_empty()) && secret_parameter(key);
+            if blank_secret {
+                continue;
+            }
+            params.insert(key.clone(), value.clone());
+        }
+    }
+    json!({"scheme": scheme, "parameters": params})
+}
+
+fn dress_endpoint(mut item: Value) -> Value {
+    let Some(params) = item
+        .get_mut("authorization")
+        .and_then(|auth| auth.get_mut("parameters"))
+        .and_then(|value| value.as_object_mut())
+    else {
+        return item;
+    };
+    for (key, value) in params.iter_mut() {
+        if secret_parameter(key) {
+            *value = json!("");
+        }
+    }
+    item
+}
+
+fn endpoint_name(payload: &Value) -> String {
+    payload.get("name").and_then(|value| value.as_str()).unwrap_or("").trim().to_string()
+}
+
+fn endpoint_duplicate(items: &[Value], name: &str, except: Option<&str>) -> bool {
+    items.iter().any(|item| {
+        item.get("name").and_then(|value| value.as_str()).is_some_and(|stored| stored.eq_ignore_ascii_case(name))
+            && except.is_none_or(|id| item.get("id").and_then(|value| value.as_str()) != Some(id))
+    })
+}
+
 fn endpoints(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "serviceendpoint/endpoints";
     if rest.len() == 2 && method == Method::GET {
-        let value = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default());
+        let value = state
+            .read(|db| db.project(org, project).map(|stored| stored.list_bucket(key)).unwrap_or_default())
+            .into_iter()
+            .map(dress_endpoint)
+            .collect();
         return Json(page(value)).into_response();
     }
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
+        let name = endpoint_name(&payload);
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom de connexion absent");
+        }
+        let kind = payload.get("type").and_then(|value| value.as_str()).unwrap_or("generic").to_string();
+        if !known_endpoint_type(&kind) {
+            return fail(StatusCode::BAD_REQUEST, "type de connexion inconnu");
+        }
+        let duplicate = state.read(|db| {
+            db.project(org, project)
+                .map(|stored| endpoint_duplicate(&stored.list_bucket(key), &name, None))
+                .unwrap_or(false)
+        });
+        if duplicate {
+            return fail(StatusCode::BAD_REQUEST, "connexion déjà présente");
+        }
         let created = state.write(|db| {
             db.ensure_project(org, project);
             let stored = db.project_mut(org, project)?;
-            let next = stored.list_bucket(key).len() + 1;
-            let name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("endpoint");
+            let next = stored
+                .list_bucket(key)
+                .iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(|value| value.as_str())
+                        .and_then(|id| id.strip_prefix("endpoint-"))
+                        .and_then(|number| number.parse::<u64>().ok())
+                })
+                .max()
+                .unwrap_or(0)
+                + 1;
             let item = json!({
                 "id": format!("endpoint-{next:08}"),
                 "name": name,
-                "type": payload.get("type").cloned().unwrap_or(json!("generic")),
+                "type": kind,
                 "url": payload.get("url").cloned().unwrap_or(json!("")),
                 "isReady": true,
+                "isShared": false,
                 "owner": "library",
                 "description": payload.get("description").cloned().unwrap_or(json!("")),
-                "authorization": {"scheme": "UsernamePassword"},
+                "authorization": authorization_from(&payload, None),
                 "data": payload.get("data").cloned().unwrap_or(json!({})),
                 "serviceEndpointProjectReferences": [{"projectReference": {"name": project}, "name": name}]
             });
             Some(stored.put_bucket(key, item))
         });
         return match created {
-            Some(item) => Json(item).into_response(),
+            Some(item) => Json(dress_endpoint(item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         };
     }
+    let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "connexion introuvable");
+    }
     if method == Method::GET {
-        let id = rest.get(2).map(String::as_str).unwrap_or("");
-        return match state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, id))) {
-            Some(item) => Json(item).into_response(),
+        return match state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, &id))) {
+            Some(item) => Json(dress_endpoint(item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "connexion introuvable"),
+        };
+    }
+    if method == Method::PUT || method == Method::PATCH {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = endpoint_name(&payload);
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom de connexion absent");
+        }
+        let existing = state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(key, &id)));
+        let Some(existing) = existing else {
+            return fail(StatusCode::NOT_FOUND, "connexion introuvable");
+        };
+        let kind = payload
+            .get("type")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| existing.get("type").and_then(|value| value.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "generic".into());
+        if !known_endpoint_type(&kind) {
+            return fail(StatusCode::BAD_REQUEST, "type de connexion inconnu");
+        }
+        let duplicate = state.read(|db| {
+            db.project(org, project)
+                .map(|stored| endpoint_duplicate(&stored.list_bucket(key), &name, Some(id.as_str())))
+                .unwrap_or(false)
+        });
+        if duplicate {
+            return fail(StatusCode::BAD_REQUEST, "connexion déjà présente");
+        }
+        let updated = state.write(|db| {
+            let stored = db.project_mut(org, project)?;
+            let current = stored.get_bucket(key, &id)?;
+            let url = payload.get("url").cloned().unwrap_or_else(|| current.get("url").cloned().unwrap_or(json!("")));
+            let description = payload
+                .get("description")
+                .cloned()
+                .unwrap_or_else(|| current.get("description").cloned().unwrap_or(json!("")));
+            let item = json!({
+                "id": id,
+                "name": name,
+                "type": kind,
+                "url": url,
+                "isReady": true,
+                "isShared": current.get("isShared").cloned().unwrap_or(json!(false)),
+                "owner": "library",
+                "description": description,
+                "authorization": authorization_from(&payload, Some(&current)),
+                "data": payload.get("data").cloned().unwrap_or_else(|| current.get("data").cloned().unwrap_or(json!({}))),
+                "serviceEndpointProjectReferences": [{"projectReference": {"name": project}, "name": name}]
+            });
+            Some(stored.put_bucket(key, item))
+        });
+        return match updated {
+            Some(item) => Json(dress_endpoint(item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "connexion introuvable"),
         };
     }
     if method == Method::DELETE {
-        let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
         let removed = state.write(|db| {
             db.project_mut(org, project)
                 .and_then(|stored| stored.buckets.get_mut(key))

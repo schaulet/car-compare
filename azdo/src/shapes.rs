@@ -64,6 +64,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         ("distributedtask", "pools") | ("distributedtask", "queues") => {
             task_agents(state, method, org, None, rest, query, body)
         }
+        ("serviceendpoint", "types") => crate::tracking::endpoint_types(method),
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
         ("graph", "groups") => graph(state, method, org, "graph/groups", format!("{org} Team")),
         _ => return None,
