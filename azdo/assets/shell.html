@@ -1918,22 +1918,42 @@
             const action = item.status === "online"
               ? "<button type='button' class='assign' data-id='" + esc(item.id) + "'>Confier</button>"
               : "<button type='button' class='online' data-id='" + esc(item.id) + "'>En ligne</button>";
-            return "<tr><td>" + esc(item.name) + "</td><td class='status'>" + esc(item.status) + "</td><td>" + esc(item.osDescription) + "</td><td>" + esc(item.version) + "</td><td>" + action + "</td></tr>";
-          }).join("") + "</tbody></table>" : "<p class='sub'>Aucun agent.</p>";
+            return "<tr><td>" + esc(item.name) + "</td><td class='status'>" + esc(item.status) + "</td><td>" + esc(item.osDescription) + "</td><td>" + esc(item.version) + "</td><td>" + action + " <button type='button' class='agent-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='agent-empty' class='sub'>Aucun agent.</p>";
           const work = jobs.length ? "<table id='jobs'><thead><tr><th>Demande</th><th>Agent</th><th>Définition</th><th>État</th><th>Résultat</th><th></th></tr></thead><tbody>" + jobs.map((item) => {
             const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(item.requestId || item.id) + "'>Terminer</button>" : "";
             return "<tr><td>" + esc(item.requestId || item.id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
           }).join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de travail.</p>";
-          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Nom' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<h2>Demandes</h2>" + work;
+          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work;
           document.getElementById("agent-add").onclick = async () => {
-            await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1", {
-              name: document.getElementById("agent-name").value || "azdo-linux",
-              version: "3.248.0",
-              osDescription: document.getElementById("agent-os").value || "Linux",
-              status: "offline",
-            });
+            try {
+              await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1", {
+                name: document.getElementById("agent-name").value || "azdo-linux",
+                version: "3.248.0",
+                osDescription: document.getElementById("agent-os").value || "Linux",
+                status: "offline",
+              });
+            } catch (error) {
+              const note = document.getElementById("agent-error");
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
             location.reload();
           };
+          document.querySelectorAll("button.agent-remove").forEach((button) => {
+            button.onclick = async () => {
+              try {
+                await api("DELETE", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("agent-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.querySelectorAll("button.online").forEach((button) => {
             button.onclick = async () => {
               await api("PATCH", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", {
