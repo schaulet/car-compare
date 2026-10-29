@@ -8042,3 +8042,378 @@ async fn definition_variables_override_the_group_and_stay_masked() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("paramètres de file illisibles"));
 }
+
+#[tokio::test]
+async fn ci_trigger_queues_a_build_for_the_matching_branch_and_path() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seeded["triggers"], serde_json::json!([]));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"triggers":[{"triggerType":"octopus"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("déclencheur inconnu"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"triggers":[{"triggerType":"continuousIntegration","branchFilters":[" "]}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre de branche absent"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"queueStatus":"zzz"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état de file inconnu"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["triggers"], serde_json::json!([]));
+    assert_eq!(untouched["queueStatus"], "enabled");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"triggers":[{"triggerType":"continuousIntegration","branchFilters":["+refs/heads/main","-refs/heads/wip"],"pathFilters":["+/src/*"],"batchChanges":false}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let armed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(armed["triggers"][0]["triggerType"], "continuousIntegration");
+    assert_eq!(armed["triggers"][0]["branchFilters"][0], "+refs/heads/main");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let push = |app: &axum::Router, repo: &str, branch: &str, old: &str, path: &str| {
+        let app = app.clone();
+        let repo = repo.to_string();
+        let branch = branch.to_string();
+        let old = old.to_string();
+        let path = path.to_string();
+        let auth = basic("azurz", "azurz-lab-pat");
+        async move {
+            call(
+                &app,
+                "POST",
+                &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo}/pushes?api-version=7.1"),
+                Some(&auth),
+                None,
+                "application/json",
+                Some(&format!(
+                    r#"{{"refUpdates":[{{"name":"{branch}","oldObjectId":"{old}"}}],"commits":[{{"comment":"sonde","changes":[{{"changeType":"add","item":{{"path":"{path}"}},"newContent":{{"content":"sonde","contentType":"rawtext"}}}}]}}]}}"#
+                )),
+            )
+            .await
+        }
+    };
+    let (status, body, _) = push(&app, repo_id, "refs/heads/feature", "0000000000000000000000000000000000000000", "/src/hors.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let quiet: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(quiet["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let main = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap();
+    let old = main["objectId"].as_str().unwrap();
+    let (status, body, _) = push(&app, repo_id, "refs/heads/main", old, "/docs/note.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 0, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let main = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap();
+    let old = main["objectId"].as_str().unwrap().to_string();
+    let (status, body, _) = push(&app, repo_id, "refs/heads/main", &old, "/src/pompe-ci.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queued["count"], 1);
+    assert_eq!(queued["value"][0]["reason"], "individualCI");
+    assert_eq!(queued["value"][0]["sourceBranch"], "refs/heads/main");
+    assert_eq!(queued["value"][0]["definition"]["id"], 1);
+    assert_eq!(queued["value"][0]["status"], "completed");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"queueStatus":"disabled"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let paused: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(paused["queueStatus"], "disabled");
+    assert_eq!(paused["triggers"][0]["triggerType"], "continuousIntegration");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let old = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body, _) = push(&app, repo_id, "refs/heads/main", &old, "/src/pause.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let held: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(held["count"], 1, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"queueStatus":"enabled","triggers":[{"triggerType":"continuousIntegration","branchFilters":["+refs/heads/main"],"pathFilters":["+/src/*"],"batchChanges":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let mut old = refs["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body, _) = push(&app, repo_id, "refs/heads/main", &old, "/src/lot-a.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pushed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    old = pushed["refUpdates"][0]["newObjectId"].as_str().unwrap().to_string();
+    let (status, body, _) = push(&app, repo_id, "refs/heads/main", &old, "/src/lot-b.txt").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let batched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(batched["count"], 2, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Revue","triggers":[{"triggerType":"pullRequest","branchFilters":["+refs/heads/main"]}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let review: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let review_id = review["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue CI","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Brouillon","triggers":[{"triggerType":"pullRequest","branchFilters":["+refs/heads/main"]}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let draft_def: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let draft_id = draft_def["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Brouillon","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main","isDraft":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let builds: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = builds["value"].as_array().unwrap();
+    let review_builds: Vec<_> = rows
+        .iter()
+        .filter(|item| item["definition"]["id"].as_i64() == Some(review_id))
+        .collect();
+    assert_eq!(review_builds.len(), 1);
+    assert_eq!(review_builds[0]["reason"], "pullRequest");
+    assert_eq!(review_builds[0]["sourceBranch"], "refs/heads/feature");
+    assert!(rows.iter().all(|item| item["definition"]["id"].as_i64() != Some(draft_id)));
+}

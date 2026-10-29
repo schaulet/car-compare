@@ -507,6 +507,7 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
         });
         put_item(state, org, project, &key, item.clone());
         deliver_work_item(state, org, project, "git.push", &item);
+        queue_push_triggers(state, org, project, repo_id, &item);
         return Json(item).into_response();
     }
     match apply_push(state, org, project, repo_id, &payload) {
@@ -518,6 +519,7 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
                 .unwrap_or_default();
             advance_pull_iterations(state, org, project, repo_id, &names);
             deliver_work_item(state, org, project, "git.push", &item);
+            queue_push_triggers(state, org, project, repo_id, &item);
             Json(item).into_response()
         }
         PushOutcome::Conflict => fail(StatusCode::CONFLICT, "la référence a changé"),
@@ -686,6 +688,7 @@ fn git_replay(
         Some(Ok((operation, push, generated))) => {
             advance_pull_iterations(state, org, project, repo_id, &[generated]);
             deliver_work_item(state, org, project, "git.push", &push);
+            queue_push_triggers(state, org, project, repo_id, &push);
             Json(operation).into_response()
         }
         Some(Err(message)) => fail(StatusCode::BAD_REQUEST, message),
@@ -1262,6 +1265,10 @@ fn pull_requests(
     put_item(state, org, project, key, item.clone());
     remember_iteration(state, org, project, &item);
     deliver_work_item(state, org, project, "git.pullrequest.created", &item);
+    if payload.get("isDraft").and_then(|value| value.as_bool()) != Some(true) {
+        let paths = pull_change_paths(state, org, project, &item);
+        queue_matching_triggers(state, org, project, "pullRequest", &target, &source, &paths);
+    }
     Json(item).into_response()
 }
 
@@ -2362,6 +2369,14 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
             Ok(variables) => variables,
             Err(message) => return fail(StatusCode::BAD_REQUEST, message),
         };
+        let triggers = match definition_triggers(payload.get("triggers")) {
+            Ok(triggers) => triggers,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let queue_status = match definition_queue_status(payload.get("queueStatus"), "enabled") {
+            Ok(status) => status,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
         let next = list(state, org, project, key)
             .iter()
             .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
@@ -2370,7 +2385,7 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
             + 1;
         let item = fill_definition(
             project,
-            json!({"id": next, "name": name, "path": "\\", "type": "build", "variableGroups": groups, "variables": variables}),
+            json!({"id": next, "name": name, "path": "\\", "type": "build", "queueStatus": queue_status, "variableGroups": groups, "variables": variables, "triggers": triggers}),
         );
         put_item(state, org, project, key, item.clone());
         return Json(dress_definition(project, item)).into_response();
@@ -2407,15 +2422,114 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
         } else {
             existing.get("variables").cloned().unwrap_or(json!({}))
         };
+        let triggers = if payload.get("triggers").is_some() {
+            match definition_triggers(payload.get("triggers")) {
+                Ok(triggers) => triggers,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            }
+        } else {
+            existing.get("triggers").and_then(|value| value.as_array().cloned()).unwrap_or_default()
+        };
+        let queue_status = match definition_queue_status(
+            payload.get("queueStatus"),
+            text_of(&existing, "queueStatus").unwrap_or_else(|| "enabled".into()).as_str(),
+        ) {
+            Ok(status) => status,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
         let mut item = existing;
         item["name"] = json!(name);
         item["variableGroups"] = json!(groups);
         item["variables"] = variables;
+        item["triggers"] = json!(triggers);
+        item["queueStatus"] = json!(queue_status);
         let item = fill_definition(project, item);
         put_item(state, org, project, key, item.clone());
         return Json(dress_definition(project, item)).into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn definition_queue_status(incoming: Option<&Value>, previous: &str) -> Result<String, &'static str> {
+    let Some(incoming) = incoming.and_then(|value| value.as_str()) else {
+        return Ok(canonical_queue_status(previous).unwrap_or("enabled").into());
+    };
+    canonical_queue_status(incoming)
+        .map(str::to_string)
+        .ok_or("état de file inconnu")
+}
+
+fn canonical_queue_status(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("enabled") {
+        Some("enabled")
+    } else if name.eq_ignore_ascii_case("paused") {
+        Some("paused")
+    } else if name.eq_ignore_ascii_case("disabled") {
+        Some("disabled")
+    } else {
+        None
+    }
+}
+
+fn definition_triggers(incoming: Option<&Value>) -> Result<Vec<Value>, &'static str> {
+    let Some(incoming) = incoming else {
+        return Ok(Vec::new());
+    };
+    let Some(rows) = incoming.as_array() else {
+        return Err("déclencheur illisible");
+    };
+    let mut stored = Vec::new();
+    for row in rows {
+        let Some(kind) = text_of(row, "triggerType").or_else(|| text_of(row, "type")) else {
+            return Err("déclencheur inconnu");
+        };
+        let Some(kind) = canonical_trigger(&kind) else {
+            return Err("déclencheur inconnu");
+        };
+        let branch_filters = filter_list(row.get("branchFilters"), "filtre de branche absent", "filtre de branche illisible")?;
+        let path_filters = filter_list(row.get("pathFilters"), "filtre de chemin absent", "filtre de chemin illisible")?;
+        let mut trigger = json!({
+            "triggerType": kind,
+            "branchFilters": branch_filters,
+            "pathFilters": path_filters,
+            "batchChanges": row.get("batchChanges").and_then(|value| value.as_bool()).unwrap_or(false)
+        });
+        if kind == "schedule" {
+            trigger["schedules"] = row.get("schedules").cloned().filter(|value| value.is_array()).unwrap_or(json!([]));
+        }
+        stored.push(trigger);
+    }
+    Ok(stored)
+}
+
+fn canonical_trigger(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("continuousIntegration") {
+        Some("continuousIntegration")
+    } else if name.eq_ignore_ascii_case("pullRequest") {
+        Some("pullRequest")
+    } else if name.eq_ignore_ascii_case("schedule") {
+        Some("schedule")
+    } else {
+        None
+    }
+}
+
+fn filter_list(value: Option<&Value>, blank: &'static str, illisible: &'static str) -> Result<Vec<String>, &'static str> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(rows) = value.as_array() else {
+        return Err(illisible);
+    };
+    let mut filters = Vec::new();
+    for row in rows {
+        let text = row.as_str().unwrap_or("").trim();
+        if text.is_empty() {
+            return Err(blank);
+        }
+        filters.push(text.to_string());
+    }
+    Ok(filters)
 }
 
 fn definition_groups(state: &AppState, org: &str, project: &str, value: Option<&Value>) -> Result<Vec<Value>, &'static str> {
@@ -2500,6 +2614,250 @@ fn queue_variables(state: &AppState, org: &str, project: &str, definition: &Valu
         }
     }
     Ok(Value::Object(variables))
+}
+
+fn enqueue_build(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    definition: Option<&Value>,
+    definition_id: i64,
+    source_branch: &str,
+    reason: &str,
+    payload: &Value,
+) -> Result<Value, &'static str> {
+    let next = list(state, org, project, "build/builds").len() as i64 + 1;
+    let definition_name = definition
+        .and_then(|item| text_of(item, "name"))
+        .unwrap_or_else(|| "CI".into());
+    let (mut variables, groups) = match definition {
+        Some(definition) => (
+            queue_variables(state, org, project, definition)?,
+            definition.get("variableGroups").cloned().unwrap_or(json!([])),
+        ),
+        None => (json!({}), json!([])),
+    };
+    let parameters = match variables.as_object_mut() {
+        Some(entries) => apply_queue_parameters(entries, definition.unwrap_or(&json!({})), payload)?,
+        None => String::new(),
+    };
+    let queue = list(state, org, project, "distributedtask/queues")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"id": 1, "name": "Default", "pool": {"id": 1, "name": "Azure Pipelines"}}));
+    let item = json!({
+        "id": next,
+        "buildNumber": format!("20261029.{next}"),
+        "status": "notStarted",
+        "reason": reason,
+        "definition": {"id": definition_id, "name": definition_name},
+        "project": {"name": project},
+        "sourceBranch": source_branch,
+        "sourceVersion": object_id(&format!("build-{next}")),
+        "queue": queue,
+        "variables": variables,
+        "variableGroups": groups,
+        "parameters": parameters,
+        "queueTime": "2026-10-29T00:00:00Z",
+        "url": format!("/{org}/{project}/_apis/build/builds/{next}"),
+        "requestedBy": {"displayName": "azurz"}
+    });
+    put_item(state, org, project, "build/builds", item.clone());
+    Ok(item)
+}
+
+fn queue_push_triggers(state: &AppState, org: &str, project: &str, repo_id: &str, push: &Value) {
+    let paths = commit_paths(state, org, project, repo_id, push);
+    let refs = push
+        .get("refUpdates")
+        .and_then(|value| value.as_array())
+        .map(|rows| rows.iter().filter_map(|row| text_of(row, "name")).collect::<Vec<_>>())
+        .filter(|names| !names.is_empty())
+        .or_else(|| text_of(push, "refName").map(|name| vec![name]))
+        .unwrap_or_default();
+    for branch in refs {
+        queue_matching_triggers(state, org, project, "continuousIntegration", &branch, &branch, &paths);
+    }
+}
+
+fn queue_matching_triggers(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    trigger_type: &str,
+    filter_branch: &str,
+    build_branch: &str,
+    paths: &[String],
+) {
+    let definitions = list(state, org, project, "build/definitions");
+    for definition in definitions {
+        let status = text_of(&definition, "queueStatus").unwrap_or_else(|| "enabled".into());
+        if status.eq_ignore_ascii_case("disabled") || status.eq_ignore_ascii_case("paused") {
+            continue;
+        }
+        let Some(triggers) = definition.get("triggers").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        let Some(trigger) = triggers.iter().find(|trigger| {
+            text_of(trigger, "triggerType").as_deref() == Some(trigger_type)
+                && filter_selected(trigger.get("branchFilters"), filter_branch)
+                && paths_selected(trigger.get("pathFilters"), paths)
+        }) else {
+            continue;
+        };
+        let definition_id = definition.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+        if trigger.get("batchChanges").and_then(|value| value.as_bool()) == Some(true)
+            && build_already_open(state, org, project, definition_id, build_branch)
+        {
+            continue;
+        }
+        let reason = if trigger_type == "pullRequest" { "pullRequest" } else { "individualCI" };
+        let _ = enqueue_build(
+            state,
+            org,
+            project,
+            Some(&definition),
+            definition_id,
+            build_branch,
+            reason,
+            &json!({}),
+        );
+    }
+}
+
+fn build_already_open(state: &AppState, org: &str, project: &str, definition_id: i64, branch: &str) -> bool {
+    list(state, org, project, "build/builds").iter().any(|build| {
+        let status = text_of(build, "status").unwrap_or_default();
+        let open = status.eq_ignore_ascii_case("notStarted") || status.eq_ignore_ascii_case("inProgress");
+        open
+            && build.get("definition").and_then(|value| value.get("id")).and_then(|value| value.as_i64()) == Some(definition_id)
+            && text_of(build, "sourceBranch").as_deref() == Some(branch)
+    })
+}
+
+fn commit_paths(state: &AppState, org: &str, project: &str, repo_id: &str, push: &Value) -> Vec<String> {
+    let Some(commits) = push.get("commits").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for commit in commits {
+        let id = text_of(commit, "commitId").or_else(|| text_of(commit, "id")).unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        for change in list(state, org, project, &format!("git/repositories/{repo_id}/commits/{id}/changes")) {
+            if let Some(path) = change
+                .get("item")
+                .and_then(|item| text_of(item, "path"))
+                .or_else(|| text_of(&change, "id"))
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+fn pull_change_paths(state: &AppState, org: &str, project: &str, pull: &Value) -> Vec<String> {
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let tips = pull_tips(state, org, project, pull);
+    let mut paths = Vec::new();
+    for commit in tips.ahead {
+        let id = text_of(&commit, "commitId").or_else(|| text_of(&commit, "id")).unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        for change in list(state, org, project, &format!("git/repositories/{repo_id}/commits/{id}/changes")) {
+            if let Some(path) = change.get("item").and_then(|item| text_of(item, "path")) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+fn paths_selected(filters: Option<&Value>, paths: &[String]) -> bool {
+    let Some(rows) = filters.and_then(|value| value.as_array()) else {
+        return true;
+    };
+    if rows.is_empty() {
+        return true;
+    }
+    paths.iter().any(|path| filter_selected(filters, path))
+}
+
+fn filter_selected(filters: Option<&Value>, value: &str) -> bool {
+    let Some(rows) = filters.and_then(|value| value.as_array()) else {
+        return true;
+    };
+    if rows.is_empty() {
+        return true;
+    }
+    let mut included = false;
+    let mut has_include = false;
+    let mut excluded = false;
+    for row in rows {
+        let text = row.as_str().unwrap_or("").trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (exclude, pattern) = if let Some(rest) = text.strip_prefix('-') {
+            (true, rest)
+        } else if let Some(rest) = text.strip_prefix('+') {
+            (false, rest)
+        } else {
+            (false, text)
+        };
+        if pattern.is_empty() || !glob_match(pattern, value) {
+            continue;
+        }
+        if exclude {
+            excluded = true;
+        } else {
+            has_include = true;
+            included = true;
+        }
+    }
+    if !has_include {
+        has_include = rows.iter().any(|row| {
+            let text = row.as_str().unwrap_or("").trim();
+            !text.is_empty() && !text.starts_with('-')
+        });
+    }
+    if excluded {
+        return false;
+    }
+    if !has_include {
+        return true;
+    }
+    included
+}
+
+fn glob_match(pattern: &str, value: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if !value.starts_with(parts[0]) {
+        return false;
+    }
+    let mut cursor = parts[0].len();
+    if parts.len() == 1 {
+        return cursor == value.len();
+    }
+    for (index, part) in parts.iter().enumerate().skip(1) {
+        if index + 1 == parts.len() {
+            if part.is_empty() {
+                return true;
+            }
+            return value.len() >= cursor + part.len() && value[cursor..].ends_with(part);
+        }
+        if part.is_empty() {
+            continue;
+        }
+        let Some(found) = value[cursor..].find(part) else {
+            return false;
+        };
+        cursor += found + part.len();
+    }
+    true
 }
 
 fn parameter_text(value: &Value) -> String {
@@ -2702,7 +3060,6 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
     }
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
-        let next = list(state, org, project, key).len() as i64 + 1;
         let definition_id = payload
             .get("definition")
             .and_then(|value| value.get("id"))
@@ -2711,49 +3068,12 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
         let found = list(state, org, project, "build/definitions")
             .into_iter()
             .find(|item| item.get("id").and_then(|value| value.as_i64()) == Some(definition_id));
-        let definition_name = found
-            .as_ref()
-            .and_then(|item| text_of(item, "name"))
-            .unwrap_or_else(|| "CI".into());
-        let (mut variables, groups) = match found.as_ref() {
-            Some(definition) => match queue_variables(state, org, project, definition) {
-                Ok(variables) => (
-                    variables,
-                    definition.get("variableGroups").cloned().unwrap_or(json!([])),
-                ),
-                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
-            },
-            None => (json!({}), json!([])),
+        let source = text_of(&payload, "sourceBranch").unwrap_or_else(|| "refs/heads/main".into());
+        let reason = text_of(&payload, "reason").unwrap_or_else(|| "manual".into());
+        return match enqueue_build(state, org, project, found.as_ref(), definition_id, &source, &reason, &payload) {
+            Ok(item) => Json(item).into_response(),
+            Err(message) => fail(StatusCode::BAD_REQUEST, message),
         };
-        let parameters = match variables.as_object_mut() {
-            Some(entries) => match apply_queue_parameters(entries, found.as_ref().unwrap_or(&json!({})), &payload) {
-                Ok(text) => text,
-                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
-            },
-            None => String::new(),
-        };
-        let queue = list(state, org, project, "distributedtask/queues")
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| json!({"id": 1, "name": "Default", "pool": {"id": 1, "name": "Azure Pipelines"}}));
-        let item = json!({
-            "id": next,
-            "buildNumber": format!("20261029.{next}"),
-            "status": "notStarted",
-            "definition": {"id": definition_id, "name": definition_name},
-            "project": {"name": project},
-            "sourceBranch": text_of(&payload, "sourceBranch").unwrap_or_else(|| "refs/heads/main".into()),
-            "sourceVersion": object_id(&format!("build-{next}")),
-            "queue": queue,
-            "variables": variables,
-            "variableGroups": groups,
-            "parameters": parameters,
-            "queueTime": "2026-10-29T00:00:00Z",
-            "url": format!("/{org}/{project}/_apis/build/builds/{next}"),
-            "requestedBy": {"displayName": "azurz"}
-        });
-        put_item(state, org, project, key, item.clone());
-        return Json(item).into_response();
     }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("timeline") {
@@ -4413,6 +4733,7 @@ fn fill_definition(project: &str, mut item: Value) -> Value {
         object.entry("revision").or_insert(json!(1));
         object.entry("variableGroups").or_insert(json!([]));
         object.entry("variables").or_insert(json!({}));
+        object.entry("triggers").or_insert(json!([]));
         object.entry("project").or_insert(json!({"name": project}));
     }
     item
