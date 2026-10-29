@@ -60,6 +60,7 @@ pub fn dispatch(
         ("policy", "configurations") => policy_configurations(state, method, org, project, rest, body),
         ("policy", "evaluations") => policy_evaluations(state, method, org, project, query, body),
         ("audit", "streams") => audit_streams(state, method, org, Some(project), rest, body),
+        ("extensionmanagement", "installedextensions") => installed_extensions(state, method, org, Some(project), rest, body),
         _ => return None,
     };
     Some(response)
@@ -107,6 +108,13 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
             audit_streams(state, method, org, project.as_deref(), rest, body)
+        }
+        ("extensionmanagement", "installedextensions") => {
+            let project = query_param(query, "project")
+                .map(pct_decode)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            installed_extensions(state, method, org, project.as_deref(), rest, body)
         }
         _ => return None,
     };
@@ -8645,6 +8653,283 @@ fn dress_stream(org: &str, project: &str, mut item: Value) -> Value {
     if let Some(object) = item.as_object_mut() {
         object.insert("project".into(), json!(project));
         object.insert("url".into(), json!(format!("/{org}/{project}/_apis/audit/streams/{id}")));
+    }
+    item
+}
+
+const INSTALLED_EXTENSIONS: &str = "extensionmanagement/installed";
+
+pub fn installed_extensions(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(tail) = extension_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "extension introuvable")
+        };
+    };
+    if tail.len() > 2 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "extension introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = match project {
+                Some(project) => project_extensions(state, org, project),
+                None => org_extensions(state, org),
+            };
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let project = project.map(str::to_string).unwrap_or_else(|| state.names().1);
+            return match extension_create(state, org, &project, body) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key: Vec<String> = tail.iter().map(|part| pct_decode(part)).collect();
+    if method == Method::GET {
+        return match locate_extension(state, org, project, &key) {
+            Some((owner, found)) => Json(dress_extension(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "extension introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some((owner, found)) = locate_extension(state, org, project, &key) else {
+            return fail(StatusCode::NOT_FOUND, "extension introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(INSTALLED_EXTENSIONS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "extension introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn extension_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().position(|part| part.eq_ignore_ascii_case("installedextensions"))?;
+    Some(&rest[index + 1..])
+}
+
+fn project_extensions(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut rows = list_extensions(state, org, project);
+    rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+    rows.into_iter().map(|item| dress_extension(org, project, item)).collect()
+}
+
+fn org_extensions(state: &AppState, org: &str) -> Vec<Value> {
+    let mut rows = all_extensions(state, org);
+    rows.sort_by(|left, right| value_key(&left.1["id"]).cmp(&value_key(&right.1["id"])));
+    rows.into_iter().map(|(project, item)| dress_extension(org, &project, item)).collect()
+}
+
+fn list_extensions(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(INSTALLED_EXTENSIONS))
+            .unwrap_or_default()
+    })
+}
+
+fn all_extensions(state: &AppState, org: &str) -> Vec<(String, Value)> {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (name, project) in &organization.projects {
+            if let Some(bucket) = project.buckets.get(INSTALLED_EXTENSIONS) {
+                for item in bucket.items.values() {
+                    rows.push((name.clone(), item.clone()));
+                }
+            }
+        }
+        rows
+    })
+}
+
+fn locate_extension(state: &AppState, org: &str, project: Option<&str>, key: &[String]) -> Option<(String, Value)> {
+    let key: Vec<String> = key.iter().map(|part| part.trim().to_string()).collect();
+    state.read(|db| {
+        let organization = db.orgs.get(org)?;
+        for (name, stored) in &organization.projects {
+            if let Some(project) = project {
+                if !name.eq_ignore_ascii_case(project) && stored.id != project {
+                    continue;
+                }
+            }
+            if let Some(item) = stored.buckets.get(INSTALLED_EXTENSIONS).and_then(|bucket| {
+                bucket.items.values().find(|item| extension_matches(item, &key))
+            }) {
+                return Some((name.clone(), item.clone()));
+            }
+        }
+        None
+    })
+}
+
+fn extension_matches(item: &Value, key: &[String]) -> bool {
+    let id = value_key(&item["id"]);
+    let extension_id = item.get("extensionId").and_then(|value| value.as_str()).unwrap_or("");
+    let extension_name = item.get("extensionName").and_then(|value| value.as_str()).unwrap_or("");
+    let publisher = item.get("publisherId").and_then(|value| value.as_str()).unwrap_or("");
+    match key {
+        [one] => id == one.as_str() || extension_id.eq_ignore_ascii_case(one) || extension_name.eq_ignore_ascii_case(one),
+        [publisher_key, extension_key] => {
+            publisher.eq_ignore_ascii_case(publisher_key) && extension_id.eq_ignore_ascii_case(extension_key)
+        }
+        _ => false,
+    }
+}
+
+fn next_extension_id(state: &AppState, org: &str) -> i64 {
+    all_extensions(state, org)
+        .iter()
+        .filter_map(|(_, item)| value_key(&item["id"]).strip_prefix("ext-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn extension_create(state: &AppState, org: &str, project: &str, body: &[u8]) -> Result<Value, &'static str> {
+    let (name, extension_id, publisher, publisher_name, version, flags) = extension_payload(body)?;
+    let id = format!("ext-{}", next_extension_id(state, org));
+    let item = json!({
+        "id": id,
+        "extensionId": extension_id,
+        "extensionName": name,
+        "publisherId": publisher,
+        "publisherName": publisher_name,
+        "version": version,
+        "installState": {"flags": flags}
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("extension introuvable");
+        };
+        let existing: Vec<Value> = stored
+            .buckets
+            .get(INSTALLED_EXTENSIONS)
+            .map(|bucket| bucket.items.values().cloned().collect())
+            .unwrap_or_default();
+        if existing.iter().any(|stored| {
+            stored.get("publisherId").and_then(|value| value.as_str()).is_some_and(|current| current.eq_ignore_ascii_case(&publisher))
+                && stored
+                    .get("extensionId")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|current| current.eq_ignore_ascii_case(&extension_id))
+        }) {
+            return Err("extension existante");
+        }
+        let bucket = stored.buckets.entry(INSTALLED_EXTENSIONS.to_string()).or_insert_with(Bucket::empty);
+        bucket.put(item.clone());
+        Ok(())
+    })?;
+    Ok(dress_extension(org, project, item))
+}
+
+fn extension_payload(body: &[u8]) -> Result<(String, String, String, String, String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("extension illisible");
+    };
+    let Some(name) = object
+        .get("extensionName")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let extension_id = match object.get("extensionId") {
+        None => extension_slug(&name).ok_or("identifiant absent")?,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if extension_token(value) {
+                value.to_string()
+            } else {
+                return Err("identifiant absent");
+            }
+        }
+        Some(_) => return Err("identifiant absent"),
+    };
+    let publisher = match object.get("publisherId") {
+        None => "azurz".to_string(),
+        Some(Value::String(value)) if extension_token(value.trim()) => value.trim().to_string(),
+        Some(_) => return Err("éditeur absent"),
+    };
+    let publisher_name = match object.get("publisherName") {
+        None => publisher.clone(),
+        Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_string(),
+        Some(_) => return Err("éditeur absent"),
+    };
+    let version = match object.get("version") {
+        None => "1.0.0".to_string(),
+        Some(Value::String(value)) if extension_version(value.trim()) => value.trim().to_string(),
+        Some(_) => return Err("version absente"),
+    };
+    let flags = match object.get("installState") {
+        None => match object.get("flags") {
+            None => "none".to_string(),
+            Some(Value::String(value)) if value == "none" || value == "disabled" => value.clone(),
+            Some(_) => return Err("état absent"),
+        },
+        Some(Value::Object(state)) => match state.get("flags") {
+            Some(Value::String(value)) if value == "none" || value == "disabled" => value.clone(),
+            _ => return Err("état absent"),
+        },
+        Some(_) => return Err("état absent"),
+    };
+    Ok((name, extension_id, publisher, publisher_name, version, flags))
+}
+
+fn extension_token(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(char) if char.is_ascii_alphabetic()) && chars.all(|char| char.is_ascii_alphanumeric())
+}
+
+fn extension_slug(name: &str) -> Option<String> {
+    let slug: String = name.chars().filter(|char| char.is_ascii_alphanumeric()).collect();
+    if extension_token(&slug) { Some(slug) } else { None }
+}
+
+fn extension_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let numeric = |part: Option<&str>| part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    numeric(parts.next()) && numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
+}
+
+fn dress_extension(org: &str, project: &str, mut item: Value) -> Value {
+    let publisher = item.get("publisherId").and_then(|value| value.as_str()).unwrap_or("azurz").to_string();
+    let extension_id = item.get("extensionId").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/extensionmanagement/installedextensions/{publisher}/{extension_id}")),
+        );
     }
     item
 }

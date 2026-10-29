@@ -155,6 +155,7 @@
       <a href="/__ORG__/__PROJECT__/_groups">Groupes</a>
       <a href="/__ORG__/__PROJECT__/_memberships">Appartenances</a>
       <a href="/__ORG__/__PROJECT__/_audit">Audit</a>
+      <a href="/__ORG__/__PROJECT__/_extensions">Extensions</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3467,6 +3468,38 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/audit/streams/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_extensions") {
+          const page = await api("GET", root + "/extensionmanagement/installedextensions?api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='extensions'><thead><tr><th></th><th>Nom</th><th>Éditeur</th><th>Version</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='ext-remove' data-id='" + esc(item.publisherId) + "/" + esc(item.extensionId) + "' data-name='" + esc(item.extensionName) + "'>Retirer</button></td><td>" + esc(item.extensionName) + "</td><td>" + esc(item.publisherId) + "</td><td>" + esc(item.version) + "</td></tr>").join("") + "</tbody></table>" : "<p id='ext-empty' class='sub'>Aucune extension.</p>";
+          view.innerHTML = "<h1>Extensions</h1><div class='command'><input id='ext-name' placeholder='Pompe' /><button id='ext-add' type='button'>Ajouter</button></div>" + table + "<p id='ext-error' class='error' hidden></p>";
+          document.getElementById("ext-add").onclick = async () => {
+            const error = document.getElementById("ext-error");
+            error.hidden = true;
+            const name = document.getElementById("ext-name").value;
+            try {
+              await api("POST", root + "/extensionmanagement/installedextensions?api-version=7.1", { extensionName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.ext-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("ext-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/extensionmanagement/installedextensions/" + button.dataset.id.split("/").map(encodeURIComponent).join("/") + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

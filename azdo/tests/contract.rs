@@ -26976,3 +26976,353 @@ async fn removing_one_audit_stream_keeps_the_sibling_the_membership_and_the_othe
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("flux d'audit introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_installed_extension_keeps_the_sibling_the_audit_stream_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions?api-version=7.1";
+
+    async fn create(
+        app: &axum::Router,
+        auth: &str,
+        project: &str,
+        name: &str,
+        publisher: Option<&str>,
+        version: Option<&str>,
+        flags: Option<&str>,
+    ) -> String {
+        let path = format!("/azurz/{project}/_apis/extensionmanagement/installedextensions?api-version=7.1");
+        let publisher_json = match publisher {
+            Some(publisher) => format!(r#","publisherId":"{publisher}""#),
+            None => String::new(),
+        };
+        let version_json = match version {
+            Some(version) => format!(r#","version":"{version}""#),
+            None => String::new(),
+        };
+        let flags_json = match flags {
+            Some(flags) => format!(r#","flags":"{flags}""#),
+            None => String::new(),
+        };
+        let body = format!(r#"{{"extensionName":"{name}"{publisher_json}{version_json}{flags_json}}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("ext-"), "{created}");
+        assert_eq!(created["extensionName"], name);
+        assert_eq!(created["extensionId"], name);
+        assert_eq!(created["publisherId"], publisher.unwrap_or("azurz"));
+        assert_eq!(created["publisherName"], publisher.unwrap_or("azurz"));
+        assert_eq!(created["version"], version.unwrap_or("1.0.0"));
+        assert_eq!(created["installState"]["flags"], flags.unwrap_or("none"));
+        assert_eq!(created["project"], project);
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!(
+                "/{project}/_apis/extensionmanagement/installedextensions/{}/{}",
+                publisher.unwrap_or("azurz"),
+                name
+            )),
+            "{created}"
+        );
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("extension illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"extensionName":" "}"#, r#"{"extensionName":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"extensionName":"!!"}"#, r#"{"extensionName":"Pompe","extensionId":"1Pompe"}"#, r#"{"extensionName":"Pompe","extensionId":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("identifiant absent"), "{body}");
+    }
+    for payload in [
+        r#"{"extensionName":"Pompe","publisherId":"azurz-lab"}"#,
+        r#"{"extensionName":"Pompe","publisherId":1}"#,
+        r#"{"extensionName":"Pompe","publisherName":" "}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("éditeur absent"), "{body}");
+    }
+    for payload in [r#"{"extensionName":"Pompe","version":"1.0"}"#, r#"{"extensionName":"Pompe","version":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("version absente"), "{body}");
+    }
+    for payload in [
+        r#"{"extensionName":"Pompe","flags":"Disabled"}"#,
+        r#"{"extensionName":"Pompe","installState":{"flags":"none "}}"#,
+        r#"{"extensionName":"Pompe","installState":"none"}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("état absent"), "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/extensionmanagement/installedextensions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"extensionName":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["project"], "AzurzDemo");
+    assert_eq!(sonde["publisherId"], "azurz");
+    assert_eq!(sonde["version"], "1.0.0");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/extensionmanagement/installedextensions/{}?api-version=7.1", sonde["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/audit/streams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Sonde","consumerType":"Splunk","status":"disabled","daysToBackfill":3}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stream: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let stream_id = stream["id"].as_str().unwrap().to_string();
+    assert_eq!(stream["displayName"], "Sonde");
+    assert_eq!(stream["consumerType"], "Splunk");
+
+    let pompe = create(&app, &auth, "AzurzDemo", "Pompe", None, None, None).await;
+    let relais = create(&app, &auth, "AzurzDemo", "Relais", Some("Contoso"), Some("2.1.0"), Some("disabled")).await;
+    let atelier = create(&app, &auth, "Atelier", "Atelier", Some("Fabrikam"), Some("3.0.1"), None).await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"extensionName":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("extension existante"), "{body}");
+    let other_publisher = create(&app, &auth, "AzurzDemo", "Pompe", Some("Contoso"), None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/{other_publisher}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let same = create(&app, &auth, "Atelier", "Pompe", None, None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/azurz/{same}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("extension introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/Atelier/_apis/extensionmanagement/installedextensions/azurz/Pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["extensionName"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["publisherId"], "azurz");
+    assert_eq!(pompe_row["version"], "1.0.0");
+    assert_eq!(pompe_row["installState"]["flags"], "none");
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["extensionName"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais);
+    assert_eq!(relais_row["publisherId"], "Contoso");
+    assert_eq!(relais_row["version"], "2.1.0");
+    assert_eq!(relais_row["installState"]["flags"], "disabled");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/extensionmanagement/installedextensions?project=AzurzDemo&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let filtered: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(filtered["count"], 2, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/extensionmanagement/installedextensions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let all: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(all["count"], 3, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/Contoso/Relais?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let by_pair: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_pair["id"], relais);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"extensionName":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/{pompe}/extra/suite?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/{pompe}/extra/suite?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("extension introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/extensionmanagement/installedextensions/azurz/Pompe?api-version=7.1");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert!(kept["value"].as_array().unwrap().iter().all(|item| item["extensionName"] != "Pompe"), "{body}");
+    let sibling = &kept["value"][0];
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["extensionName"], "Relais");
+    assert_eq!(sibling["publisherId"], "Contoso");
+    assert_eq!(sibling["version"], "2.1.0");
+    assert_eq!(sibling["installState"]["flags"], "disabled");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/extensionmanagement/installedextensions/{atelier}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["id"], atelier);
+    assert_eq!(kept_other["extensionName"], "Atelier");
+    assert_eq!(kept_other["publisherId"], "Fabrikam");
+    assert_eq!(kept_other["version"], "3.0.1");
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/audit/streams/{stream_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_stream: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_stream["id"], stream_id);
+    assert_eq!(kept_stream["displayName"], "Sonde");
+    assert_eq!(kept_stream["consumerType"], "Splunk");
+    assert_eq!(kept_stream["status"], "disabled");
+    assert_eq!(kept_stream["daysToBackfill"], 3);
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("extension introuvable"), "{body}");
+}
