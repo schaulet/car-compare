@@ -660,10 +660,13 @@
             const shown = variable && variable.isSecret ? "••••" : ((variable && variable.value) || "");
             return key + " = " + shown;
           }
+          const pipeline = definitions[0];
+          const own = pipeline && pipeline.variables ? pipeline.variables : {};
+          const ownLines = Object.keys(own).map((key) => "<li>" + esc(variableLine(key, own[key])) + "</li>").join("") || "<li>Aucune variable.</li>";
           const defs = definitions.length ? "<table id='definitions'><thead><tr><th>ID</th><th>Pipeline</th><th>Groupe</th><th>File</th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(groupLabel(item)) + "</td><td>" + esc(item.queueStatus) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun pipeline.</p>";
           const runs = builds.length ? "<table><thead><tr><th>Build</th><th>Numéro</th><th>File</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.queue && item.queue.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune exécution.</p>";
           const options = groups.map((item) => "<option value='" + esc(item.id) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Pipelines</h1><div class='command'><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
           function timelineItems(records, parent, depth) {
             return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
               const result = record.result ? " / " + esc(record.result) : "";
@@ -733,10 +736,30 @@
             });
             location.reload();
           };
+          document.getElementById("def-var-add").onclick = async () => {
+            const definition = definitions[0];
+            if (!definition) return;
+            const key = document.getElementById("def-var-key").value || "CLE";
+            const secret = document.getElementById("def-var-secret").checked;
+            const variables = Object.assign({}, definition.variables || {});
+            variables[key] = { value: document.getElementById("def-var-value").value || "", isSecret: secret, allowOverride: !secret };
+            await api("PUT", root + "/build/definitions/" + encodeURIComponent(definition.id) + "?api-version=7.1", { variables });
+            location.reload();
+          };
           document.getElementById("queue").onclick = async () => {
             const definition = definitions[0];
             if (!definition) return;
-            await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: definition.id }, sourceBranch: "refs/heads/main" });
+            const body = { definition: { id: definition.id }, sourceBranch: "refs/heads/main" };
+            const override = document.getElementById("queue-override").value.trim();
+            if (override) {
+              const cut = override.indexOf("=");
+              const key = cut < 0 ? override : override.slice(0, cut);
+              const value = cut < 0 ? "" : override.slice(cut + 1);
+              const parameters = {};
+              parameters[key] = value;
+              body.parameters = JSON.stringify(parameters);
+            }
+            await api("POST", root + "/build/builds?api-version=7.1", body);
             location.reload();
           };
           return;

@@ -2358,18 +2358,22 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
             Ok(groups) => groups,
             Err(message) => return fail(StatusCode::BAD_REQUEST, message),
         };
+        let variables = match definition_variables(payload.get("variables").unwrap_or(&json!({})), None) {
+            Ok(variables) => variables,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
         let next = list(state, org, project, key)
             .iter()
             .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
             .max()
             .unwrap_or(0)
             + 1;
-        let item = dress_definition(
+        let item = fill_definition(
             project,
-            json!({"id": next, "name": name, "path": "\\", "type": "build", "variableGroups": groups}),
+            json!({"id": next, "name": name, "path": "\\", "type": "build", "variableGroups": groups, "variables": variables}),
         );
         put_item(state, org, project, key, item.clone());
-        return Json(item).into_response();
+        return Json(dress_definition(project, item)).into_response();
     }
     let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
     if id.is_empty() {
@@ -2395,12 +2399,21 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
         } else {
             existing.get("variableGroups").cloned().unwrap_or(json!([])).as_array().cloned().unwrap_or_default()
         };
+        let variables = if let Some(incoming) = payload.get("variables") {
+            match definition_variables(incoming, existing.get("variables")) {
+                Ok(variables) => variables,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            }
+        } else {
+            existing.get("variables").cloned().unwrap_or(json!({}))
+        };
         let mut item = existing;
         item["name"] = json!(name);
         item["variableGroups"] = json!(groups);
-        let item = dress_definition(project, item);
+        item["variables"] = variables;
+        let item = fill_definition(project, item);
         put_item(state, org, project, key, item.clone());
-        return Json(item).into_response();
+        return Json(dress_definition(project, item)).into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
@@ -2426,30 +2439,113 @@ fn definition_groups(state: &AppState, org: &str, project: &str, value: Option<&
     Ok(links)
 }
 
-fn queue_variables(state: &AppState, org: &str, project: &str, definition: &Value) -> Result<Value, &'static str> {
-    let Some(links) = definition.get("variableGroups").and_then(|value| value.as_array()) else {
-        return Ok(json!({}));
+fn definition_variables(incoming: &Value, previous: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(object) = incoming.as_object() else {
+        return Ok(previous.cloned().unwrap_or(json!({})));
     };
+    let mut stored = Map::new();
+    for (key, spec) in object {
+        let name = key.trim();
+        if name.is_empty() {
+            return Err("nom de variable absent");
+        }
+        let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+        let allow_override = spec.get("allowOverride").and_then(|value| value.as_bool()).unwrap_or(true);
+        let incoming_value = spec.get("value").and_then(|value| value.as_str()).unwrap_or("");
+        let previous_spec = previous.and_then(|variables| variables.get(name).or_else(|| variables.get(key)));
+        let previous_value = previous_spec.and_then(|item| item.get("value")).and_then(|value| value.as_str()).unwrap_or("");
+        let previous_secret = previous_spec.and_then(|item| item.get("isSecret")).and_then(|value| value.as_bool()).unwrap_or(false);
+        let value = if incoming_value.is_empty() && previous_secret {
+            previous_value
+        } else {
+            incoming_value
+        };
+        stored.insert(
+            name.to_string(),
+            json!({"value": value, "isSecret": is_secret, "allowOverride": allow_override}),
+        );
+    }
+    Ok(Value::Object(stored))
+}
+
+fn shown_variable(spec: &Value) -> Value {
+    let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+    let shown = if is_secret {
+        ""
+    } else {
+        spec.get("value").and_then(|value| value.as_str()).unwrap_or("")
+    };
+    json!({"value": shown, "isSecret": is_secret})
+}
+
+fn queue_variables(state: &AppState, org: &str, project: &str, definition: &Value) -> Result<Value, &'static str> {
     let mut variables = Map::new();
-    for link in links {
-        let id = value_key(&link["id"]);
-        let Some(group) = get_item(state, org, project, "distributedtask/variablegroups", &id) else {
-            return Err("groupe introuvable");
-        };
-        let Some(entries) = group.get("variables").and_then(|value| value.as_object()) else {
-            continue;
-        };
-        for (key, spec) in entries {
-            let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
-            let shown = if is_secret {
-                ""
-            } else {
-                spec.get("value").and_then(|value| value.as_str()).unwrap_or("")
+    if let Some(links) = definition.get("variableGroups").and_then(|value| value.as_array()) {
+        for link in links {
+            let id = value_key(&link["id"]);
+            let Some(group) = get_item(state, org, project, "distributedtask/variablegroups", &id) else {
+                return Err("groupe introuvable");
             };
-            variables.insert(key.clone(), json!({"value": shown, "isSecret": is_secret}));
+            let Some(entries) = group.get("variables").and_then(|value| value.as_object()) else {
+                continue;
+            };
+            for (key, spec) in entries {
+                variables.insert(key.clone(), shown_variable(spec));
+            }
+        }
+    }
+    if let Some(entries) = definition.get("variables").and_then(|value| value.as_object()) {
+        for (key, spec) in entries {
+            variables.insert(key.clone(), shown_variable(spec));
         }
     }
     Ok(Value::Object(variables))
+}
+
+fn parameter_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.get("value").and_then(|item| item.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn apply_queue_parameters(variables: &mut Map<String, Value>, definition: &Value, payload: &Value) -> Result<String, &'static str> {
+    let Some(raw) = payload.get("parameters") else {
+        return Ok(String::new());
+    };
+    let (text, entries) = match raw {
+        Value::String(text) if text.trim().is_empty() => return Ok(String::new()),
+        Value::String(text) => {
+            let parsed: Value = serde_json::from_str(text).map_err(|_| "paramètres de file illisibles")?;
+            let Some(entries) = parsed.as_object().cloned() else {
+                return Err("paramètres de file illisibles");
+            };
+            (text.clone(), entries)
+        }
+        Value::Object(entries) => (
+            serde_json::to_string(entries).unwrap_or_else(|_| "{}".into()),
+            entries.clone(),
+        ),
+        _ => return Err("paramètres de file illisibles"),
+    };
+    let defined = definition.get("variables").and_then(|value| value.as_object());
+    for (key, value) in entries {
+        let locked = defined.and_then(|vars| vars.get(&key)).is_some_and(|spec| {
+            spec.get("allowOverride").and_then(|flag| flag.as_bool()) == Some(false)
+        });
+        if locked {
+            continue;
+        }
+        let secret = defined
+            .and_then(|vars| vars.get(&key))
+            .and_then(|spec| spec.get("isSecret"))
+            .and_then(|flag| flag.as_bool())
+            .unwrap_or(false);
+        let shown = if secret { String::new() } else { parameter_text(&value) };
+        variables.insert(key, json!({"value": shown, "isSecret": secret}));
+    }
+    Ok(text)
 }
 
 fn build_artifacts(
@@ -2619,7 +2715,7 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             .as_ref()
             .and_then(|item| text_of(item, "name"))
             .unwrap_or_else(|| "CI".into());
-        let (variables, groups) = match found.as_ref() {
+        let (mut variables, groups) = match found.as_ref() {
             Some(definition) => match queue_variables(state, org, project, definition) {
                 Ok(variables) => (
                     variables,
@@ -2628,6 +2724,13 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
                 Err(message) => return fail(StatusCode::BAD_REQUEST, message),
             },
             None => (json!({}), json!([])),
+        };
+        let parameters = match variables.as_object_mut() {
+            Some(entries) => match apply_queue_parameters(entries, found.as_ref().unwrap_or(&json!({})), &payload) {
+                Ok(text) => text,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            },
+            None => String::new(),
         };
         let queue = list(state, org, project, "distributedtask/queues")
             .into_iter()
@@ -2644,6 +2747,7 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             "queue": queue,
             "variables": variables,
             "variableGroups": groups,
+            "parameters": parameters,
             "queueTime": "2026-10-29T00:00:00Z",
             "url": format!("/{org}/{project}/_apis/build/builds/{next}"),
             "requestedBy": {"displayName": "azurz"}
@@ -4301,14 +4405,33 @@ fn dress_repo(org: &str, project: &str, mut item: Value) -> Value {
     item
 }
 
-fn dress_definition(project: &str, mut item: Value) -> Value {
+fn fill_definition(project: &str, mut item: Value) -> Value {
     if let Some(object) = item.as_object_mut() {
         object.entry("path").or_insert(json!("\\"));
         object.entry("type").or_insert(json!("build"));
         object.entry("queueStatus").or_insert(json!("enabled"));
         object.entry("revision").or_insert(json!(1));
         object.entry("variableGroups").or_insert(json!([]));
+        object.entry("variables").or_insert(json!({}));
         object.entry("project").or_insert(json!({"name": project}));
+    }
+    item
+}
+
+fn dress_definition(project: &str, item: Value) -> Value {
+    let mut item = fill_definition(project, item);
+    if let Some(entries) = item.get_mut("variables").and_then(|value| value.as_object_mut()) {
+        for spec in entries.values_mut() {
+            let is_secret = spec.get("isSecret").and_then(|value| value.as_bool()).unwrap_or(false);
+            if is_secret {
+                if let Some(object) = spec.as_object_mut() {
+                    object.insert("value".into(), json!(""));
+                }
+            }
+            if let Some(object) = spec.as_object_mut() {
+                object.entry("allowOverride").or_insert(json!(true));
+            }
+        }
     }
     item
 }

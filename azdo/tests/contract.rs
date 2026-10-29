@@ -7879,3 +7879,166 @@ async fn merge_commit_keeps_source_files_after_the_target_moves() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("refs/heads/fusion-file"), "{body}");
 }
+
+#[tokio::test]
+async fn definition_variables_override_the_group_and_stay_masked() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seeded["variables"], serde_json::json!({}));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"variables":{" ":{"value":"x"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de variable absent"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["variables"], serde_json::json!({}));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/variablegroups?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ligne","type":"Vsts","variables":{"host":{"value":"ignition","isSecret":false},"token":{"value":"ligne-clef","isSecret":true}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let group_id = created["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"variableGroups":[{{"id":{group_id}}}],"variables":{{"host":{{"value":"lab","allowOverride":true}},"token":{{"value":"ligne-def","isSecret":true,"allowOverride":false}},"port":{{"value":"8088"}}}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let linked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(linked["variables"]["host"]["value"], "lab");
+    assert_eq!(linked["variables"]["token"]["value"], "");
+    assert_eq!(linked["variables"]["token"]["isSecret"], true);
+    assert_eq!(linked["variables"]["token"]["allowOverride"], false);
+    assert_eq!(linked["variables"]["port"]["value"], "8088");
+    assert!(!body.contains("ligne-def"));
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"variables":{"host":{"value":"lab","allowOverride":true},"token":{"value":"","isSecret":true,"allowOverride":false},"port":{"value":"8088"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("ligne-def"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"variables":{"host":{"value":"lab","allowOverride":true},"token":{"value":"","isSecret":false,"allowOverride":false},"port":{"value":"8088"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revealed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(revealed["variables"]["token"]["value"], "ligne-def");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/build/definitions/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"variables":{"host":{"value":"lab","allowOverride":true},"token":{"value":"","isSecret":true,"allowOverride":false},"port":{"value":"8088"}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("ligne-def"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queued["variables"]["host"]["value"], "lab");
+    assert_eq!(queued["variables"]["port"]["value"], "8088");
+    assert_eq!(queued["variables"]["token"]["value"], "");
+    assert_eq!(queued["variables"]["token"]["isSecret"], true);
+    assert!(!body.contains("ligne-def"));
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","parameters":"{\"host\":\"atelier\",\"token\":\"pirate\"}"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let overridden: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(overridden["variables"]["host"]["value"], "atelier");
+    assert_eq!(overridden["variables"]["token"]["value"], "");
+    assert_eq!(overridden["variables"]["token"]["isSecret"], true);
+    assert_eq!(overridden["parameters"], r#"{"host":"atelier","token":"pirate"}"#);
+    assert!(!body.contains("ligne-def"));
+    assert!(!body.contains("ligne-clef"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"parameters":"pas-du-json"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("paramètres de file illisibles"));
+}
