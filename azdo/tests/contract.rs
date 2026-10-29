@@ -2845,3 +2845,134 @@ async fn saved_queries_live_in_folders_and_run_the_updated_wiql() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn commit_statuses_keep_history_and_the_latest_per_context() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let commits: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let commit_id = commits["value"][0]["commitId"].as_str().unwrap();
+    let list_path = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{commit_id}/statuses?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &list_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &list_path,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"pending","description":"en cours","targetUrl":"http://lab/build/1","context":{"name":"ci","genre":"continuous-integration"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pending: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pending["state"], "pending");
+    assert_eq!(pending["context"]["name"], "ci");
+    assert_eq!(pending["targetUrl"], "http://lab/build/1");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &list_path,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded","description":"verte","context":{"name":"ci","genre":"continuous-integration"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &list_path,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"failed","description":"alerte","context":{"name":"audit","genre":"security"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", &list_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let history: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(history["count"], 3);
+    assert_eq!(history["value"][0]["state"], "failed");
+    assert_eq!(history["value"][0]["description"], "alerte");
+    let latest_path = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{commit_id}/statuses?latestOnly=true&api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &latest_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let latest: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(latest["count"], 2, "{body}");
+    let mut pairs: Vec<(String, String)> = latest["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["context"]["name"].as_str().unwrap().to_string(),
+                item["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![("audit".to_string(), "failed".to_string()), ("ci".to_string(), "succeeded".to_string())]);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &list_path,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"running","context":{"name":"ci"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &list_path,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/0000000000000000000000000000000000000000/statuses?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"state":"succeeded","context":{"name":"ci"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

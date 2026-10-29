@@ -58,7 +58,9 @@
     .state-new { background: #6b6b6b; }
     .state-active { background: #007acc; }
     .state-resolved { background: #d83b01; }
-    .state-closed { background: #107c10; }
+    .state-closed, .state-succeeded { background: #107c10; }
+    .state-failed, .state-error { background: #a4262c; }
+    .state-pending { background: #f2cb1d; color: #323130; }
     .type { font-size: 12px; font-weight: 600; }
     .board { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; align-items: start; }
     .col { background: var(--page); border: 1px solid var(--line); min-height: 240px; }
@@ -695,8 +697,23 @@
           const repoPath = repo ? root + "/git/repositories/" + encodeURIComponent(repo.id) : "";
           if (hub === "/_git/commits") {
             const commits = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/commits") : [];
-            const table = commits.length ? "<table><thead><tr><th>Commit</th><th>Commentaire</th><th>Auteur</th></tr></thead><tbody>" + commits.map((item) => "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "' data-parent='" + esc((item.parents && item.parents[0]) || "") + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
-            view.innerHTML = "<h1>Commits</h1><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<pre id='diff' class='panel' hidden></pre>";
+            const decorated = repo ? await Promise.all(commits.map(async (item) => {
+              const id = item.commitId || item.id;
+              const page = await api("GET", repoPath + "/commits/" + encodeURIComponent(id) + "/statuses?latestOnly=true&api-version=7.1");
+              return { item, statuses: page.value || [] };
+            })) : [];
+            function statusClass(state) {
+              const name = String(state || "").toLowerCase();
+              if (name === "succeeded") return "state-succeeded";
+              if (name === "failed" || name === "error") return "state-failed";
+              if (name === "pending") return "state-pending";
+              return "state-new";
+            }
+            const table = decorated.length ? "<table><thead><tr><th>Commit</th><th>Commentaire</th><th>Auteur</th><th>Statut</th></tr></thead><tbody>" + decorated.map(({ item, statuses }) => {
+              const badges = statuses.map((status) => "<span class='pill " + statusClass(status.state) + "'>" + esc(status.context && status.context.name) + " " + esc(status.state) + "</span>").join(" ");
+              return "<tr class='commit' data-id='" + esc(item.commitId || item.id) + "' data-parent='" + esc((item.parents && item.parents[0]) || "") + "'><td><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code></td><td>" + esc(item.comment) + "</td><td>" + esc(item.author?.name || "") + "</td><td class='statuses'>" + (badges || "") + "</td></tr>";
+            }).join("") + "</tbody></table>" : "<p class='sub'>Aucun commit.</p>";
+            view.innerHTML = "<h1>Commits</h1><div class='command'><input id='commit-path' placeholder='/src/fichier.txt' /><input id='commit-content' placeholder='Contenu' /><input id='commit-comment' placeholder='Commentaire' /><button id='push' type='button'>Pousser</button></div>" + table + "<section id='diff' class='panel' hidden></section>";
             function diffText(changes) {
               return (changes || []).map((change) => {
                 const head = (change.changeType || "") + " " + ((change.item && change.item.path) || "");
@@ -710,13 +727,30 @@
               row.onclick = async () => {
                 const panel = document.getElementById("diff");
                 panel.hidden = false;
+                const statuses = await api("GET", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/statuses?api-version=7.1");
+                let diffBody = "";
                 if (row.dataset.parent) {
                   const diff = await api("GET", repoPath + "/diffs/commits?baseVersion=" + encodeURIComponent(row.dataset.parent) + "&targetVersion=" + encodeURIComponent(row.dataset.id) + "&baseVersionType=commit&targetVersionType=commit&api-version=7.1");
-                  panel.textContent = diffText(diff.changes);
+                  diffBody = diffText(diff.changes);
                 } else {
                   const diff = await api("GET", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/changes?api-version=7.1");
-                  panel.textContent = diffText(diff.changes);
+                  diffBody = diffText(diff.changes);
                 }
+                const lines = (statuses.value || []).map((item) => "<li>" + esc(item.context && item.context.name) + " · " + esc(item.state) + " · " + esc(item.description || "") + "</li>").join("") || "<li>Aucun statut.</li>";
+                panel.innerHTML = "<h2>Statuts</h2><ul id='status-list'>" + lines + "</ul><div class='row'><select id='status-state'><option value='pending'>pending</option><option value='succeeded' selected>succeeded</option><option value='failed'>failed</option><option value='error'>error</option></select><input id='status-genre' placeholder='Genre' value='continuous-integration' /><input id='status-context' placeholder='Contexte' value='ci' /><input id='status-note' placeholder='Description' /><button id='status-add' type='button'>Publier le statut</button></div><h2>Diff</h2><pre id='diff-text'></pre>";
+                document.getElementById("diff-text").textContent = diffBody;
+                document.getElementById("status-add").onclick = async () => {
+                  await api("POST", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/statuses?api-version=7.1", {
+                    state: document.getElementById("status-state").value,
+                    description: document.getElementById("status-note").value,
+                    context: {
+                      name: document.getElementById("status-context").value || "ci",
+                      genre: document.getElementById("status-genre").value || "continuous-integration",
+                    },
+                    targetUrl: "http://lab/build/1",
+                  });
+                  location.reload();
+                };
               };
             });
             document.getElementById("push").onclick = async () => {

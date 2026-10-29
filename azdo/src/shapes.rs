@@ -133,7 +133,7 @@ fn git_repositories(
     let sub = rest.get(3).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     match sub.as_str() {
         "refs" => refs(state, method, org, project, repo_id, body),
-        "commits" => commits(state, method, org, project, repo_id, tail_after(rest, "commits"), body),
+        "commits" => commits(state, method, org, project, repo_id, tail_after(rest, "commits"), query, body),
         "pushes" => pushes(state, method, org, project, repo_id, tail_after(rest, "pushes"), body),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
         "items" => items(state, org, project, repo_id, query),
@@ -148,7 +148,7 @@ fn git_alias(state: &AppState, method: &Method, org: &str, project: &str, kind: 
     };
     match kind {
         "refs" => refs(state, method, org, project, &repo_id, body),
-        "commits" => commits(state, method, org, project, &repo_id, &[], body),
+        "commits" => commits(state, method, org, project, &repo_id, &[], "", body),
         "pushes" => pushes(state, method, org, project, &repo_id, &[], body),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
     }
@@ -192,9 +192,12 @@ fn refs(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &s
     }
 }
 
-fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], body: &[u8]) -> Response {
+fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], query: &str, body: &[u8]) -> Response {
     let key = format!("git/repositories/{repo_id}/commits");
     if let Some(commit_id) = tail.first() {
+        if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("statuses")) {
+            return commit_statuses(state, method, org, project, repo_id, commit_id, query, body);
+        }
         if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("changes")) && method == Method::GET {
             let changes = list(state, org, project, &format!("{key}/{commit_id}/changes"));
             return Json(json!({
@@ -232,6 +235,79 @@ fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id:
     });
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
+}
+
+fn commit_statuses(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    commit_id: &str,
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let commits_key = format!("git/repositories/{repo_id}/commits");
+    if get_item(state, org, project, &commits_key, commit_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "commit introuvable");
+    }
+    let key = format!("{commits_key}/{commit_id}/statuses");
+    if method == Method::GET {
+        let mut items = list(state, org, project, &key);
+        items.sort_by_key(|item| std::cmp::Reverse(item.get("id").and_then(|value| value.as_i64()).unwrap_or(0)));
+        let latest_only = query_param(query, "latestOnly")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1");
+        if latest_only {
+            let mut seen = std::collections::BTreeSet::new();
+            items.retain(|item| {
+                let context = item.get("context");
+                let name = context.and_then(|value| value.get("name")).and_then(|value| value.as_str()).unwrap_or("");
+                let genre = context.and_then(|value| value.get("genre")).and_then(|value| value.as_str()).unwrap_or("");
+                seen.insert(format!("{genre}\n{name}"))
+            });
+        }
+        return Json(page(items)).into_response();
+    }
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let Some(state_name) = text_of(&payload, "state").as_deref().and_then(git_status_state) else {
+        return fail(StatusCode::BAD_REQUEST, "état inconnu");
+    };
+    let Some(context) = payload.get("context").and_then(|value| value.as_object()) else {
+        return fail(StatusCode::BAD_REQUEST, "contexte absent");
+    };
+    let Some(name) = context.get("name").and_then(|value| value.as_str()).filter(|value| !value.is_empty()) else {
+        return fail(StatusCode::BAD_REQUEST, "contexte absent");
+    };
+    let genre = context.get("genre").and_then(|value| value.as_str()).unwrap_or("");
+    let next = list(state, org, project, &key).len() as i64 + 1;
+    let item = json!({
+        "id": next,
+        "state": state_name,
+        "description": text_of(&payload, "description").unwrap_or_default(),
+        "context": {"name": name, "genre": genre},
+        "targetUrl": payload.get("targetUrl").cloned().unwrap_or(Value::Null),
+        "creationDate": "2026-10-29T00:00:00Z",
+        "updatedDate": "2026-10-29T00:00:00Z",
+        "createdBy": {"displayName": "azurz", "uniqueName": "azurz"}
+    });
+    put_item(state, org, project, &key, item.clone());
+    Json(item).into_response()
+}
+
+fn git_status_state(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "notset" => Some("notSet"),
+        "pending" => Some("pending"),
+        "succeeded" => Some("succeeded"),
+        "failed" => Some("failed"),
+        "error" => Some("error"),
+        "partiallysucceeded" => Some("partiallySucceeded"),
+        "notapplicable" => Some("notApplicable"),
+        _ => None,
+    }
 }
 
 fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], body: &[u8]) -> Response {
