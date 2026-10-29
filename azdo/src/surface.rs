@@ -1,4 +1,4 @@
-use axum::http::{Method, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
@@ -11,6 +11,7 @@ pub fn org(state: &AppState, method: &Method, org: &str, rest: &[String], body: 
     let response = match head.as_str() {
         "search" => search(state, method, org, None, rest, body),
         "accesscontrollists" | "accesscontrolentries" => acls(state, method, org, rest, body),
+        "security" => permissions(state, method, org, rest, body),
         _ => return None,
     };
     Some(response)
@@ -21,6 +22,9 @@ pub fn project(state: &AppState, method: &Method, org: &str, project: &str, rest
     let response = match head.as_str() {
         "tfvc" => tfvc(state, method, org, project, rest, query, body),
         "search" => search(state, method, org, Some(project), rest, body),
+        "packaging" if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("upack")) => {
+            upack(state, method, org, project, rest, body)
+        }
         _ => return None,
     };
     Some(response)
@@ -41,8 +45,9 @@ pub fn packaging(state: &AppState, method: &Method, path: &str, body: &[u8]) -> 
         return fail(StatusCode::NOT_FOUND, "flux introuvable");
     };
     let protocol = parts.get(index + 2).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
+    let tail = if parts.len() > index + 3 { &parts[index + 3..] } else { &[] };
     if protocol == "nuget" {
-        return nuget_index(org, project, feed_name);
+        return nuget(state, method, org, project, &value_text(&feed["id"]), feed_name, tail, body);
     }
     if protocol == "npm" && (method == Method::GET || method == Method::PUT) {
         let name = parts.get(index + 3).cloned().unwrap_or_default();
@@ -197,6 +202,126 @@ fn acls(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u
         return Json(item).into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn permissions(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {
+    let resource = rest.get(1).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
+    if resource != "permissionevaluationbatch" || method != Method::POST {
+        return fail(StatusCode::NOT_FOUND, "évaluation introuvable");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let evaluations = payload.get("evaluations").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    let evaluations = evaluations
+        .into_iter()
+        .map(|mut evaluation| {
+            let namespace = text(&evaluation, "securityNamespaceId").unwrap_or_default();
+            let token = text(&evaluation, "token").unwrap_or_default();
+            let requested = evaluation.get("permissions").and_then(|value| value.as_i64()).unwrap_or(0);
+            let allowed = permission_granted(state, org, &namespace, &token, requested);
+            if let Some(object) = evaluation.as_object_mut() {
+                object.insert("value".into(), json!(allowed));
+            }
+            evaluation
+        })
+        .collect::<Vec<_>>();
+    Json(json!({"evaluations": evaluations})).into_response()
+}
+
+fn permission_granted(state: &AppState, org: &str, namespace: &str, token: &str, requested: i64) -> bool {
+    if requested == 0 {
+        return false;
+    }
+    let key = format!("acl/{namespace}");
+    let Some(acl) = list_org(state, org, &key).into_iter().find(|item| text(item, "token").as_deref() == Some(token)) else {
+        return false;
+    };
+    let Some(entries) = acl.get("acesDictionary").and_then(|value| value.as_object()) else {
+        return false;
+    };
+    entries.values().any(|entry| {
+        let allow = entry.get("allow").and_then(|value| value.as_i64()).unwrap_or(0);
+        let deny = entry.get("deny").and_then(|value| value.as_i64()).unwrap_or(0);
+        (allow & requested) == requested && (deny & requested) == 0
+    })
+}
+
+fn nuget(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, feed_name: &str, tail: &[String], body: &[u8]) -> Response {
+    let v3 = tail.first().is_some_and(|value| value.eq_ignore_ascii_case("v3"));
+    if v3 && tail.get(1).is_some_and(|value| value.eq_ignore_ascii_case("index.json")) {
+        return nuget_index(org, project, feed_name);
+    }
+    let flat = v3 && tail.get(1).is_some_and(|value| value.eq_ignore_ascii_case("flat2"));
+    if !flat || tail.len() < 4 {
+        return fail(StatusCode::NOT_FOUND, "paquet NuGet introuvable");
+    }
+    let id = tail[2].to_ascii_lowercase();
+    let key = format!("packaging/feeds/{feed_id}/nuget");
+    if tail[3].eq_ignore_ascii_case("index.json") && method == Method::GET {
+        let mut versions = list_project(state, org, project, &key)
+            .into_iter()
+            .filter_map(|item| {
+                let stored = text(&item, "id")?;
+                let (package, version) = stored.split_once('/')?;
+                (package == id).then(|| version.to_string())
+            })
+            .collect::<Vec<_>>();
+        versions.sort();
+        return Json(json!({"versions": versions})).into_response();
+    }
+    if tail.len() < 5 {
+        return fail(StatusCode::NOT_FOUND, "paquet NuGet introuvable");
+    }
+    let version = tail[3].clone();
+    let stored_id = format!("{id}/{version}");
+    if method == Method::PUT {
+        let content = String::from_utf8_lossy(body).into_owned();
+        put_project(state, org, project, &key, json!({"id": stored_id, "version": version, "content": content}));
+        return octets(&content);
+    }
+    if method == Method::GET {
+        return match get_project(state, org, project, &key, &stored_id) {
+            Some(item) => octets(&text(&item, "content").unwrap_or_default()),
+            None => fail(StatusCode::NOT_FOUND, "paquet NuGet introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn upack(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    if rest.len() < 8 || !rest[4].eq_ignore_ascii_case("packages") || !rest[6].eq_ignore_ascii_case("versions") {
+        return fail(StatusCode::NOT_FOUND, "paquet universel introuvable");
+    }
+    let Some(feed) = find_feed(state, org, project, &rest[2]) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let key = format!("packaging/feeds/{}/upack", value_text(&feed["id"]));
+    let stored_id = format!("{}/{}", rest[5], rest[7]);
+    if method == Method::PUT {
+        let content = String::from_utf8_lossy(body).into_owned();
+        put_project(
+            state,
+            org,
+            project,
+            &key,
+            json!({"id": stored_id, "name": rest[5], "version": rest[7], "content": content}),
+        );
+        return octets(&content);
+    }
+    if method == Method::GET {
+        return match get_project(state, org, project, &key, &stored_id) {
+            Some(item) => octets(&text(&item, "content").unwrap_or_default()),
+            None => fail(StatusCode::NOT_FOUND, "paquet universel introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn octets(content: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .body(axum::body::Body::from(content.to_string()))
+        .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "réponse impossible"))
 }
 
 fn nuget_index(org: &str, project: &str, feed: &str) -> Response {

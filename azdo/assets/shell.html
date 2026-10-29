@@ -23,6 +23,7 @@
     .crumb { color: var(--muted); }
     .crumb strong { color: var(--text); font-weight: 600; }
     header form { margin-left: auto; }
+    button.page { background: transparent; border: 0; color: var(--blue); font: inherit; cursor: pointer; padding: 4px 0; }
     header button, .command button, .panel button {
       height: 32px; border: 1px solid transparent; background: var(--blue); color: #fff;
       font: inherit; padding: 0 12px; cursor: pointer;
@@ -40,7 +41,7 @@
     main { padding: 16px 24px 40px; min-width: 0; }
     h1 { margin: 0 0 4px; font-size: 28px; font-weight: 600; }
     .sub { color: var(--muted); margin: 0 0 16px; }
-    .command { display: flex; gap: 8px; align-items: center; margin: 8px 0 16px; }
+    .command { display: flex; gap: 8px; align-items: center; margin: 8px 0 16px; flex-wrap: wrap; }
     input, select, textarea {
       height: 32px; border: 1px solid #8a8886; padding: 0 8px; font: inherit; background: #fff;
     }
@@ -398,15 +399,67 @@
           };
           return;
         }
+        if (hub === "/_wiki") {
+          const wikis = await collection("wiki/wikis");
+          const wiki = wikis[0];
+          let pages = [];
+          if (wiki) {
+            const listed = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?api-version=7.1");
+            pages = listed.value || [];
+          }
+          const list = pages.length ? "<ul id='pages'>" + pages.map((page) => "<li><button type='button' class='page' data-path='" + esc(page.path) + "'>" + esc(page.path) + "</button></li>").join("") + "</ul>" : "<p class='sub'>Aucune page.</p>";
+          view.innerHTML = "<h1>Wiki</h1><p class='sub'>" + esc(wiki ? wiki.name : "Aucun wiki") + "</p><div class='command'><input id='wiki-name' placeholder='Nouveau wiki' /><button id='wiki-create' type='button'>Créer le wiki</button></div><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button></div>";
+          async function loadPage(path) {
+            if (!wiki) return;
+            document.getElementById("page-path").value = path;
+            const page = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1");
+            document.getElementById("page-content").value = page.content || "";
+          }
+          document.querySelectorAll("button.page").forEach((button) => { button.onclick = () => loadPage(button.dataset.path); });
+          document.getElementById("page-load").onclick = () => loadPage(document.getElementById("page-path").value || "/Accueil");
+          document.getElementById("wiki-create").onclick = async () => {
+            await api("POST", root + "/wiki/wikis?api-version=7.1", { name: document.getElementById("wiki-name").value || (project + ".wiki") });
+            location.reload();
+          };
+          document.getElementById("page-save").onclick = async () => {
+            let current = wiki;
+            if (!current) {
+              current = await api("POST", root + "/wiki/wikis?api-version=7.1", { name: document.getElementById("wiki-name").value || (project + ".wiki") });
+            }
+            const path = document.getElementById("page-path").value || "/Accueil";
+            await api("PUT", root + "/wiki/wikis/" + encodeURIComponent(current.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1", { content: document.getElementById("page-content").value });
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_library") {
+          const groups = await collection("distributedtask/variablegroups");
+          const table = groups.length ? "<table><thead><tr><th>Nom</th><th>Type</th><th>Variables</th></tr></thead><tbody>" + groups.map((item) => {
+            const variables = item.variables || {};
+            const shown = Object.keys(variables).map((key) => key + "=" + (variables[key].value || "")).join(", ");
+            return "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(shown) + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p class='sub'>Aucun groupe de variables.</p>";
+          view.innerHTML = "<h1>Bibliothèque</h1><div class='command'><input id='vg-name' placeholder='Groupe' /><input id='vg-key' placeholder='Variable' /><input id='vg-value' placeholder='Valeur' /><button id='create' type='button'>Créer</button></div>" + table;
+          document.getElementById("create").onclick = async () => {
+            const key = document.getElementById("vg-key").value || "CLE";
+            const variables = {};
+            variables[key] = { value: document.getElementById("vg-value").value || "", isSecret: false };
+            await api("POST", root + "/distributedtask/variablegroups?api-version=7.1", {
+              name: document.getElementById("vg-name").value || "Groupe",
+              type: "Vsts",
+              variables,
+            });
+            location.reload();
+          };
+          return;
+        }
         const catalogs = {
           "/_git/commits": ["Commits", "git/commits", "comment", "Nouveau commit"],
           "/_git/pushes": ["Poussées", "git/pushes", "refName", "Nouvelle poussée"],
           "/_git/branches": ["Branches", "git/refs", "name", "refs/heads/"],
           "/_environments": ["Environnements", "distributedtask/environments", "name", "Nouvel environnement"],
           "/_release": ["Versions", "release/releases", "name", "Nouvelle version"],
-          "/_library": ["Bibliothèque", "distributedtask/variablegroups", "name", "Nouveau groupe de variables"],
           "/_testPlans/runs": ["Exécutions", "test/runs", "name", "Nouvelle exécution"],
-          "/_wiki": ["Wiki", "wiki/wikis", "name", "Nouveau wiki"],
         };
         if (catalogs[hub]) {
           const heading = catalogs[hub][0];

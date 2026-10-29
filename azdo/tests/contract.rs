@@ -1124,3 +1124,126 @@ async fn tfvc_search_acls_and_package_protocols_follow_the_rest_shape() {
     assert_eq!(package["name"], "oee");
     assert_eq!(package["versions"]["1.0.0"]["version"], "1.0.0");
 }
+
+#[tokio::test]
+async fn permissions_nuget_flat_container_and_universal_packages() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let namespace = "2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87";
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/_apis/accesscontrolentries/{namespace}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"token":"repoV2/azurz","merge":true,"accessControlEntries":[{"descriptor":"azurz","allow":4,"deny":0}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/security/permissionevaluationbatch?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"alwaysAllowAdministrators":true,"evaluations":[{{"securityNamespaceId":"{namespace}","token":"repoV2/azurz","permissions":4}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let granted: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(granted["evaluations"][0]["value"], true);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/security/permissionevaluationbatch?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"alwaysAllowAdministrators":true,"evaluations":[{{"securityNamespaceId":"{namespace}","token":"repoV2/azurz","permissions":8}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let denied: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(denied["evaluations"][0]["value"], false);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"azurz-packages"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/nuget/v3/flat2/oee/1.2.0/oee.1.2.0.nupkg",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("nupkg-lab"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/nuget/v3/flat2/oee/index.json",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let versions: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(versions["versions"].as_array().unwrap().iter().any(|version| version == "1.2.0"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_packaging/azurz-packages/nuget/v3/flat2/oee/1.2.0/oee.1.2.0.nupkg",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "nupkg-lab");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/azurz-packages/upack/packages/module/versions/1.0.0",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        Some("paquet-universel"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "paquet-universel");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/azurz-packages/upack/packages/module/versions/1.0.0",
+        Some(&auth),
+        None,
+        "application/octet-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "paquet-universel");
+}
