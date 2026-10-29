@@ -10057,3 +10057,325 @@ async fn wiki_page_moves_with_its_children_and_can_be_deleted() {
     assert_eq!(deleted_note["resource"]["path"], "/Alerte");
     assert_eq!(deleted_note["resource"]["content"], "page signalée");
 }
+
+#[tokio::test]
+async fn test_suite_can_be_renamed_and_removed_with_its_cases() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/testplan/plans/99/suites/1?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "plan introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/testplan/plans?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Recette pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let plan_id = plan["id"].as_i64().unwrap();
+    let root_id = plan["rootSuite"]["id"].as_i64().unwrap();
+    let suites = format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites");
+
+    let (status, body, _) = call(&app, "PATCH", &format!("{suites}/{root_id}?api-version=7.1"), Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "suite illisible");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{suites}/{root_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "nom de suite absent");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{root_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let root: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(root["name"], "Recette pompe");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{suites}/{root_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Recette atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renamed_root: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(renamed_root["name"], "Recette atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(plan["name"], "Recette pompe");
+
+    let (status, body, _) = call(&app, "DELETE", &format!("{suites}/{root_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "suite racine");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{root_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Ligne","parentSuite":{{"id":{root_id}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ligne: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ligne_id = ligne["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Cave","parentSuite":{{"id":{ligne_id}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cave: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let cave_id = cave["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Pompe","parentSuite":{{"id":{root_id}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}/{cave_id}/testcases?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"title":"Debit"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let debit: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let debit_id = debit["value"][0]["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}/{ligne_id}/testcases?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"title":"Voisin"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let voisin: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let voisin_id = voisin["value"][0]["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}/{pompe_id}/testcases?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"title":"Stable"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{suites}/{ligne_id}/testcases/999?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "cas introuvable");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{suites}/{ligne_id}/testpoint?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["count"], 1);
+    assert_eq!(points["value"][0]["testCase"]["name"], "Voisin");
+
+    let (status, body, _) = call(&app, "PATCH", &format!("{suites}/80?api-version=7.1"), Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "suite introuvable");
+    let (status, body, _) = call(&app, "PATCH", &format!("{suites}/{ligne_id}?api-version=7.1"), Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "suite illisible");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{cave_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cave: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cave["name"], "Cave");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{suites}/{ligne_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renamed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(renamed["name"], "Atelier");
+    assert_eq!(renamed["parentSuite"]["id"], root_id);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{suites}/{ligne_id}/testcases/{voisin_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{voisin_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let work: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(work["fields"]["System.Title"], "Voisin");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{ligne_id}/testpoint?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["count"], 0);
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{cave_id}/testpoint?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["value"][0]["testCase"]["name"], "Debit");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{pompe_id}/testpoint?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["value"][0]["testCase"]["name"], "Stable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"test.suite.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "DELETE", &format!("{suites}/{ligne_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{cave_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{cave_id}/testpoint?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{debit_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let work: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(work["fields"]["System.Title"], "Debit");
+    let (status, body, _) = call(&app, "GET", &format!("{suites}/{pompe_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe["name"], "Pompe");
+    let (status, body, _) = call(&app, "DELETE", &format!("{suites}/{ligne_id}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "suite introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{suites}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Suite suivante"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let following: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_ne!(following["id"].as_i64().unwrap(), ligne_id);
+    assert_ne!(following["id"].as_i64().unwrap(), cave_id);
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let deleted_note = inbox["value"].as_array().unwrap().iter().find(|item| item["eventType"] == "test.suite.deleted").unwrap();
+    assert_eq!(deleted_note["resource"]["name"], "Atelier");
+}

@@ -3841,6 +3841,9 @@ fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest:
 
 fn plan_suites(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, rest: &[String], body: &[u8]) -> Response {
     let suites_key = format!("testplan/plans/{plan_id}/suites");
+    if get_item(state, org, project, "testplan/plans", plan_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "plan introuvable");
+    }
     ensure_root_suite(state, org, project, plan_id);
     if rest.len() == 4 && method == Method::GET {
         return Json(page(list(state, org, project, &suites_key))).into_response();
@@ -3848,7 +3851,7 @@ fn plan_suites(state: &AppState, method: &Method, org: &str, project: &str, plan
     if rest.len() == 4 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
         let name = text_of(&payload, "name").unwrap_or_else(|| "Suite".into());
-        let next = list(state, org, project, &suites_key).len() as i64 + 1;
+        let next = next_bucket_id(state, org, project, &suites_key);
         let parent = payload.get("parentSuite").and_then(|value| value.get("id")).cloned().unwrap_or(json!(plan_id.parse::<i64>().unwrap_or(next)));
         let item = json!({
             "id": next,
@@ -3863,9 +3866,12 @@ fn plan_suites(state: &AppState, method: &Method, org: &str, project: &str, plan
     let suite_id = rest.get(4).map(String::as_str).unwrap_or("");
     let child = rest.get(5).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     if child == "testcase" || child == "testcases" {
-        return suite_cases(state, method, org, project, plan_id, suite_id, body);
+        return suite_cases(state, method, org, project, plan_id, suite_id, rest.get(6).map(String::as_str), body);
     }
     if (child == "testpoint" || child == "testpoints") && method == Method::GET {
+        if get_item(state, org, project, &suites_key, suite_id).is_none() {
+            return fail(StatusCode::NOT_FOUND, "suite introuvable");
+        }
         return Json(page(list(state, org, project, &format!("testplan/plans/{plan_id}/suites/{suite_id}/points")))).into_response();
     }
     if rest.len() == 5 && method == Method::GET {
@@ -3874,7 +3880,86 @@ fn plan_suites(state: &AppState, method: &Method, org: &str, project: &str, plan
             None => fail(StatusCode::NOT_FOUND, "suite introuvable"),
         };
     }
+    if rest.len() == 5 && (method == Method::PATCH || method == Method::DELETE) {
+        return update_suite(state, method, org, project, plan_id, suite_id, body);
+    }
     fail(StatusCode::NOT_FOUND, "suite introuvable")
+}
+
+fn next_bucket_id(state: &AppState, org: &str, project: &str, key: &str) -> i64 {
+    state
+        .read(|db| db.project(org, project).and_then(|stored| stored.buckets.get(key)).map(|bucket| bucket.next))
+        .unwrap_or(1)
+}
+
+fn suite_is_root(plan_id: &str, suite: &Value) -> bool {
+    value_key(&suite["id"]) == plan_id || suite.get("parentSuite").is_none()
+}
+
+fn suite_tree(suites: &[Value], root: &str) -> Vec<String> {
+    let mut doomed = vec![root.to_string()];
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for item in suites {
+            let id = value_key(&item["id"]);
+            let parent = item.get("parentSuite").map(|suite| value_key(&suite["id"])).unwrap_or_default();
+            if doomed.iter().any(|kept| kept == &parent) && doomed.iter().all(|kept| kept != &id) {
+                doomed.push(id);
+                grew = true;
+            }
+        }
+    }
+    doomed
+}
+
+fn update_suite(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, suite_id: &str, body: &[u8]) -> Response {
+    let suites_key = format!("testplan/plans/{plan_id}/suites");
+    let Some(suite) = get_item(state, org, project, &suites_key, suite_id) else {
+        return fail(StatusCode::NOT_FOUND, "suite introuvable");
+    };
+    if method == Method::DELETE {
+        if suite_is_root(plan_id, &suite) {
+            return fail(StatusCode::BAD_REQUEST, "suite racine");
+        }
+        let doomed = suite_tree(&list(state, org, project, &suites_key), suite_id);
+        state.write(|db| {
+            let Some(stored) = db.project_mut(org, project) else {
+                return;
+            };
+            if let Some(bucket) = stored.buckets.get_mut(&suites_key) {
+                for id in &doomed {
+                    bucket.remove(id);
+                }
+            }
+            for id in &doomed {
+                stored.buckets.remove(&format!("testplan/plans/{plan_id}/suites/{id}/testcases"));
+                stored.buckets.remove(&format!("testplan/plans/{plan_id}/suites/{id}/points"));
+            }
+        });
+        deliver_work_item(state, org, project, "test.suite.deleted", &suite);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "suite illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "suite illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()) else {
+        return fail(StatusCode::BAD_REQUEST, "suite illisible");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom de suite absent");
+    }
+    let mut renamed = suite;
+    if let Some(fields) = renamed.as_object_mut() {
+        fields.insert("name".into(), json!(name));
+    }
+    put_item(state, org, project, &suites_key, renamed.clone());
+    deliver_work_item(state, org, project, "test.suite.updated", &renamed);
+    Json(renamed).into_response()
 }
 
 fn ensure_root_suite(state: &AppState, org: &str, project: &str, plan_id: &str) {
@@ -3933,9 +4018,42 @@ fn record_point_outcomes(state: &AppState, org: &str, project: &str, rows: &[Val
     });
 }
 
-fn suite_cases(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, suite_id: &str, body: &[u8]) -> Response {
+fn suite_cases(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, suite_id: &str, case_id: Option<&str>, body: &[u8]) -> Response {
+    let suites_key = format!("testplan/plans/{plan_id}/suites");
+    if get_item(state, org, project, &suites_key, suite_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "suite introuvable");
+    }
     let cases_key = format!("testplan/plans/{plan_id}/suites/{suite_id}/testcases");
     let points_key = format!("testplan/plans/{plan_id}/suites/{suite_id}/points");
+    if method == Method::DELETE {
+        let Some(id) = case_id.filter(|value| !value.is_empty()) else {
+            return fail(StatusCode::NOT_FOUND, "cas introuvable");
+        };
+        let Some(case) = get_item(state, org, project, &cases_key, id) else {
+            return fail(StatusCode::NOT_FOUND, "cas introuvable");
+        };
+        state.write(|db| {
+            let Some(stored) = db.project_mut(org, project) else {
+                return;
+            };
+            if let Some(bucket) = stored.buckets.get_mut(&cases_key) {
+                bucket.remove(id);
+            }
+            if let Some(bucket) = stored.buckets.get_mut(&points_key) {
+                let gone: Vec<String> = bucket
+                    .items
+                    .iter()
+                    .filter(|(_, item)| item.get("testCase").map(|case| value_key(&case["id"])).as_deref() == Some(id))
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                for key in gone {
+                    bucket.remove(&key);
+                }
+            }
+        });
+        deliver_work_item(state, org, project, "test.case.removed", &case);
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if method == Method::GET {
         return Json(page(list(state, org, project, &cases_key))).into_response();
     }

@@ -1097,7 +1097,9 @@
             let points = "";
             if (suiteId) {
               const rows = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testpoint");
-              points = "<h2>Points</h2><div class='command'><input id='case-title' placeholder='Nouveau cas' /><button id='add-case' type='button'>Ajouter le cas</button><button id='run-suite' type='button'>Exécuter</button></div>" + (rows.length ? "<table><thead><tr><th>Cas</th><th>Résultat</th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(item.testCase?.name || item.testCase?.id) + "</td><td>" + esc(item.outcome) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun cas.</p>");
+              const current = suites.find((item) => String(item.id) === String(suiteId));
+              const removeSuite = String(suiteId) === String(planId) ? "" : "<button id='suite-delete' type='button'>Supprimer</button>";
+              points = "<h2>" + esc(current ? current.name : "Suite") + "</h2><div class='command'><input id='suite-rename' placeholder='Nouveau nom' /><button id='suite-rename-save' type='button'>Renommer</button>" + removeSuite + "</div><h2>Points</h2><div class='command'><input id='case-title' placeholder='Nouveau cas' /><button id='add-case' type='button'>Ajouter le cas</button><button id='run-suite' type='button'>Exécuter</button></div>" + (rows.length ? "<table id='points'><thead><tr><th>Cas</th><th>Résultat</th><th></th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(item.testCase?.name || item.testCase?.id) + "</td><td>" + esc(item.outcome) + "</td><td><button type='button' class='case-remove' data-id='" + esc(item.testCase?.id) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='points-empty' class='sub'>Aucun cas.</p>") + "<p id='plan-error' class='sub'></p>";
             }
             detail = "<h2>Suites</h2><div class='command'><input id='suite-name' placeholder='Nouvelle suite' /><button id='add-suite' type='button'>Créer la suite</button></div>" + suiteRows + points;
           }
@@ -1137,6 +1139,44 @@
               location.reload();
             };
           }
+          const renameSuite = document.getElementById("suite-rename-save");
+          if (renameSuite) {
+            renameSuite.onclick = async () => {
+              const error = document.getElementById("plan-error");
+              error.textContent = "";
+              try {
+                await api("PATCH", root + "/testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "?api-version=7.1", { name: document.getElementById("suite-rename").value });
+                location.reload();
+              } catch (err) {
+                error.textContent = err.message;
+              }
+            };
+          }
+          const deleteSuite = document.getElementById("suite-delete");
+          if (deleteSuite) {
+            deleteSuite.onclick = async () => {
+              const error = document.getElementById("plan-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "?api-version=7.1");
+                location.href = location.pathname + "?plan=" + encodeURIComponent(planId);
+              } catch (err) {
+                error.textContent = err.message;
+              }
+            };
+          }
+          document.querySelectorAll("button.case-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("plan-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testcases/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.textContent = err.message;
+              }
+            };
+          });
           return;
         }
         if (hub === "/_artifacts") {
@@ -1725,10 +1765,13 @@
             const discussion = resource.comments && resource.comments[0] && resource.comments[0].content;
             if (discussion) return discussion;
             if (resource.content) return resource.content;
+            const workItem = resource.workItem && resource.workItem.name;
+            if (workItem) return workItem;
+            if (resource.suiteType && resource.name) return resource.name;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1791,6 +1834,18 @@
                 await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1");
               } else {
                 await api("POST", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pagemoves?api-version=7.1", { path: path, newPath: path + "-bis" });
+              }
+            } else if (event === "test.suite.updated" || event === "test.suite.deleted" || event === "test.case.removed") {
+              const plan = await api("POST", root + "/testplan/plans?api-version=7.1", { name: title });
+              const suite = await api("POST", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites?api-version=7.1", { name: title });
+              if (event === "test.suite.updated") {
+                await api("PATCH", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites/" + encodeURIComponent(suite.id) + "?api-version=7.1", { name: title });
+              } else if (event === "test.case.removed") {
+                const added = await api("POST", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites/" + encodeURIComponent(suite.id) + "/testcases?api-version=7.1", [{ title: title }]);
+                const caseId = added.value && added.value[0] && added.value[0].id;
+                await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites/" + encodeURIComponent(suite.id) + "/testcases/" + encodeURIComponent(caseId) + "?api-version=7.1");
+              } else {
+                await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites/" + encodeURIComponent(suite.id) + "?api-version=7.1");
               }
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
