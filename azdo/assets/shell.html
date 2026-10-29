@@ -1965,7 +1965,7 @@
           const items = await collection("distributedtask/environments");
           const selected = new URLSearchParams(location.search).get("environment");
           const current = items.find((item) => String(item.id) === selected);
-          const table = items.length ? "<table><thead><tr><th>Nom</th><th>Description</th></tr></thead><tbody>" + items.map((item) => "<tr class='click env' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='env-empty' class='sub'>Aucun environnement.</p>";
+          const table = items.length ? "<table id='environments'><thead><tr><th>Nom</th><th>Description</th><th></th></tr></thead><tbody>" + items.map((item) => "<tr class='click env' data-id='" + esc(item.id) + "'><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td><td><button type='button' class='env-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='env-empty' class='sub'>Aucun environnement.</p>";
           let checks = "";
           if (current) {
             const page = await api("GET", root + "/pipelines/checks/configurations?resourceType=environment&resourceId=" + encodeURIComponent(selected) + "&api-version=7.1-preview.1");
@@ -1986,7 +1986,7 @@
             }).join("") + "</ul>" : "<p id='env-approval-empty' class='sub'>Aucune approbation.</p>";
             checks = "<section id='env-panel' class='panel'><h2>Contrôles · " + esc(current.name) + "</h2><div class='command'><select id='check-type'><option value='approval'>Approbation</option><option value='branch'>Contrôle de branche</option><option value='lock'>Verrou exclusif</option></select><input id='check-detail' placeholder='Approbateur ou branches' /><button id='check-add' type='button'>Ajouter</button></div>" + list + "</section><section id='approval-panel' class='panel'><h2>Approbations · " + esc(current.name) + "</h2><div class='command'><button id='deploy' type='button'>Déployer</button></div>" + approvalList + "</section>";
           }
-          view.innerHTML = "<h1>Environnements</h1><div class='command'><input id='env-name' placeholder='Nom' /><input id='env-desc' placeholder='Description' /><button id='create' type='button'>Créer</button></div>" + table + checks;
+          view.innerHTML = "<h1>Environnements</h1><div class='command'><input id='env-name' placeholder='Pompe' /><input id='env-desc' placeholder='Description' /><button id='create' type='button'>Créer</button></div>" + table + "<p id='env-error' class='error' hidden></p>" + checks;
           document.getElementById("create").onclick = async () => {
             await api("POST", root + "/distributedtask/environments?api-version=7.1", { name: document.getElementById("env-name").value || "Production", description: document.getElementById("env-desc").value || "" });
             location.reload();
@@ -1996,6 +1996,20 @@
               const params = new URLSearchParams(location.search);
               params.set("environment", row.dataset.id);
               location.search = params.toString();
+            };
+          });
+          document.querySelectorAll("button.env-remove").forEach((button) => {
+            button.onclick = async (event) => {
+              event.stopPropagation();
+              try {
+                await api("DELETE", root + "/distributedtask/environments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("env-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
             };
           });
           const add = document.getElementById("check-add");

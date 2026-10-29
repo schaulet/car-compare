@@ -21,6 +21,9 @@ pub fn dispatch(
 ) -> Option<Response> {
     let area = rest.first()?.to_ascii_lowercase();
     let resource = rest.get(1)?.to_ascii_lowercase();
+    if area == "distributedtask" && resource == "environments" && method == Method::DELETE {
+        return Some(delete_environment(state, org, project, rest));
+    }
     let response = match (area.as_str(), resource.as_str()) {
         ("git", "repositories") => git_repositories(state, method, org, project, rest, query, body),
         ("git", "refs") => git_alias(state, method, org, project, "refs", query, body),
@@ -3800,6 +3803,46 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         };
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn delete_environment(state: &AppState, org: &str, project: &str, rest: &[String]) -> Response {
+    let key = "distributedtask/environments";
+    if rest.len() == 2 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(found) = get_item(state, org, project, key, &rest[2]) else {
+        return fail(StatusCode::NOT_FOUND, "environnement introuvable");
+    };
+    let stored_id = value_key(&found["id"]);
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            if let Some(bucket) = stored.buckets.get_mut(key) {
+                bucket.remove(&stored_id);
+            }
+            if let Some(checks) = stored.buckets.get_mut("pipelines/checks/configurations") {
+                let doomed: Vec<String> = checks
+                    .items
+                    .iter()
+                    .filter_map(|(stored_key, item)| {
+                        let resource = item.get("resource")?;
+                        let kind = text_of(resource, "type").unwrap_or_default();
+                        if kind.eq_ignore_ascii_case("environment") && value_key(&resource["id"]) == stored_id {
+                            Some(stored_key.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for stored_key in doomed {
+                    checks.items.remove(&stored_key);
+                }
+            }
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
 }
 
 fn check_configurations(

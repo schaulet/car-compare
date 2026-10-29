@@ -15852,3 +15852,207 @@ async fn removing_one_dashboard_keeps_the_sibling_and_its_widgets() {
     assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_environment_keeps_the_sibling_and_its_checks() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let mut pompe_id = String::new();
+    let mut ada_id = String::new();
+    for (name, description) in [("Pompe", "Ligne pompe"), ("Ada", "Ligne ada")] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","description":"{description}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        assert_eq!(created["description"], description);
+        if name == "Pompe" {
+            pompe_id = created["id"].to_string();
+        } else {
+            ada_id = created["id"].to_string();
+        }
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"8c6f20a7-a545-4486-9777-f762fafe0d4d","name":"Approval"}},"settings":{{"approvers":[{{"displayName":"azurz"}}]}},"resource":{{"type":"environment","id":"{pompe_id}","name":"Pompe"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"fe1de3ee-a436-41b4-bb20-f6eb4cb879a7","name":"Task Check"}},"settings":{{"displayName":"Branch control","inputs":{{"allowedBranches":"refs/heads/main"}}}},"resource":{{"type":"environment","id":"{ada_id}","name":"Ada"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_check: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_check["type"]["name"], "Task Check");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments/999?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("environnement introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("environnement introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/checks/configurations?resourceType=environment&resourceId={pompe_id}&api-version=7.1-preview.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gone: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(gone["count"], 0, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/pipelines/checks/configurations?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"type":{{"id":"8c6f20a7-a545-4486-9777-f762fafe0d4d"}},"settings":{{"approvers":[{{"displayName":"azurz"}}]}},"resource":{{"type":"environment","id":"{pompe_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("environnement introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["description"], "Ligne ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/checks/configurations?resourceType=environment&resourceId={ada_id}&api-version=7.1-preview.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let checks: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(checks["count"], 1, "{body}");
+    assert_eq!(checks["value"][0]["type"]["name"], "Task Check");
+    assert_eq!(checks["value"][0]["settings"]["inputs"]["allowedBranches"], "refs/heads/main");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+}
