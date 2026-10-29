@@ -1191,7 +1191,7 @@
             pages = listed.value || [];
           }
           const list = pages.length ? "<ul id='pages'>" + pages.map((page) => "<li><button type='button' class='page' data-path='" + esc(page.path) + "'>" + esc(page.path) + "</button></li>").join("") + "</ul>" : "<p class='sub'>Aucune page.</p>";
-          view.innerHTML = "<h1>Wiki</h1><p class='sub'>" + esc(wiki ? wiki.name : "Aucun wiki") + "</p><div class='command'><input id='wiki-name' placeholder='Nouveau wiki' /><button id='wiki-create' type='button'>Créer le wiki</button></div><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button></div>";
+          view.innerHTML = "<h1>Wiki</h1><p class='sub'>" + esc(wiki ? wiki.name : "Aucun wiki") + "</p><div class='command'><input id='wiki-name' placeholder='Nouveau wiki' /><button id='wiki-create' type='button'>Créer le wiki</button></div><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button><button id='page-delete' type='button'>Supprimer</button></div><div class='command'><input id='page-new-path' placeholder='/Nouveau chemin' /><button id='page-move' type='button'>Déplacer</button></div><p id='wiki-error' class='sub'></p>";
           async function loadPage(path) {
             if (!wiki) return;
             document.getElementById("page-path").value = path;
@@ -1212,6 +1212,31 @@
             const path = document.getElementById("page-path").value || "/Accueil";
             await api("PUT", root + "/wiki/wikis/" + encodeURIComponent(current.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1", { content: document.getElementById("page-content").value });
             location.reload();
+          };
+          document.getElementById("page-delete").onclick = async () => {
+            const error = document.getElementById("wiki-error");
+            error.textContent = "";
+            try {
+              if (!wiki) return;
+              const path = document.getElementById("page-path").value || "/Accueil";
+              await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?path=" + encodeURIComponent(path) + "&recursionLevel=full&api-version=7.1");
+              location.reload();
+            } catch (err) {
+              error.textContent = err.message;
+            }
+          };
+          document.getElementById("page-move").onclick = async () => {
+            const error = document.getElementById("wiki-error");
+            error.textContent = "";
+            try {
+              if (!wiki) return;
+              const path = document.getElementById("page-path").value || "/Accueil";
+              const newPath = document.getElementById("page-new-path").value;
+              await api("POST", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pagemoves?api-version=7.1", { path: path, newPath: newPath });
+              location.reload();
+            } catch (err) {
+              error.textContent = err.message;
+            }
           };
           return;
         }
@@ -1703,7 +1728,7 @@
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1755,6 +1780,17 @@
               await api("DELETE", root + "/wit/workitems/" + created.id + "?api-version=7.1");
               if (event === "workitem.restored") {
                 await api("PATCH", root + "/wit/recyclebin/" + created.id + "?api-version=7.1", { isDeleted: false });
+              }
+            } else if (event === "wiki.page.moved" || event === "wiki.page.deleted") {
+              const wikis = await collection("wiki/wikis");
+              let wiki = wikis[0];
+              if (!wiki) wiki = await api("POST", root + "/wiki/wikis?api-version=7.1", { name: project + ".wiki" });
+              const path = "/Hooks/" + Date.now();
+              await api("PUT", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1", { content: title });
+              if (event === "wiki.page.deleted") {
+                await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?path=" + encodeURIComponent(path) + "&api-version=7.1");
+              } else {
+                await api("POST", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pagemoves?api-version=7.1", { path: path, newPath: path + "-bis" });
               }
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });

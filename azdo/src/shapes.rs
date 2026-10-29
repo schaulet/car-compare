@@ -4069,6 +4069,195 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
+fn page_path_of(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut path = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    path
+}
+
+fn page_under(parent: &str, path: &str) -> bool {
+    path.starts_with(parent) && path.len() > parent.len() && path.as_bytes().get(parent.len()) == Some(&b'/')
+}
+
+fn page_depth(parent: &str, path: &str) -> Option<usize> {
+    if !page_under(parent, path) {
+        return None;
+    }
+    Some(path[parent.len() + 1..].split('/').filter(|part| !part.is_empty()).count())
+}
+
+fn relocate_page(path: &str, from: &str, to: &str) -> String {
+    if path == from {
+        to.to_string()
+    } else {
+        format!("{to}{}", &path[from.len()..])
+    }
+}
+
+fn wiki_pages_key(wiki_key: &str) -> String {
+    format!("wiki/wikis/{wiki_key}/pages")
+}
+
+fn wiki_page(org: &str, project: &str, wiki_key: &str, path: &str, content: &str) -> Value {
+    json!({
+        "id": path,
+        "path": path,
+        "content": content,
+        "gitItemPath": path,
+        "url": format!("/{org}/{project}/_apis/wiki/wikis/{wiki_key}/pages?path={path}")
+    })
+}
+
+fn recursion_mode(raw: &str) -> Option<&'static str> {
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
+        Some("none")
+    } else if raw.eq_ignore_ascii_case("oneLevel") {
+        Some("one")
+    } else if raw.eq_ignore_ascii_case("oneLevelPlusNested") || raw.eq_ignore_ascii_case("full") {
+        Some("full")
+    } else {
+        None
+    }
+}
+
+fn delete_wiki_page(state: &AppState, org: &str, project: &str, wiki_key: &str, query: &str) -> Response {
+    let pages_key = wiki_pages_key(wiki_key);
+    let Some(raw) = query_param(query, "path") else {
+        return fail(StatusCode::BAD_REQUEST, "chemin de page absent");
+    };
+    let path = page_path_of(&pct_decode(raw));
+    if path.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "chemin de page absent");
+    }
+    let Some(page) = get_item(state, org, project, &pages_key, &path) else {
+        return fail(StatusCode::NOT_FOUND, "page introuvable");
+    };
+    let requested = query_param(query, "recursionLevel").map(pct_decode).unwrap_or_default();
+    let Some(mode) = recursion_mode(requested.trim()) else {
+        return fail(StatusCode::BAD_REQUEST, "profondeur inconnue");
+    };
+    let stored = list(state, org, project, &pages_key);
+    let mut doomed = vec![path.clone()];
+    for item in &stored {
+        let child = text_of(item, "path").unwrap_or_default();
+        let Some(depth) = page_depth(&path, &child) else {
+            continue;
+        };
+        if mode == "none" || (mode == "one" && depth > 1) {
+            return fail(StatusCode::BAD_REQUEST, "sous-pages présentes");
+        }
+        doomed.push(child);
+    }
+    let removed = state.write(|db| {
+        let bucket = db.project_mut(org, project)?.buckets.get_mut(&pages_key)?;
+        let mut gone = true;
+        for id in &doomed {
+            gone = bucket.remove(id) && gone;
+        }
+        Some(gone)
+    });
+    if removed != Some(true) {
+        return fail(StatusCode::NOT_FOUND, "page introuvable");
+    }
+    deliver_work_item(state, org, project, "wiki.page.deleted", &page);
+    Json(page).into_response()
+}
+
+fn move_wiki_page(state: &AppState, method: &Method, org: &str, project: &str, wiki_id: &str, body: &[u8]) -> Response {
+    let Some(wiki) = resolve_wiki(state, org, project, wiki_id) else {
+        return fail(StatusCode::NOT_FOUND, "wiki introuvable");
+    };
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "déplacement illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "déplacement illisible");
+    };
+    let (Some(path_raw), Some(new_raw)) = (
+        object.get("path").and_then(|value| value.as_str()),
+        object.get("newPath").and_then(|value| value.as_str()),
+    ) else {
+        return fail(StatusCode::BAD_REQUEST, "déplacement illisible");
+    };
+    let path = page_path_of(path_raw);
+    let new_path = page_path_of(new_raw);
+    if path.is_empty() || new_path.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "chemin de page absent");
+    }
+    if let Some(order) = object.get("newOrder") {
+        if !order.is_number() {
+            return fail(StatusCode::BAD_REQUEST, "ordre illisible");
+        }
+    }
+    let wiki_key = value_key(&wiki["id"]);
+    let pages_key = wiki_pages_key(&wiki_key);
+    let Some(page) = get_item(state, org, project, &pages_key, &path) else {
+        return fail(StatusCode::NOT_FOUND, "page introuvable");
+    };
+    if path == new_path {
+        return Json(page).into_response();
+    }
+    if page_under(&path, &new_path) {
+        return fail(StatusCode::BAD_REQUEST, "déplacement refusé");
+    }
+    let stored = list(state, org, project, &pages_key);
+    let mut moving = Vec::new();
+    let mut staying = Vec::new();
+    for item in stored {
+        let current = text_of(&item, "path").unwrap_or_default();
+        if current == path || page_under(&path, &current) {
+            moving.push(item);
+        } else {
+            staying.push(current);
+        }
+    }
+    let destinations: Vec<String> = moving
+        .iter()
+        .map(|item| relocate_page(&text_of(item, "path").unwrap_or_default(), &path, &new_path))
+        .collect();
+    if destinations.iter().any(|destination| staying.iter().any(|kept| kept == destination)) {
+        return fail(StatusCode::BAD_REQUEST, "page déjà présente");
+    }
+    let order = object.get("newOrder").cloned();
+    let written = state.write(|db| {
+        let bucket = db.project_mut(org, project)?.buckets.get_mut(&pages_key)?;
+        let mut moved = None;
+        for item in &moving {
+            let current = text_of(item, "path").unwrap_or_default();
+            let destination = relocate_page(&current, &path, &new_path);
+            let content = text_of(item, "content").unwrap_or_default();
+            let mut next = wiki_page(org, project, &wiki_key, &destination, &content);
+            if current == path {
+                if let (Some(fields), Some(order)) = (next.as_object_mut(), order.clone()) {
+                    fields.insert("newOrder".into(), order);
+                }
+                moved = Some(next.clone());
+            }
+            bucket.remove(&current);
+            bucket.put(next);
+        }
+        moved
+    });
+    let Some(moved) = written else {
+        return fail(StatusCode::NOT_FOUND, "page introuvable");
+    };
+    deliver_work_item(state, org, project, "wiki.page.moved", &moved);
+    Json(moved).into_response()
+}
+
 fn wikis(
     state: &AppState,
     method: &Method,
@@ -4096,15 +4285,21 @@ fn wikis(
         return Json(item).into_response();
     }
     let wiki_id = rest.get(2).map(String::as_str).unwrap_or("");
-    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("pages") && (method == Method::GET || method == Method::PUT || method == Method::POST) {
+    if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("pagemoves")) {
+        return move_wiki_page(state, method, org, project, wiki_id, body);
+    }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("pages") && (method == Method::GET || method == Method::PUT || method == Method::POST || method == Method::DELETE) {
         let resolved = resolve_wiki(state, org, project, wiki_id);
         let Some(wiki) = resolved else {
             return fail(StatusCode::NOT_FOUND, "wiki introuvable");
         };
         let wiki_key = value_key(&wiki["id"]);
-        let pages = format!("wiki/wikis/{wiki_key}/pages");
+        let pages = wiki_pages_key(&wiki_key);
+        if method == Method::DELETE {
+            return delete_wiki_page(state, org, project, &wiki_key, query);
+        }
         let path = query_param(query, "path")
-            .map(|value| crate::http::pct_decode(value))
+            .map(|value| page_path_of(&pct_decode(value)))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "/".into());
         if method == Method::GET && query_param(query, "path").is_none() {
@@ -4118,13 +4313,7 @@ fn wikis(
         }
         let payload = parse_json(body).unwrap_or(json!({}));
         let content = text_of(&payload, "content").unwrap_or_default();
-        let item = json!({
-            "id": path,
-            "path": path,
-            "content": content,
-            "gitItemPath": path,
-            "url": format!("/{org}/{project}/_apis/wiki/wikis/{wiki_key}/pages?path={path}")
-        });
+        let item = wiki_page(org, project, &wiki_key, &path, &content);
         put_item(state, org, project, &pages, item.clone());
         return Json(item).into_response();
     }

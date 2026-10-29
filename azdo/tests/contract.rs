@@ -9726,3 +9726,334 @@ async fn pull_request_thread_can_be_resolved_and_its_comment_revised() {
         .collect();
     assert!(texts.contains(&"Pompe signalée"), "{body}");
 }
+
+#[tokio::test]
+async fn wiki_page_moves_with_its_children_and_can_be_deleted() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wiki/wikis/manuel-absent/pagemoves?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "wiki introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wiki/wikis?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Manuel"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let wiki: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let wiki_id = wiki["id"].as_str().unwrap();
+    let pages = format!("/azurz/AzurzDemo/_apis/wiki/wikis/{wiki_id}/pages");
+    let moves = format!("/azurz/AzurzDemo/_apis/wiki/wikis/{wiki_id}/pagemoves?api-version=7.1");
+
+    let (status, body, _) = call(&app, "POST", &moves, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "déplacement illisible");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"  ","newPath":"/Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "chemin de page absent");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Inconnue","newPath":"/Atelier","newOrder":"haut"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "ordre illisible");
+
+    for (path, content) in [("/Pompe", "Pompe racine"), ("/Pompe/ligne", "ligne de pompe"), ("/Pompe/ligne/bas", "fond"), ("/Autre", "voisin")] {
+        let (status, body, _) = call(
+            &app,
+            "PUT",
+            &format!("{pages}?path={path}&api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"content":"{content}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Absente","newPath":"/Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "page introuvable");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Pompe","newPath":"/Pompe/cave"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "déplacement refusé");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Pompe","newPath":"/Autre"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "page déjà présente");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Pompe&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["content"], "Pompe racine");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Autre&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let neighbor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(neighbor["content"], "voisin");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Pompe","newPath":"/Atelier","newOrder":2}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let moved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(moved["path"], "/Atelier");
+    assert_eq!(moved["content"], "Pompe racine");
+    assert_eq!(moved["newOrder"], 2);
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Pompe&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Atelier/ligne&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(child["content"], "ligne de pompe");
+    assert_eq!(child["path"], "/Atelier/ligne");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Atelier/ligne/bas&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let nested: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(nested["content"], "fond");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Autre&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let neighbor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(neighbor["content"], "voisin");
+
+    let (status, body, _) = call(&app, "DELETE", &format!("{pages}?path=/Atelier&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "sous-pages présentes");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{pages}?path=/Atelier&recursionLevel=oneLevel&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "sous-pages présentes");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{pages}?path=/Atelier/ligne/bas&recursionLevel=demi&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "profondeur inconnue");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Atelier/ligne/bas&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["content"], "fond");
+
+    let (status, body, _) = call(&app, "DELETE", &format!("{pages}?path=/Atelier/ligne/bas&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let dropped: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dropped["path"], "/Atelier/ligne/bas");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{pages}?path=/Atelier/ligne&recursionLevel=oneLevel&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Atelier/ligne&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("{pages}?path=/Atelier/ligne&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"content":"ligne de pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{pages}?path=/Atelier&recursionLevel=full&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let deleted: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(deleted["path"], "/Atelier");
+    assert_eq!(deleted["content"], "Pompe racine");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Atelier/ligne&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("{pages}?path=/Autre&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let neighbor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(neighbor["content"], "voisin");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{pages}?path=/Atelier&recursionLevel=full&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "page introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"wiki.page.moved","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("{pages}?path=/Signal&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"content":"page signalée"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Signal","newPath":"/Signal"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(inbox["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &moves,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"path":"/Signal","newPath":"/Alerte"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let moved_note = inbox["value"].as_array().unwrap().iter().find(|item| item["eventType"] == "wiki.page.moved").unwrap();
+    assert_eq!(moved_note["resource"]["path"], "/Alerte");
+    assert_eq!(moved_note["resource"]["content"], "page signalée");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"wiki.page.deleted","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "DELETE", &format!("{pages}?path=/Alerte&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let deleted_note = inbox["value"].as_array().unwrap().iter().find(|item| item["eventType"] == "wiki.page.deleted").unwrap();
+    assert_eq!(deleted_note["resource"]["path"], "/Alerte");
+    assert_eq!(deleted_note["resource"]["content"], "page signalée");
+}
