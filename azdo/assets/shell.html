@@ -389,40 +389,48 @@
           const dashboards = await collection("dashboard/dashboards");
           const dashboard = dashboards[0];
           const widgets = dashboard ? (await api("GET", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "/widgets?api-version=7.1")).value || [] : [];
-          const canvas = widgets.length ? "<div class='canvas' id='canvas'>" + widgets.map((widget) => {
+          const canvas = dashboard ? (widgets.length ? "<div class='canvas' id='canvas'>" + widgets.map((widget) => {
             const rendered = widget.rendered || {};
             const span = Math.min(4, Math.max(1, (widget.size && widget.size.columnSpan) || 2));
             const body = rendered.kind === "markdown"
               ? "<pre>" + esc(rendered.text) + "</pre>"
               : "<div class='metric'>" + esc(rendered.value ?? "") + "</div><p class='sub'>" + esc(rendered.text) + "</p>";
             return "<article class='widget' data-id='" + esc(widget.id) + "' data-kind='" + esc(rendered.kind) + "' style='grid-column: span " + span + "'><h2>" + esc(widget.name) + "</h2>" + body + "<button type='button' class='widget-remove' data-id='" + esc(widget.id) + "'>Retirer</button></article>";
-          }).join("") + "</div>" : "<p class='sub' id='widgets-empty'>Aucun widget.</p>";
-          const naming = dashboard
-            ? "<div class='command'><input id='dash-name' placeholder='Nouveau nom' /><button id='dash-rename' type='button'>Renommer</button></div>"
-            : "<div class='command'><input id='dash-name' placeholder='Nom du tableau' value='Vue ligne' /><button id='dash-create' type='button'>Créer le tableau</button></div>";
-          view.innerHTML = "<h1>Tableau de bord</h1><p class='sub' id='dash-title'>" + esc(dashboard ? dashboard.name : "Aucun tableau") + "</p>" + naming + "<p id='dash-error' class='error' hidden></p><div class='command'><select id='widget-kind'><option value='markdown'>Markdown</option><option value='query'>Requête</option><option value='build'>Build</option></select><input id='widget-name' placeholder='Nom' /><input id='widget-setting' placeholder='Texte, état ou définition' /><button id='widget-add' type='button'>Ajouter</button></div>" + canvas;
+          }).join("") + "</div>" : "<p class='sub' id='widgets-empty'>Aucun widget.</p>") : "";
+          const table = dashboards.length ? "<table id='dashboards'><thead><tr><th>Nom</th><th></th></tr></thead><tbody>" + dashboards.map((item) => "<tr><td>" + esc(item.name) + "</td><td><button type='button' class='dash-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='dash-empty' class='sub'>Aucun tableau.</p>";
+          const naming = "<div class='command'><input id='dash-name' placeholder='Pompe' /><button id='dash-create' type='button'>Créer</button></div>" + (dashboard ? "<div class='command'><input id='dash-rename-name' placeholder='Nouveau nom' /><button id='dash-rename' type='button'>Renommer</button></div>" : "");
+          const widgetsCommand = dashboard ? "<div class='command'><select id='widget-kind'><option value='markdown'>Markdown</option><option value='query'>Requête</option><option value='build'>Build</option></select><input id='widget-name' placeholder='Nom' /><input id='widget-setting' placeholder='Texte, état ou définition' /><button id='widget-add' type='button'>Ajouter</button></div>" : "";
+          view.innerHTML = "<h1>Tableau de bord</h1><p class='sub' id='dash-title'>" + esc(dashboard ? dashboard.name : "Aucun tableau") + "</p>" + naming + table + "<p id='dash-error' class='error' hidden></p>" + widgetsCommand + canvas;
           function showDashError(error) {
             const note = document.getElementById("dash-error");
             note.hidden = false;
             note.textContent = error.message;
           }
-          const dashCreate = document.getElementById("dash-create");
-          if (dashCreate) {
-            dashCreate.onclick = async () => {
+          document.getElementById("dash-create").onclick = async () => {
+            try {
+              await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Tableau" });
+            } catch (error) {
+              showDashError(error);
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.dash-remove").forEach((button) => {
+            button.onclick = async () => {
               try {
-                await api("POST", root + "/dashboard/dashboards?api-version=7.1", { name: document.getElementById("dash-name").value || "Vue ligne" });
+                await api("DELETE", root + "/dashboard/dashboards/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
               } catch (error) {
                 showDashError(error);
                 return;
               }
               location.reload();
             };
-          }
+          });
           const dashRename = document.getElementById("dash-rename");
           if (dashRename) {
             dashRename.onclick = async () => {
               try {
-                await api("PATCH", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "?api-version=7.1", { name: document.getElementById("dash-name").value });
+                await api("PATCH", root + "/dashboard/dashboards/" + encodeURIComponent(dashboard.id) + "?api-version=7.1", { name: document.getElementById("dash-rename-name").value });
               } catch (error) {
                 showDashError(error);
                 return;
@@ -430,7 +438,8 @@
               location.reload();
             };
           }
-          document.getElementById("widget-add").onclick = async () => {
+          const widgetAdd = document.getElementById("widget-add");
+          if (widgetAdd) widgetAdd.onclick = async () => {
             try {
               let current = dashboard;
               if (!current) {

@@ -826,6 +826,9 @@ fn dashboards(
             None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         };
     }
+    if rest.len() == 2 && method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     let id = rest.get(2).map(String::as_str).unwrap_or("");
     if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("widgets")) {
         return dashboard_widgets(state, method, org, project, id, rest, body);
@@ -838,6 +841,23 @@ fn dashboards(
     }
     if rest.len() == 3 && (method == Method::PATCH || method == Method::PUT) {
         return update_dashboard(state, org, project, id, body);
+    }
+    if rest.len() == 3 && method == Method::DELETE {
+        let Some(found) = load_dashboard(state, org, project, id) else {
+            return fail(StatusCode::NOT_FOUND, "tableau de bord introuvable");
+        };
+        let stored_id = item_id(&found);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     fail(StatusCode::NOT_FOUND, "tableau de bord introuvable")
 }
