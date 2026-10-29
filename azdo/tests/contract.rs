@@ -23016,3 +23016,313 @@ async fn removing_one_feed_upstream_keeps_the_sibling_and_the_other_project() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("source introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_feed_permission_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn open_feed(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let pompe = open_feed(&app, &auth, "AzurzDemo", "pompe").await;
+    let ada = open_feed(&app, &auth, "AzurzDemo", "ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = open_feed(&app, &auth, "Atelier", "pompe").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"npmjs","location":"https://registry.npmjs.org/","protocol":"npm"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let permissions = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions?api-version=7.1");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("identité absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("identité absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("identité absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":"ada"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("rôle absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":"ada","role":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("rôle absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":"ada","role":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("rôle absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &permissions, Some(&auth), None, "application/json", Some(r#"{"identity":"ada","role":"rocket"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("rôle inconnu"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &permissions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/feed-missing/permissions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"identity":"ada","role":"reader"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+
+    async fn open_permission(app: &axum::Router, auth: &str, project: &str, feed: &str, identity: &str, role: &str) -> serde_json::Value {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/packaging/feeds/{feed}/permissions?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"identity":" {identity} ","role":" {role} "}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let reader = open_permission(&app, &auth, "AzurzDemo", &pompe, "Ada", "reader").await;
+    assert_eq!(reader["id"], "Ada");
+    assert_eq!(reader["identity"], "Ada");
+    assert_eq!(reader["displayName"], "Ada");
+    assert_eq!(reader["role"], "reader");
+    assert_eq!(reader["isInheritedRole"], false);
+    assert_eq!(reader["identityDescriptor"]["identifier"], "Ada");
+    assert_eq!(reader["identityDescriptor"]["identityType"], "Microsoft.TeamFoundation.Identity");
+    assert!(reader["identityId"].as_str().unwrap().len() > 8, "{reader}");
+    assert!(reader["url"].as_str().unwrap().ends_with(&format!("/feeds/{pompe}/permissions/Ada")), "{reader}");
+    let raised = open_permission(&app, &auth, "AzurzDemo", &pompe, "ada", "contributor").await;
+    assert_eq!(raised["id"], "Ada");
+    assert_eq!(raised["role"], "contributor");
+    assert_eq!(raised["identityId"], reader["identityId"]);
+    let ligne = open_permission(&app, &auth, "AzurzDemo", &pompe, "ligne", "reader").await;
+    assert_eq!(ligne["id"], "ligne");
+    assert_eq!(ligne["role"], "reader");
+    let ada_perm = open_permission(&app, &auth, "AzurzDemo", &ada, "Ada", "reader").await;
+    assert_eq!(ada_perm["id"], "Ada");
+    let atelier_perm = open_permission(&app, &auth, "Atelier", &atelier, "Ada", "reader").await;
+    assert_eq!(atelier_perm["id"], "Ada");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ligne?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ligne?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("rôle absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ligne?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"role":"collaborator"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let patched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(patched["id"], "ligne");
+    assert_eq!(patched["role"], "collaborator");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/absente?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("permission introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ada/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ada?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &permissions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], "ligne");
+    assert_eq!(left["value"][0]["role"], "collaborator");
+    let bob = open_permission(&app, &auth, "AzurzDemo", &pompe, "bob", "administrator").await;
+    assert_eq!(bob["role"], "administrator");
+    let (status, body, _) = call(&app, "GET", &permissions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again_list: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again_list["count"], 2);
+    assert_eq!(again_list["value"][0]["id"], "bob");
+    assert_eq!(again_list["value"][1]["id"], "ligne");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ada?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("permission introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_feed["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let packages: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(packages["value"][0]["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/upstreamsources?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sources: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sources["value"][0]["name"], "npmjs");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{ada}/permissions/Ada?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["id"], "Ada");
+    assert_eq!(ada_kept["role"], "reader");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier}/permissions/Ada?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["id"], "Ada");
+    assert_eq!(other["role"], "reader");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{pompe}/permissions/ada?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("permission introuvable"), "{body}");
+}

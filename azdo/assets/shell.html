@@ -1899,6 +1899,14 @@
             });
           });
           const viewTable = viewRows.length ? "<table id='feed-views'><thead><tr><th></th><th>Vue</th><th>Flux</th></tr></thead><tbody>" + viewRows.map((item) => "<tr><td><button type='button' class='fview-remove' data-id='" + esc(item.id) + "' data-feed='" + esc(item.feedId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.feedName) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feed-view-empty'>Aucune vue.</p>";
+          const permLists = await Promise.all(feeds.map((feed) => api("GET", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/permissions?api-version=7.1").catch(() => ({ value: [] }))));
+          const permRows = [];
+          feeds.forEach((feed, index) => {
+            (permLists[index].value || []).forEach((item) => {
+              permRows.push({ id: item.id, role: item.role || "", feedId: feed.id });
+            });
+          });
+          const permTable = permRows.length ? "<table id='feed-permissions'><thead><tr><th></th><th>Identité</th><th>Rôle</th></tr></thead><tbody>" + permRows.map((item) => "<tr><td><button type='button' class='perm-remove' data-id='" + esc(item.id) + "' data-feed='" + esc(item.feedId) + "' data-name='" + esc(item.id) + "'>Retirer</button></td><td>" + esc(item.id) + "</td><td>" + esc(item.role) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='perm-empty'>Aucune permission.</p>";
           const upstreamLists = await Promise.all(feeds.map((feed) => api("GET", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/upstreamsources?api-version=7.1").catch(() => ({ value: [] }))));
           const upstreamRows = [];
           feeds.forEach((feed, index) => {
@@ -1910,12 +1918,44 @@
           const table = feeds.length ? "<table id='feeds'><thead><tr><th>Nom</th><th>Nom complet</th><th>Protocole</th><th></th></tr></thead><tbody>" + feeds.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.fullyQualifiedName || item.name) + "</td><td>NuGet, npm, Maven, PyPI, Universel</td><td><button type='button' class='feed-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='feeds-empty'>Aucun flux.</p>";
           const listed = packages.length ? "<table id='packages'><thead><tr><th>Flux</th><th>Protocole</th><th>Nom</th><th>Version</th><th>Fichier</th><th></th></tr></thead><tbody>" + packages.map((item) => "<tr><td>" + esc(item.feed) + "</td><td>" + esc(item.label || item.protocol) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.version) + "</td><td>" + esc(item.filename) + "</td><td><button type='button' class='pkg-remove' data-feed='" + esc(item.feed) + "' data-protocol='" + esc(item.protocol) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "' data-version='" + esc(item.version) + "' data-filename='" + esc(item.filename) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='packages-empty'>Aucun paquet.</p>";
           const options = feeds.map((item) => "<option value='" + esc(item.name) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Artefacts</h1><h2>Sources amont</h2><div class='command'><input id='upstream-feed' placeholder='pompe' /><input id='upstream-name' placeholder='npmjs' /><input id='upstream-location' placeholder='https://registry.npmjs.org/' /><select id='upstream-protocol'><option value='npm'>npm</option><option value='nuget'>NuGet</option><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='upack'>Universel</option></select><button id='upstream-add' type='button'>Ajouter</button></div>" + upstreamTable + "<p id='upstream-error' class='sub'></p><h2>Vues</h2><div class='command'><input id='fview-feed' placeholder='pompe' /><input id='fview-name' placeholder='release' /><button id='fview-add' type='button'>Ajouter</button></div>" + viewTable + "<p id='fview-error' class='sub'></p><h2>Paquets du flux</h2><div class='command'><select id='gen-feed'>" + genOptions + "</select><input id='gen-name' placeholder='Pompe' /><input id='gen-version' placeholder='1.0.0' value='1.0.0' /><button id='gen-create' type='button'>Ajouter</button></div><p id='gen-error' class='sub'></p>" + genTable + "<div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option><option value='upack'>Universel</option><option value='nuget'>NuGet</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
+          view.innerHTML = "<h1>Artefacts</h1><h2>Permissions</h2><div class='command'><input id='perm-feed' placeholder='pompe' /><input id='perm-identity' placeholder='ada' /><select id='perm-role'><option value='reader'>Lecteur</option><option value='contributor'>Contributeur</option><option value='collaborator'>Collaborateur</option><option value='administrator'>Administrateur</option></select><button id='perm-add' type='button'>Ajouter</button></div>" + permTable + "<p id='perm-error' class='sub'></p><h2>Sources amont</h2><div class='command'><input id='upstream-feed' placeholder='pompe' /><input id='upstream-name' placeholder='npmjs' /><input id='upstream-location' placeholder='https://registry.npmjs.org/' /><select id='upstream-protocol'><option value='npm'>npm</option><option value='nuget'>NuGet</option><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='upack'>Universel</option></select><button id='upstream-add' type='button'>Ajouter</button></div>" + upstreamTable + "<p id='upstream-error' class='sub'></p><h2>Vues</h2><div class='command'><input id='fview-feed' placeholder='pompe' /><input id='fview-name' placeholder='release' /><button id='fview-add' type='button'>Ajouter</button></div>" + viewTable + "<p id='fview-error' class='sub'></p><h2>Paquets du flux</h2><div class='command'><select id='gen-feed'>" + genOptions + "</select><input id='gen-name' placeholder='Pompe' /><input id='gen-version' placeholder='1.0.0' value='1.0.0' /><button id='gen-create' type='button'>Ajouter</button></div><p id='gen-error' class='sub'></p>" + genTable + "<div class='command'><input id='feed-name' placeholder='Nouveau flux' /><button id='create' type='button'>Créer</button></div>" + table + "<h2>Publier</h2><div class='command'><select id='pkg-feed'>" + options + "</select><select id='pkg-protocol'><option value='maven'>Maven</option><option value='pypi'>PyPI</option><option value='npm'>npm</option><option value='upack'>Universel</option><option value='nuget'>NuGet</option></select><input id='pkg-group' placeholder='Groupe Maven' value='com.azurz' /><input id='pkg-name' placeholder='Nom' /><input id='pkg-version' placeholder='Version' value='1.0.0' /><button id='pkg-publish' type='button'>Publier</button></div><p id='pkg-error' class='error' hidden></p>" + listed;
           function showPkgError(error) {
             const note = document.getElementById("pkg-error");
             note.hidden = false;
             note.textContent = error.message;
           }
+          document.getElementById("perm-add").onclick = async () => {
+            const error = document.getElementById("perm-error");
+            error.textContent = "";
+            const feedName = document.getElementById("perm-feed").value.trim() || "pompe";
+            const identity = document.getElementById("perm-identity").value.trim() || "ada";
+            const role = document.getElementById("perm-role").value;
+            try {
+              const listed = await api("GET", root + "/packaging/feeds?api-version=7.1");
+              let feed = (listed.value || []).find((item) => item.name === feedName);
+              if (!feed) {
+                feed = await api("POST", root + "/packaging/feeds?api-version=7.1", { name: feedName });
+              }
+              await api("POST", root + "/packaging/feeds/" + encodeURIComponent(feed.id) + "/permissions?api-version=7.1", { identity: identity, role: role });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.perm-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("perm-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/packaging/feeds/" + encodeURIComponent(button.dataset.feed) + "/permissions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("upstream-add").onclick = async () => {
             const error = document.getElementById("upstream-error");
             error.textContent = "";

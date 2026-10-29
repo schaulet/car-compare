@@ -5909,6 +5909,9 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         }
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("permissions") {
+        return feed_permissions(state, method, org, project, feed_id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("upstreamsources") {
         return feed_upstreams(state, method, org, project, feed_id, rest, body);
     }
@@ -5945,6 +5948,204 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "flux introuvable")
+}
+
+fn feed_permissions(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(feed) = get_item(state, org, project, "packaging/feeds", feed_id) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let stored_feed = text_of(&feed, "id").unwrap_or_default();
+    let key = format!("packaging/feeds/{stored_feed}/permissions");
+    if rest.len() == 4 {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by(|left, right| {
+                value_key(&left["id"])
+                    .to_ascii_lowercase()
+                    .cmp(&value_key(&right["id"]).to_ascii_lowercase())
+            });
+            let value = rows
+                .into_iter()
+                .map(|item| dress_feed_permission(org, project, &stored_feed, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST || method == Method::PATCH {
+            let entries = match permission_entries(body) {
+                Ok(entries) => entries,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let stored: Vec<Value> = entries
+                .into_iter()
+                .map(|(identity, role)| store_feed_permission(state, org, project, &key, &stored_feed, identity, role))
+                .collect();
+            if stored.len() == 1 && permission_body_is_object(body) {
+                return Json(stored[0].clone()).into_response();
+            }
+            return Json(page(stored)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 5 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "permission introuvable");
+    }
+    let wanted = rest[4].as_str();
+    let Some(found) = list(state, org, project, &key)
+        .into_iter()
+        .find(|item| value_key(&item["id"]).eq_ignore_ascii_case(wanted))
+    else {
+        return fail(StatusCode::NOT_FOUND, "permission introuvable");
+    };
+    let id = value_key(&found["id"]);
+    if method == Method::GET {
+        return Json(dress_feed_permission(org, project, &stored_feed, found)).into_response();
+    }
+    if method == Method::DELETE {
+        return if delete_item(state, org, project, &key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "permission introuvable")
+        };
+    }
+    if method == Method::PATCH {
+        let role = match permission_role_only(body) {
+            Ok(role) => role,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let item = json!({ "id": id, "role": role });
+        put_item(state, org, project, &key, item.clone());
+        return Json(dress_feed_permission(org, project, &stored_feed, item)).into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn permission_body_is_object(body: &[u8]) -> bool {
+    parse_json(body).and_then(|value| value.as_object().map(|_| ())).is_some()
+}
+
+fn store_feed_permission(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    key: &str,
+    feed_id: &str,
+    identity: String,
+    role: &'static str,
+) -> Value {
+    let id = list(state, org, project, key)
+        .into_iter()
+        .find(|item| value_key(&item["id"]).eq_ignore_ascii_case(&identity))
+        .map(|item| value_key(&item["id"]))
+        .unwrap_or(identity);
+    let item = json!({ "id": id, "role": role });
+    put_item(state, org, project, key, item.clone());
+    dress_feed_permission(org, project, feed_id, item)
+}
+
+fn permission_entries(body: &[u8]) -> Result<Vec<(String, &'static str)>, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    match payload {
+        Value::Array(rows) => {
+            if rows.is_empty() {
+                return Err("identité absente");
+            }
+            rows.iter().map(permission_entry).collect()
+        }
+        Value::Object(_) => permission_entry(&payload).map(|entry| vec![entry]),
+        _ => Err("identité absente"),
+    }
+}
+
+fn permission_entry(value: &Value) -> Result<(String, &'static str), &'static str> {
+    let Some(object) = value.as_object() else {
+        return Err("identité absente");
+    };
+    let identity = permission_identity(object)?;
+    let role = permission_role(object)?;
+    Ok((identity, role))
+}
+
+fn permission_identity(object: &Map<String, Value>) -> Result<String, &'static str> {
+    if object.contains_key("identity") {
+        return required_text(object.get("identity"));
+    }
+    if object.contains_key("displayName") {
+        return required_text(object.get("displayName"));
+    }
+    match object.get("identityDescriptor") {
+        Some(Value::String(text)) => nonempty_identity(text),
+        Some(Value::Object(descriptor)) => required_text(descriptor.get("identifier")),
+        Some(_) => Err("identité absente"),
+        None => Err("identité absente"),
+    }
+}
+
+fn required_text(value: Option<&Value>) -> Result<String, &'static str> {
+    match value {
+        Some(Value::String(text)) => nonempty_identity(text),
+        _ => Err("identité absente"),
+    }
+}
+
+fn nonempty_identity(text: &str) -> Result<String, &'static str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        Err("identité absente")
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn permission_role(object: &Map<String, Value>) -> Result<&'static str, &'static str> {
+    match object.get("role") {
+        Some(Value::String(text)) => canonical_feed_role(text),
+        _ => Err("rôle absent"),
+    }
+}
+
+fn permission_role_only(body: &[u8]) -> Result<&'static str, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("rôle absent");
+    };
+    permission_role(object)
+}
+
+fn canonical_feed_role(text: &str) -> Result<&'static str, &'static str> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "" => Err("rôle absent"),
+        "reader" => Ok("reader"),
+        "contributor" => Ok("contributor"),
+        "administrator" => Ok("administrator"),
+        "collaborator" => Ok("collaborator"),
+        _ => Err("rôle inconnu"),
+    }
+}
+
+fn dress_feed_permission(org: &str, project: &str, feed_id: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("identity".into(), json!(id));
+        object.insert("displayName".into(), json!(id));
+        object.insert(
+            "identityDescriptor".into(),
+            json!({ "identifier": id, "identityType": "Microsoft.TeamFoundation.Identity" }),
+        );
+        object.insert("identityId".into(), json!(object_id(&id)));
+        object.insert("isInheritedRole".into(), json!(false));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/packaging/feeds/{feed_id}/permissions/{id}")),
+        );
+    }
+    item
 }
 
 fn feed_upstreams(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
