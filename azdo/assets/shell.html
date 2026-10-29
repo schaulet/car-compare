@@ -1234,8 +1234,14 @@
           const folderTable = folderRows.length ? "<table id='build-folders'><thead><tr><th></th><th>Chemin</th><th>Description</th></tr></thead><tbody>" + folderRows.map((item) => "<tr><td><button type='button' class='bfolder-remove' data-id='" + esc(item.path) + "' data-name='" + esc(item.path) + "'>Retirer</button></td><td>" + esc(item.path) + "</td><td>" + esc(item.description || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-folder-empty' class='sub'>Aucun dossier.</p>";
           const deployGroups = await api("GET", root + "/distributedtask/deploymentgroups?api-version=7.1").catch(() => ({ value: [] }));
           const deployRows = deployGroups.value || [];
+          const targetLists = await Promise.all(deployRows.map((group) => api("GET", root + "/distributedtask/deploymentgroups/" + encodeURIComponent(group.id) + "/targets?api-version=7.1").catch(() => ({ value: [] }))));
+          const targetRows = [];
+          deployRows.forEach((group, index) => {
+            (targetLists[index].value || []).forEach((item) => targetRows.push({ id: item.id, name: item.name, groupId: group.id, groupName: group.name }));
+          });
+          const targetTable = targetRows.length ? "<table id='deploy-targets'><thead><tr><th></th><th>Machine</th><th>Groupe</th></tr></thead><tbody>" + targetRows.map((item) => "<tr><td><button type='button' class='dtarget-remove' data-id='" + esc(item.id) + "' data-group='" + esc(item.groupId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.groupName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='deploy-target-empty' class='sub'>Aucune cible.</p>";
           const deployTable = deployRows.length ? "<table id='deploy-groups'><thead><tr><th></th><th>Nom</th><th>Description</th></tr></thead><tbody>" + deployRows.map((item) => "<tr><td><button type='button' class='dgroup-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='deploy-group-empty' class='sub'>Aucun groupe de déploiement.</p>";
-          view.innerHTML = "<h1>Pipelines</h1><h2>Dossiers</h2><div class='command'><input id='bfolder-path' placeholder='pompe' /><input id='bfolder-desc' placeholder='ligne' /><button id='bfolder-add' type='button'>Ajouter</button></div>" + folderTable + "<p id='bfolder-error' class='sub'></p><h2>Groupes de déploiement</h2><div class='command'><input id='dgroup-name' placeholder='pompe' /><input id='dgroup-desc' placeholder='Linux' /><button id='dgroup-add' type='button'>Ajouter</button></div>" + deployTable + "<p id='dgroup-error' class='sub'></p><h2>Conservations</h2><div class='command'><input id='blease-build' placeholder='Build' /><input id='blease-owner' placeholder='azurz' /><input id='blease-days' placeholder='30' /><button id='blease-add' type='button'>Conserver</button></div>" + leaseTable + "<h2>Étiquettes</h2><div class='command'><input id='btag-build' placeholder='Build' /><input id='btag-name' placeholder='ada' /><button id='btag-add' type='button'>Poser</button></div>" + tagTable + "<div class='command'><input id='def-name' placeholder='Pompe' /><button id='def-create' type='button'>Créer</button><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Pipelines</h1><h2>Cibles</h2><div class='command'><input id='dtarget-group' placeholder='pompe' /><input id='dtarget-name' placeholder='ada' /><button id='dtarget-add' type='button'>Ajouter</button></div>" + targetTable + "<p id='dtarget-error' class='sub'></p><h2>Dossiers</h2><div class='command'><input id='bfolder-path' placeholder='pompe' /><input id='bfolder-desc' placeholder='ligne' /><button id='bfolder-add' type='button'>Ajouter</button></div>" + folderTable + "<p id='bfolder-error' class='sub'></p><h2>Groupes de déploiement</h2><div class='command'><input id='dgroup-name' placeholder='pompe' /><input id='dgroup-desc' placeholder='Linux' /><button id='dgroup-add' type='button'>Ajouter</button></div>" + deployTable + "<p id='dgroup-error' class='sub'></p><h2>Conservations</h2><div class='command'><input id='blease-build' placeholder='Build' /><input id='blease-owner' placeholder='azurz' /><input id='blease-days' placeholder='30' /><button id='blease-add' type='button'>Conserver</button></div>" + leaseTable + "<h2>Étiquettes</h2><div class='command'><input id='btag-build' placeholder='Build' /><input id='btag-name' placeholder='ada' /><button id='btag-add' type='button'>Poser</button></div>" + tagTable + "<div class='command'><input id='def-name' placeholder='Pompe' /><button id='def-create' type='button'>Créer</button><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
           function timelineItems(records, parent, depth) {
             return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
               const result = record.result ? " / " + esc(record.result) : "";
@@ -1369,6 +1375,37 @@
             await api("PUT", root + "/build/definitions/" + encodeURIComponent(definition.id) + "?api-version=7.1", { variables });
             location.reload();
           };
+          document.getElementById("dtarget-add").onclick = async () => {
+            const error = document.getElementById("dtarget-error");
+            error.textContent = "";
+            const groupName = document.getElementById("dtarget-group").value.trim() || "pompe";
+            const name = document.getElementById("dtarget-name").value.trim() || "ada";
+            try {
+              const listed = await api("GET", root + "/distributedtask/deploymentgroups?api-version=7.1");
+              let group = (listed.value || []).find((item) => item.name === groupName);
+              if (!group) {
+                group = await api("POST", root + "/distributedtask/deploymentgroups?api-version=7.1", { name: groupName });
+              }
+              await api("POST", root + "/distributedtask/deploymentgroups/" + encodeURIComponent(group.id) + "/targets?api-version=7.1", { name });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.dtarget-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("dtarget-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/distributedtask/deploymentgroups/" + encodeURIComponent(button.dataset.group) + "/targets/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("bfolder-add").onclick = async () => {
             const error = document.getElementById("bfolder-error");
             error.textContent = "";
