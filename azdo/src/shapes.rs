@@ -40,6 +40,7 @@ pub fn dispatch(
         ("distributedtask", "variablegroups") => variable_groups(state, method, org, project, rest, body),
         ("distributedtask", "securefiles") => secure_files(state, method, org, project, rest, query, body),
         ("distributedtask", "taskgroups") => task_groups(state, method, org, project, rest, body),
+        ("distributedtask", "deploymentgroups") => deployment_groups(state, method, org, project, rest, body),
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
         ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
@@ -6964,6 +6965,91 @@ fn dress_group(org: &str, project: &str, item: &Value) -> Value {
         "variableGroupProjectReferences": [{"name": name, "projectReference": {"name": project}}],
         "url": format!("/{org}/{project}/_apis/distributedtask/variablegroups/{id}")
     })
+}
+
+fn deployment_groups(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "distributedtask/deploymentgroups";
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by_key(|item| item.get("id").and_then(json_i64).unwrap_or(0));
+            let value = rows.into_iter().map(|item| dress_deployment_group(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_deployment_group(state, org, project, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "groupe de déploiement introuvable");
+    }
+    let id = pct_decode(&rest[2]).trim().to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "groupe de déploiement introuvable");
+    }
+    if method == &Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_deployment_group(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "groupe de déploiement introuvable"),
+        };
+    }
+    if method == &Method::DELETE {
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe de déploiement introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_deployment_group(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    let description = object
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let next = list(state, org, project, "distributedtask/deploymentgroups")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(json_i64))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let item = json!({
+        "id": next,
+        "name": name,
+        "description": description
+    });
+    put_item(state, org, project, "distributedtask/deploymentgroups", item.clone());
+    Json(dress_deployment_group(org, project, item)).into_response()
+}
+
+fn dress_deployment_group(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.entry("description").or_insert(json!(""));
+        object.insert("project".into(), json!({"name": project}));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/distributedtask/deploymentgroups/{id}")),
+        );
+    }
+    item
 }
 
 fn task_groups(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
