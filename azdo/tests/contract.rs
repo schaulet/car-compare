@@ -21172,3 +21172,278 @@ async fn removing_one_deployment_target_keeps_the_sibling_and_the_other_project(
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("cible introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_feed_view_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let feed_id = feed["id"].as_str().unwrap();
+    let views = format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views?api-version=7.1");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"oee","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some(r#"{"name":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some(r#"{"name":"@Local"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("vue réservée"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some(r#"{"name":"release","visibility":"public"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("visibilité absente"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &views, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/release/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/packaging/feeds/absent/views?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/@Local?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("vue réservée"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &views,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" release ","visibility":" organization "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let release: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(release["name"], "release");
+    assert_eq!(release["visibility"], "organization");
+    assert_eq!(release["feed"]["name"], "pompe");
+    assert!(release["url"].as_str().unwrap().contains("/views/release"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some(r#"{"name":"Release"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("vue déjà présente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &views, Some(&auth), None, "application/json", Some(r#"{"name":"preprod"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["name"], "preprod");
+    assert_eq!(sibling["visibility"], "private");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ada"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_feed_id = other_feed["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{other_feed_id}/views?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"release"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/packaging/feeds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_feed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_feed_id = atelier_feed["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier_feed_id}/views?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"release"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/absente?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("vue introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/release?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &views, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 4);
+    let names: Vec<&str> = left["value"].as_array().unwrap().iter().filter_map(|item| item["name"].as_str()).collect();
+    assert_eq!(names, vec!["@Local", "@Prerelease", "@Release", "preprod"]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/preprod?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_view["name"], "preprod");
+    assert_eq!(kept_view["feed"]["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/packages?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let packages: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(packages["count"], 1);
+    assert_eq!(packages["value"][0]["name"], "oee");
+    assert_eq!(packages["value"][0]["versions"][0]["version"], "1.0.0");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{other_feed_id}/views/release?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other_view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other_view["name"], "release");
+    assert_eq!(other_view["feed"]["name"], "ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/packaging/feeds/{atelier_feed_id}/views/release?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier["name"], "release");
+    assert_eq!(atelier["feed"]["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/packaging/feeds/{feed_id}/views/release?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("vue introuvable"), "{body}");
+}

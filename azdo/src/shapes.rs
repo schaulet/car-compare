@@ -5435,6 +5435,9 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         }
         return fail(StatusCode::NOT_FOUND, "paquet introuvable");
     }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("views") {
+        return feed_views(state, method, org, project, feed_id, rest, body);
+    }
     if method == Method::GET {
         return match get_item(state, org, project, key, feed_id) {
             Some(item) => Json(dress_feed(org, project, item)).into_response(),
@@ -5465,6 +5468,136 @@ fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[St
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::NOT_FOUND, "flux introuvable")
+}
+
+fn feed_views(state: &AppState, method: &Method, org: &str, project: &str, feed_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let Some(feed) = get_item(state, org, project, "packaging/feeds", feed_id) else {
+        return fail(StatusCode::NOT_FOUND, "flux introuvable");
+    };
+    let stored_feed = text_of(&feed, "id").unwrap_or_default();
+    let feed_name = text_of(&feed, "name").unwrap_or_default();
+    let key = format!("packaging/feeds/{stored_feed}/views");
+    if rest.len() == 4 {
+        if method == &Method::GET {
+            let mut rows = default_feed_views();
+            rows.extend(list(state, org, project, &key));
+            rows.sort_by(|left, right| text_of(left, "name").unwrap_or_default().cmp(&text_of(right, "name").unwrap_or_default()));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_feed_view(org, project, &stored_feed, &feed_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_feed_view(state, org, project, &stored_feed, &feed_name, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 5 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "vue introuvable");
+    }
+    let wanted = pct_decode(&rest[4]).trim().to_string();
+    if wanted.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "vue introuvable");
+    }
+    if reserved_feed_view(&wanted) {
+        if method == &Method::GET {
+            let item = default_feed_views()
+                .into_iter()
+                .find(|item| text_of(item, "name").is_some_and(|name| name.eq_ignore_ascii_case(&wanted)))
+                .unwrap_or_else(|| json!({"id": wanted, "name": wanted, "visibility": "private"}));
+            return Json(dress_feed_view(org, project, &stored_feed, &feed_name, item)).into_response();
+        }
+        if method == &Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "vue réservée");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(item) = find_feed_view(&list(state, org, project, &key), &wanted) else {
+        return fail(StatusCode::NOT_FOUND, "vue introuvable");
+    };
+    let id = value_key(&item["id"]);
+    if method == &Method::GET {
+        return Json(dress_feed_view(org, project, &stored_feed, &feed_name, item)).into_response();
+    }
+    if method == &Method::DELETE {
+        return if delete_item(state, org, project, &key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "vue introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_feed_view(state: &AppState, org: &str, project: &str, feed_id: &str, feed_name: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    if reserved_feed_view(name) {
+        return fail(StatusCode::BAD_REQUEST, "vue réservée");
+    }
+    let visibility = match object.get("visibility") {
+        None => "private".to_string(),
+        Some(value) => match value.as_str().map(str::trim) {
+            Some(text) if text.eq_ignore_ascii_case("private") || text.eq_ignore_ascii_case("organization") || text.eq_ignore_ascii_case("collection") => {
+                text.to_ascii_lowercase()
+            }
+            _ => return fail(StatusCode::BAD_REQUEST, "visibilité absente"),
+        },
+    };
+    let key = format!("packaging/feeds/{feed_id}/views");
+    if find_feed_view(&list(state, org, project, &key), name).is_some() {
+        return fail(StatusCode::BAD_REQUEST, "vue déjà présente");
+    }
+    let item = json!({"id": name, "name": name, "visibility": visibility});
+    put_item(state, org, project, &key, item.clone());
+    Json(dress_feed_view(org, project, feed_id, feed_name, item)).into_response()
+}
+
+fn default_feed_views() -> Vec<Value> {
+    vec![
+        json!({"id": "@Local", "name": "@Local", "visibility": "private"}),
+        json!({"id": "@Prerelease", "name": "@Prerelease", "visibility": "private"}),
+        json!({"id": "@Release", "name": "@Release", "visibility": "private"}),
+    ]
+}
+
+fn reserved_feed_view(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case("@Local") || trimmed.eq_ignore_ascii_case("@Prerelease") || trimmed.eq_ignore_ascii_case("@Release")
+}
+
+fn find_feed_view(rows: &[Value], name: &str) -> Option<Value> {
+    rows.iter()
+        .find(|item| {
+            text_of(item, "id").is_some_and(|id| id.eq_ignore_ascii_case(name))
+                || text_of(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+}
+
+fn dress_feed_view(org: &str, project: &str, feed_id: &str, feed_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.entry("visibility").or_insert(json!("private"));
+        object.insert("feed".into(), json!({"id": feed_id, "name": feed_name}));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/packaging/feeds/{feed_id}/views/{id}")),
+        );
+    }
+    item
 }
 
 fn release_definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
