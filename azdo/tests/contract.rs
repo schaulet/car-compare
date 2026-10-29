@@ -8417,3 +8417,143 @@ async fn ci_trigger_queues_a_build_for_the_matching_branch_and_path() {
     assert_eq!(review_builds[0]["sourceBranch"], "refs/heads/feature");
     assert!(rows.iter().all(|item| item["definition"]["id"].as_i64() != Some(draft_id)));
 }
+
+#[tokio::test]
+async fn board_columns_replace_for_one_team_and_keep_the_other() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let columns = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", columns, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let defaults: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(defaults["count"], 4);
+    assert_eq!(defaults["value"][1]["name"], "Active");
+    assert_eq!(defaults["value"][0]["columnType"], "incoming");
+    assert_eq!(defaults["value"][3]["columnType"], "outgoing");
+
+    let rejected = [
+        (r#"{"name":"New"}"#, "colonnes illisibles"),
+        (r#"[{"name":" "}]"#, "nom de colonne absent"),
+        (
+            r#"[{"name":"Active","columnType":"incoming"},{"name":"active","columnType":"outgoing"}]"#,
+            "colonne déjà présente",
+        ),
+        (
+            r#"[{"name":"Active","columnType":"inProgress"},{"name":"New","columnType":"incoming"},{"name":"Closed","columnType":"outgoing"}]"#,
+            "colonnes d'entrée et de sortie requises",
+        ),
+        (
+            r#"[{"name":"New","columnType":"incoming"},{"name":"Active","columnType":"octopus"},{"name":"Closed","columnType":"outgoing"}]"#,
+            "type de colonne inconnu",
+        ),
+        (
+            r#"[{"name":"New","columnType":"incoming","stateMappings":{"Bug":" "}},{"name":"Closed","columnType":"outgoing"}]"#,
+            "état de colonne absent",
+        ),
+        (
+            r#"[{"name":"New","columnType":"incoming"},{"name":"Closed","columnType":"outgoing","itemLimit":-1}]"#,
+            "limite de colonne invalide",
+        ),
+    ];
+    for (payload, message) in rejected {
+        let (status, body, _) = call(
+            &app,
+            "PUT",
+            columns,
+            Some(&auth),
+            None,
+            "application/json",
+            Some(payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["message"], message, "{body}");
+    }
+    let (status, body, _) = call(&app, "GET", columns, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["count"], 4, "{body}");
+    assert!(!body.contains("Revue"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        columns,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(
+            r#"[{"name":"New","columnType":"incoming"},{"name":"Active","columnType":"inProgress"},{"name":"Revue","itemLimit":2,"stateMappings":{"User Story":"En revue"}},{"name":"Closed","columnType":"outgoing"}]"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(saved["count"], 4);
+    assert_eq!(saved["value"][2]["name"], "Revue");
+    assert_eq!(saved["value"][2]["columnType"], "inProgress");
+    assert_eq!(saved["value"][2]["itemLimit"], 2);
+    assert_eq!(saved["value"][2]["isSplit"], false);
+    assert_eq!(saved["value"][2]["stateMappings"]["User Story"], "En revue");
+    assert_eq!(saved["value"][2]["stateMappings"]["Bug"], "Revue");
+    assert_eq!(saved["value"][2]["stateMappings"]["Task"], "Revue");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        columns,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"name":"Revue","columnType":"incoming"},{"name":"revue","columnType":"outgoing"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body, _) = call(&app, "GET", columns, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["value"][2]["name"], "Revue");
+    assert_eq!(kept["value"][2]["stateMappings"]["User Story"], "En revue");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("En revue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Autre/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 4);
+    assert!(!body.contains("Revue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let board: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(board["columns"][2]["name"], "Revue");
+    assert_eq!(board["allowedMappings"]["User Story"][2], "En revue");
+}

@@ -62,9 +62,11 @@
     .state-failed, .state-error { background: #a4262c; }
     .state-pending { background: #f2cb1d; color: #323130; }
     .type { font-size: 12px; font-weight: 600; }
-    .board { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; align-items: start; }
+    .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: start; }
     .col { background: var(--page); border: 1px solid var(--line); min-height: 240px; }
-    .col h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--line); }
+    .col h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .col-limit { width: 52px; }
+    .col-remove { margin-left: 8px; }
     .form { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
     .form h3 { margin: 0 0 8px; font-size: 16px; }
     .card { margin: 8px; background: #fff; border: 1px solid var(--line); padding: 8px 10px; cursor: grab; }
@@ -370,30 +372,104 @@
           return;
         }
         if (hub === "/_boards") {
+          const teamName = project + " Team";
+          const boardApi = "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis/work/boards/Stories/columns?api-version=7.1";
+          const listed = await api("GET", boardApi);
+          const columns = listed.value || [];
           const items = await workItems();
-          const columns = ["New", "Active", "Resolved", "Closed"];
-          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état, comme sur un board.</p><div class='board'>" + columns.map((state) => {
-            const cards = items.filter((item) => (item.fields?.["System.State"] || "New") === state).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
-            return "<section class='col' data-state='" + state + "'><h2>" + state + "</h2>" + cards + "</section>";
+          const placed = new Set();
+          function mappedState(column, item) {
+            const kind = item.fields?.["System.WorkItemType"] || "User Story";
+            const map = column.stateMappings || {};
+            return map[kind] || column.name;
+          }
+          const note = "<p id='board-limit' class='error' hidden></p>";
+          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button></div>" + note + "<div class='board'>" + columns.map((column) => {
+            const cards = items.filter((item) => {
+              if (placed.has(item.id) || mappedState(column, item) !== (item.fields?.["System.State"] || "New")) return false;
+              placed.add(item.id);
+              return true;
+            }).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
+            const remove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
+            return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + remove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
           }).join("") + "</div>";
+          async function saveColumns(next) {
+            try {
+              await api("PUT", boardApi, next);
+              location.reload();
+            } catch (error) {
+              const limit = document.getElementById("board-limit");
+              limit.hidden = false;
+              limit.textContent = error.message;
+            }
+          }
+          document.getElementById("col-add").onclick = () => {
+            const name = document.getElementById("col-name").value.trim();
+            if (!name) return;
+            const column = { name, itemLimit: 0, isSplit: false, columnType: "inProgress", stateMappings: { "User Story": name, Bug: name, Task: name } };
+            const outgoing = columns.findIndex((item) => item.columnType === "outgoing");
+            const next = columns.slice();
+            next.splice(outgoing < 0 ? next.length : outgoing, 0, column);
+            saveColumns(next);
+          };
+          let draggedId = "";
           document.querySelectorAll(".card").forEach((card) => {
-            card.ondragstart = (event) => event.dataTransfer.setData("text/plain", card.dataset.id);
+            card.ondragstart = (event) => {
+              draggedId = card.dataset.id;
+              event.dataTransfer.setData("text/plain", card.dataset.id);
+              event.dataTransfer.effectAllowed = "move";
+            };
             card.onclick = () => openItem(card.dataset.id);
           });
           document.querySelectorAll(".col").forEach((column) => {
+            const remove = column.querySelector(".col-remove");
+            if (remove) {
+              remove.onclick = (event) => {
+                event.stopPropagation();
+                saveColumns(columns.filter((item) => item.name !== column.dataset.name));
+              };
+            }
+            const limitInput = column.querySelector(".col-limit");
+            limitInput.onchange = () => {
+              const next = columns.map((item) => item.name === column.dataset.name ? Object.assign({}, item, { itemLimit: Number(limitInput.value) }) : item);
+              saveColumns(next);
+            };
             column.ondragover = (event) => { event.preventDefault(); column.classList.add("drop"); };
             column.ondragleave = () => column.classList.remove("drop");
             column.ondrop = async (event) => {
               event.preventDefault();
               column.classList.remove("drop");
-              const id = event.dataTransfer.getData("text/plain");
+              const id = event.dataTransfer.getData("text/plain") || draggedId;
               const card = document.querySelector(".card[data-id='" + id + "']");
-              if (!card) return;
-              const patch = JSON.stringify([{ op: "replace", path: "/fields/System.State", value: column.dataset.state }]);
-              await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+              const limitNote = document.getElementById("board-limit");
+              if (!card || column.contains(card)) return;
+              const limit = Number(column.dataset.limit || 0);
+              if (limit > 0 && column.querySelectorAll(".card").length >= limit) {
+                limitNote.hidden = false;
+                limitNote.textContent = "Limite de colonne atteinte";
+                return;
+              }
+              const map = JSON.parse(column.dataset.map || "{}");
+              const state = map[card.dataset.type] || column.dataset.name;
+              const patch = JSON.stringify([{ op: "replace", path: "/fields/System.State", value: state }]);
+              try {
+                await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
+              } catch (error) {
+                limitNote.hidden = false;
+                limitNote.textContent = error.message;
+                return;
+              }
+              limitNote.hidden = true;
               const empty = column.querySelector(".empty");
               if (empty) empty.remove();
+              const previous = card.parentElement;
               column.appendChild(card);
+              if (previous && !previous.querySelector(".card")) {
+                const marker = document.createElement("p");
+                marker.className = "sub empty";
+                marker.textContent = "Vide";
+                previous.appendChild(marker);
+              }
             };
           });
           return;

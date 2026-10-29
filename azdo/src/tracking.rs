@@ -1,7 +1,7 @@
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::http::{fail, parse_json};
 use crate::AppState;
@@ -18,7 +18,7 @@ pub fn dispatch(
     let area = rest.first()?.to_ascii_lowercase();
     let resource = rest.get(1).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     let response = match (area.as_str(), resource.as_str()) {
-        ("work", "boards") => boards(state, method, org, project, team, rest),
+        ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
         ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
@@ -29,18 +29,35 @@ pub fn dispatch(
     Some(response)
 }
 
-fn boards(_state: &AppState, method: &Method, org: &str, project: &str, team: Option<&str>, rest: &[String]) -> Response {
+fn boards(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let team_name = team.map(str::to_string).unwrap_or_else(|| format!("{project} Team"));
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("columns") {
+        let board = &rest[2];
+        if method == Method::GET {
+            return Json(page(load_columns(state, org, project, &team_name, board))).into_response();
+        }
+        if method == Method::PUT {
+            return put_columns(state, org, project, &team_name, board, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
-    let team_name = team.unwrap_or("AzurzDemo Team");
-    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("columns") {
-        return Json(page(board_columns())).into_response();
-    }
     if rest.len() >= 3 {
-        return Json(board_document(org, project, team_name, &rest[2])).into_response();
+        let columns = load_columns(state, org, project, &team_name, &rest[2]);
+        return Json(board_document(org, project, &team_name, &rest[2], columns)).into_response();
     }
-    Json(page(vec![board_document(org, project, team_name, "Stories")])).into_response()
+    let columns = load_columns(state, org, project, &team_name, "Stories");
+    Json(page(vec![board_document(org, project, &team_name, "Stories", columns)])).into_response()
 }
 
 fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: Option<&str>, rest: &[String]) -> Response {
@@ -1024,14 +1041,162 @@ fn endpoints(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
-fn board_document(org: &str, project: &str, team: &str, name: &str) -> Value {
+fn column_key(team: &str, board: &str) -> String {
+    format!("work/boards/{team}/{board}")
+}
+
+fn load_columns(state: &AppState, org: &str, project: &str, team: &str, board: &str) -> Vec<Value> {
+    let key = column_key(team, board);
+    state
+        .read(|db| {
+            db.project(org, project)
+                .and_then(|stored| stored.get_bucket(&key, "columns"))
+                .and_then(|item| item.get("columns").and_then(|value| value.as_array().cloned()))
+        })
+        .filter(|columns| !columns.is_empty())
+        .unwrap_or_else(board_columns)
+}
+
+fn put_columns(state: &AppState, org: &str, project: &str, team: &str, board: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "colonnes illisibles");
+    };
+    let raw = if payload.is_array() {
+        payload
+    } else {
+        payload.get("value").cloned().unwrap_or(Value::Null)
+    };
+    let columns = match normalize_columns(&raw) {
+        Ok(columns) => columns,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let key = column_key(team, board);
+    let stored = state.write(|db| {
+        let Some(project_data) = db.project_mut(org, project) else {
+            return false;
+        };
+        project_data.put_bucket(&key, json!({"id": "columns", "columns": columns}));
+        true
+    });
+    if !stored {
+        return fail(StatusCode::NOT_FOUND, "projet absent");
+    }
+    Json(page(columns)).into_response()
+}
+
+fn normalize_columns(raw: &Value) -> Result<Vec<Value>, &'static str> {
+    let Some(items) = raw.as_array() else {
+        return Err("colonnes illisibles");
+    };
+    let mut names = Vec::new();
+    let mut columns = Vec::new();
+    for item in items {
+        let name = item.get("name").and_then(|value| value.as_str()).unwrap_or("").trim();
+        if name.is_empty() {
+            return Err("nom de colonne absent");
+        }
+        if names.iter().any(|existing: &String| existing.eq_ignore_ascii_case(name)) {
+            return Err("colonne déjà présente");
+        }
+        names.push(name.to_string());
+        let column_type = match item.get("columnType") {
+            None | Some(Value::Null) => "inProgress",
+            Some(Value::String(value)) if value == "incoming" => "incoming",
+            Some(Value::String(value)) if value == "inProgress" => "inProgress",
+            Some(Value::String(value)) if value == "outgoing" => "outgoing",
+            Some(_) => return Err("type de colonne inconnu"),
+        };
+        let item_limit = match item.get("itemLimit") {
+            None | Some(Value::Null) => 0,
+            Some(value) => {
+                let number = value.as_i64().ok_or("limite de colonne invalide")?;
+                if number < 0 {
+                    return Err("limite de colonne invalide");
+                }
+                number
+            }
+        };
+        let is_split = item.get("isSplit").and_then(|value| value.as_bool()).unwrap_or(false);
+        let state_mappings = column_mappings(item, name)?;
+        columns.push(json!({
+            "name": name,
+            "itemLimit": item_limit,
+            "isSplit": is_split,
+            "stateMappings": state_mappings,
+            "columnType": column_type
+        }));
+    }
+    let incoming = columns.iter().filter(|column| column["columnType"] == "incoming").count();
+    let outgoing = columns.iter().filter(|column| column["columnType"] == "outgoing").count();
+    let first_incoming = columns.first().is_some_and(|column| column["columnType"] == "incoming");
+    let last_outgoing = columns.last().is_some_and(|column| column["columnType"] == "outgoing");
+    if incoming != 1 || outgoing != 1 || !first_incoming || !last_outgoing {
+        return Err("colonnes d'entrée et de sortie requises");
+    }
+    Ok(columns)
+}
+
+fn column_mappings(item: &Value, name: &str) -> Result<Value, &'static str> {
+    let mut mappings = Map::new();
+    let provided = match item.get("stateMappings") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(object)) => Some(object),
+        Some(_) => return Err("état de colonne absent"),
+    };
+    for key in ["User Story", "Bug", "Task"] {
+        let text = match provided.and_then(|object| object.get(key)) {
+            None => name.to_string(),
+            Some(value) => mapping_text(value)?,
+        };
+        mappings.insert(key.to_string(), json!(text));
+    }
+    if let Some(object) = provided {
+        for (key, value) in object {
+            if key == "User Story" || key == "Bug" || key == "Task" {
+                continue;
+            }
+            mappings.insert(key.clone(), json!(mapping_text(value)?));
+        }
+    }
+    Ok(Value::Object(mappings))
+}
+
+fn mapping_text(value: &Value) -> Result<String, &'static str> {
+    let text = value.as_str().unwrap_or("").trim();
+    if text.is_empty() {
+        Err("état de colonne absent")
+    } else {
+        Ok(text.to_string())
+    }
+}
+
+fn allowed_mappings(columns: &[Value]) -> Value {
+    let mut story = Vec::new();
+    let mut bug = Vec::new();
+    for column in columns {
+        let name = column["name"].as_str().unwrap_or("");
+        let mappings = column.get("stateMappings");
+        story.push(json!(mappings
+            .and_then(|item| item.get("User Story"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(name)));
+        bug.push(json!(mappings
+            .and_then(|item| item.get("Bug"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(name)));
+    }
+    json!({"User Story": story, "Bug": bug})
+}
+
+fn board_document(org: &str, project: &str, team: &str, name: &str, columns: Vec<Value>) -> Value {
+    let allowed = allowed_mappings(&columns);
     json!({
         "id": name.to_ascii_lowercase(),
         "name": name,
         "url": format!("/{org}/{project}/{team}/_apis/work/boards/{name}"),
-        "columns": board_columns(),
+        "columns": columns,
         "rows": [{"id": "row-1", "name": null}],
-        "allowedMappings": {"User Story": ["New", "Active", "Resolved", "Closed"], "Bug": ["New", "Active", "Resolved", "Closed"]}
+        "allowedMappings": allowed
     })
 }
 
