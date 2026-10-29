@@ -82,6 +82,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         ("serviceendpoint", "types") => crate::tracking::endpoint_types(method),
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
         ("graph", "groups") => graph_groups(state, method, org, rest, query, body),
+        ("graph", "memberships") => graph_memberships(state, method, org, rest, query, body),
         ("work", "processes") => {
             let project = query_param(query, "project")
                 .map(pct_decode)
@@ -7984,6 +7985,9 @@ fn post_http(target: &str, payload: &Value) -> Result<u16, String> {
 }
 
 fn graph_groups(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("memberships")) {
+        return group_memberships(state, method, org, &rest[2], &rest[4..], body);
+    }
     let key = "graph/groups";
     if rest.len() == 2 {
         if method == Method::GET {
@@ -8122,6 +8126,298 @@ fn dress_graph_group(org: &str, mut item: Value) -> Value {
                 "memberships": {"href": format!("/{org}/_apis/graph/groups/{id}/memberships")}
             }),
         );
+    }
+    item
+}
+
+const MEMBERSHIPS: &str = "graph/memberships";
+
+pub fn graph_memberships(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+    let Some(tail) = memberships_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "appartenance introuvable")
+        };
+    };
+    if tail.len() > 2 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "appartenance introuvable")
+        };
+    }
+    let scope = membership_scope(query);
+    if tail.is_empty() {
+        if method == Method::GET {
+            return Json(page(membership_rows(state, org, scope.as_deref()))).into_response();
+        }
+        if method == Method::POST {
+            let project = scope.unwrap_or_else(|| state.names().1);
+            return match membership_create(state, org, &project, body, None, None) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if tail.len() == 2 {
+        let member = pct_decode(&tail[0]);
+        let container = pct_decode(&tail[1]);
+        if method == Method::POST {
+            let project = scope.unwrap_or_else(|| state.names().1);
+            return match membership_create(state, org, &project, body, Some(member.trim()), Some(container.trim())) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        let Some(found) = locate_membership_pair(state, org, scope.as_deref(), member.trim(), container.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "appartenance introuvable");
+        };
+        return membership_item(state, method, org, found);
+    }
+    let id = pct_decode(&tail[0]);
+    let Some(found) = locate_membership(state, org, scope.as_deref(), id.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "appartenance introuvable");
+    };
+    membership_item(state, method, org, found)
+}
+
+fn group_memberships(state: &AppState, method: &Method, org: &str, group_id: &str, tail: &[String], body: &[u8]) -> Response {
+    let Some(group) = org_get(state, org, "graph/groups", group_id) else {
+        return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+    };
+    let scope = text_of(&group, "scopeDescriptor").unwrap_or_default();
+    let display = text_of(&group, "displayName").unwrap_or_default();
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "appartenance introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let rows = membership_rows(state, org, Some(scope.as_str()))
+                .into_iter()
+                .filter(|item| membership_in_group(item, &display, group_id))
+                .collect();
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            return match membership_create(state, org, &scope, body, None, Some(display.as_str())) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let id = pct_decode(&tail[0]);
+    let Some(found) = locate_membership(state, org, Some(scope.as_str()), id.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "appartenance introuvable");
+    };
+    if !membership_in_group(&found, &display, group_id) {
+        return fail(StatusCode::NOT_FOUND, "appartenance introuvable");
+    }
+    membership_item(state, method, org, found)
+}
+
+fn membership_item(state: &AppState, method: &Method, org: &str, found: Value) -> Response {
+    if method == Method::GET {
+        return Json(dress_membership(org, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> bool {
+            db.orgs
+                .get_mut(org)
+                .and_then(|organization| organization.buckets.get_mut(MEMBERSHIPS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "appartenance introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn memberships_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().position(|part| part.eq_ignore_ascii_case("memberships"))?;
+    Some(&rest[index + 1..])
+}
+
+fn membership_scope(query: &str) -> Option<String> {
+    query_param(query, "project")
+        .or_else(|| query_param(query, "scopeDescriptor"))
+        .map(pct_decode)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn membership_rows(state: &AppState, org: &str, project: Option<&str>) -> Vec<Value> {
+    let mut rows = org_list(state, org, MEMBERSHIPS);
+    if let Some(project) = project {
+        rows.retain(|item| text_of(item, "project").is_some_and(|stored| stored.eq_ignore_ascii_case(project)));
+    }
+    rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+    rows.into_iter().map(|item| dress_membership(org, item)).collect()
+}
+
+fn locate_membership(state: &AppState, org: &str, project: Option<&str>, id: &str) -> Option<Value> {
+    org_list(state, org, MEMBERSHIPS).into_iter().find(|item| {
+        project.is_none_or(|project| text_of(item, "project").is_some_and(|stored| stored.eq_ignore_ascii_case(project)))
+            && (value_key(&item["id"]) == id
+                || text_of(item, "memberDescriptor").is_some_and(|value| value.eq_ignore_ascii_case(id))
+                || text_of(item, "name").is_some_and(|value| value.eq_ignore_ascii_case(id)))
+    })
+}
+
+fn locate_membership_pair(state: &AppState, org: &str, project: Option<&str>, member: &str, container: &str) -> Option<Value> {
+    org_list(state, org, MEMBERSHIPS).into_iter().find(|item| {
+        project.is_none_or(|project| text_of(item, "project").is_some_and(|stored| stored.eq_ignore_ascii_case(project)))
+            && membership_side(item, "member", "memberDescriptor", member)
+            && membership_side(item, "container", "containerDescriptor", container)
+    })
+}
+
+fn membership_side(item: &Value, name: &str, descriptor: &str, wanted: &str) -> bool {
+    text_of(item, name).is_some_and(|value| value.eq_ignore_ascii_case(wanted))
+        || text_of(item, descriptor).is_some_and(|value| value.eq_ignore_ascii_case(wanted))
+}
+
+fn membership_in_group(item: &Value, display: &str, group_id: &str) -> bool {
+    text_of(item, "container").is_some_and(|value| value.eq_ignore_ascii_case(display) || value == group_id)
+        || text_of(item, "containerDescriptor").is_some_and(|value| value.eq_ignore_ascii_case(group_id))
+}
+
+fn membership_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    body: &[u8],
+    path_member: Option<&str>,
+    path_container: Option<&str>,
+) -> Result<Value, &'static str> {
+    let (member, container) = membership_names(body, path_member, path_container)?;
+    let member_descriptor = membership_descriptor("usr", &member, "membre absent")?;
+    let container_descriptor = membership_descriptor("grp", &container, "conteneur absent")?;
+    let id = format!("mem-{}", next_membership_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": format!("{member}|{container}"),
+        "member": member,
+        "container": container,
+        "memberDescriptor": member_descriptor,
+        "containerDescriptor": container_descriptor,
+        "project": project
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_org(org);
+        let Some(organization) = db.orgs.get_mut(org) else {
+            return Err("appartenance introuvable");
+        };
+        let existing: Vec<Value> = organization
+            .buckets
+            .get(MEMBERSHIPS)
+            .map(|bucket| bucket.items.values().cloned().collect())
+            .unwrap_or_default();
+        if existing.iter().any(|stored| {
+            text_of(stored, "project").is_some_and(|value| value.eq_ignore_ascii_case(project))
+                && text_of(stored, "member").is_some_and(|value| value.eq_ignore_ascii_case(&member))
+                && text_of(stored, "container").is_some_and(|value| value.eq_ignore_ascii_case(&container))
+        }) {
+            return Err("appartenance existante");
+        }
+        let bucket = organization.buckets.entry(MEMBERSHIPS.to_string()).or_insert_with(Bucket::empty);
+        bucket.put(item.clone());
+        Ok(())
+    })?;
+    Ok(dress_membership(org, item))
+}
+
+fn membership_names(body: &[u8], path_member: Option<&str>, path_container: Option<&str>) -> Result<(String, String), &'static str> {
+    if let (Some(member), Some(container)) = (path_member, path_container) {
+        if !body.is_empty() {
+            let Some(payload) = parse_json(body) else {
+                return Err("JSON illisible");
+            };
+            if payload.as_object().is_none_or(|object| !object.is_empty()) && !payload.is_null() {
+                return Err("appartenance illisible");
+            }
+        }
+        let member = member.trim();
+        let container = container.trim();
+        if member.is_empty() {
+            return Err("membre absent");
+        }
+        if container.is_empty() {
+            return Err("conteneur absent");
+        }
+        return Ok((member.to_string(), container.to_string()));
+    }
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("appartenance illisible");
+    };
+    let Some(member) = object
+        .get("member")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("membre absent");
+    };
+    let container = match path_container {
+        Some(container) if object.get("container").is_none() => container.trim().to_string(),
+        _ => match object.get("container") {
+            Some(Value::String(value)) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err("conteneur absent");
+                }
+                if let Some(expected) = path_container {
+                    if !value.eq_ignore_ascii_case(expected.trim()) {
+                        return Err("conteneur absent");
+                    }
+                }
+                value.to_string()
+            }
+            Some(_) => return Err("conteneur absent"),
+            None => return Err("conteneur absent"),
+        },
+    };
+    if container.is_empty() {
+        return Err("conteneur absent");
+    }
+    Ok((member, container))
+}
+
+fn membership_descriptor(prefix: &str, value: &str, missing: &'static str) -> Result<String, &'static str> {
+    let tail: String = value.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    if tail.is_empty() {
+        return Err(missing);
+    }
+    Ok(format!("{prefix}-{tail}"))
+}
+
+fn next_membership_id(state: &AppState, org: &str) -> i64 {
+    org_list(state, org, MEMBERSHIPS)
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("mem-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn dress_membership(org: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("url".into(), json!(format!("/{org}/_apis/graph/memberships/{id}")));
     }
     item
 }

@@ -153,6 +153,7 @@
       <a href="/__ORG__/__PROJECT__/_favorites">Favoris</a>
       <a href="/__ORG__/__PROJECT__/_users">Droits</a>
       <a href="/__ORG__/__PROJECT__/_groups">Groupes</a>
+      <a href="/__ORG__/__PROJECT__/_memberships">Appartenances</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3400,6 +3401,39 @@
               error.hidden = true;
               try {
                 await api("DELETE", "/" + org + "/_apis/graph/groups/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_memberships") {
+          const page = await api("GET", "/" + org + "/_apis/graph/memberships?project=" + encodeURIComponent(project) + "&api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='memberships'><thead><tr><th></th><th>Membre</th><th>Conteneur</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='mem-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.member) + "'>Retirer</button></td><td>" + esc(item.member) + "</td><td>" + esc(item.container) + "</td></tr>").join("") + "</tbody></table>" : "<p id='mem-empty' class='sub'>Aucune appartenance.</p>";
+          view.innerHTML = "<h1>Appartenances</h1><div class='command'><input id='mem-member' placeholder='Pompe' /><input id='mem-container' placeholder='Ligne' /><button id='mem-add' type='button'>Ajouter</button></div>" + table + "<p id='mem-error' class='error' hidden></p>";
+          document.getElementById("mem-add").onclick = async () => {
+            const error = document.getElementById("mem-error");
+            error.hidden = true;
+            const member = document.getElementById("mem-member").value;
+            const container = document.getElementById("mem-container").value;
+            try {
+              await api("POST", "/" + org + "/_apis/graph/memberships?project=" + encodeURIComponent(project) + "&api-version=7.1", { member: member, container: container });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.mem-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("mem-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", "/" + org + "/_apis/graph/memberships/" + encodeURIComponent(button.dataset.id) + "?project=" + encodeURIComponent(project) + "&api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
