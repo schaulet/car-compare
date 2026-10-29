@@ -32,6 +32,7 @@ pub fn dispatch(
         ("git", "pullrequests") => pull_requests(state, method, org, project, None, rest, body),
         ("build", "definitions") => definitions(state, method, org, project, rest, body),
         ("build", "builds") => builds(state, method, org, project, rest, query, body),
+        ("build", "tags") => project_build_tags(state, method, org, project, rest),
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
         }
@@ -3697,9 +3698,22 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
     let key = "build/builds";
     if rest.len() == 2 && method == Method::GET {
         evaluate_schedules(state, org, project);
+        let filters = query_param(query, "tagFilters")
+            .map(pct_decode)
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let value = list(state, org, project, key)
             .into_iter()
             .map(|item| promote_build(state, org, project, item))
+            .filter(|item| {
+                filters.is_empty() || filters.iter().all(|wanted| tag_names(item).iter().any(|tag| tag == wanted))
+            })
             .collect();
         return Json(page(value)).into_response();
     }
@@ -3738,6 +3752,9 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("artifacts") {
         return build_artifacts(state, method, org, project, id, rest, query, body);
+    }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("tags") {
+        return build_tags(state, method, org, project, id, rest, body);
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, id) {
@@ -7522,6 +7539,9 @@ fn timeline_document(org: &str, project: &str, id: &str, change_id: i64, records
 }
 
 fn promote_build(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {
+    if let Some(object) = item.as_object_mut() {
+        object.entry("tags".to_string()).or_insert_with(|| json!([]));
+    }
     if text_of(&item, "status").as_deref() == Some("notStarted") {
         item["status"] = json!("completed");
         item["result"] = json!("succeeded");
@@ -7531,6 +7551,119 @@ fn promote_build(state: &AppState, org: &str, project: &str, mut item: Value) ->
         deliver_work_item(state, org, project, "build.complete", &item);
     }
     item
+}
+
+fn project_build_tags(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
+    if rest.len() != 2 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    if method == &Method::GET {
+        let mut tags = Vec::new();
+        for build in list(state, org, project, "build/builds") {
+            for tag in tag_names(&build) {
+                if !tags.iter().any(|existing: &String| existing == &tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        tags.sort();
+        return Json(tags).into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn build_tags(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(current) = get_item(state, org, project, "build/builds", id) else {
+        return fail(StatusCode::NOT_FOUND, "build introuvable");
+    };
+    let mut build = promote_build(state, org, project, current);
+    if rest.len() == 4 {
+        if method == &Method::GET {
+            return Json(tag_names(&build)).into_response();
+        }
+        if method == &Method::POST {
+            return add_build_tags(state, org, project, &mut build, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 5 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    let tag = pct_decode(&rest[4]).trim().to_string();
+    if tag.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "étiquette absente");
+    }
+    if method == &Method::PUT {
+        let mut tags = tag_names(&build);
+        if !tags.iter().any(|existing| existing == &tag) {
+            tags.push(tag);
+        }
+        return Json(save_build_tags(state, org, project, &mut build, tags)).into_response();
+    }
+    if method == &Method::DELETE {
+        let mut tags = tag_names(&build);
+        let Some(index) = tags.iter().position(|existing| existing == &tag) else {
+            return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+        };
+        tags.remove(index);
+        return Json(save_build_tags(state, org, project, &mut build, tags)).into_response();
+    }
+    if method == &Method::GET {
+        if tag_names(&build).iter().any(|existing| existing == &tag) {
+            return Json(json!(tag)).into_response();
+        }
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn add_build_tags(state: &AppState, org: &str, project: &str, build: &mut Value, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(rows) = payload.as_array() else {
+        return fail(StatusCode::BAD_REQUEST, "étiquette absente");
+    };
+    let mut tags = tag_names(build);
+    for row in rows {
+        let Some(name) = row.as_str().map(str::trim).filter(|name| !name.is_empty()) else {
+            return fail(StatusCode::BAD_REQUEST, "étiquette absente");
+        };
+        if !tags.iter().any(|existing| existing == name) {
+            tags.push(name.to_string());
+        }
+    }
+    Json(save_build_tags(state, org, project, build, tags)).into_response()
+}
+
+fn save_build_tags(state: &AppState, org: &str, project: &str, build: &mut Value, tags: Vec<String>) -> Value {
+    if let Some(object) = build.as_object_mut() {
+        object.insert("tags".into(), json!(tags));
+    }
+    put_item(state, org, project, "build/builds", build.clone());
+    json!(tag_names(build))
+}
+
+fn tag_names(build: &Value) -> Vec<String> {
+    build
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|rows| rows.iter().filter_map(|row| row.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
 }
 
 fn promote_pipeline(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {

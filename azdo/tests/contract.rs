@@ -18917,3 +18917,314 @@ async fn removing_one_queue_keeps_the_sibling_its_pool_and_the_other_project() {
     assert_eq!(still["name"], "Ada");
     assert_eq!(still["pool"]["id"], ada_pool);
 }
+
+#[tokio::test]
+async fn removing_one_build_tag_keeps_the_sibling_and_the_other_build() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds/1/tags?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","reason":"manual"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe = first["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","reason":"manual"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada = second["id"].as_i64().unwrap();
+    assert_ne!(pompe, ada);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("étiquette absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"["  "]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("étiquette absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/%20?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("étiquette absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds/9/tags?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/tags?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/pompe/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+
+    for tag in ["pompe", "ada"] {
+        let (status, body, _) = call(
+            &app,
+            "PUT",
+            &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/{tag}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repeated: Vec<String> = serde_json::from_str(&body).unwrap();
+    assert_eq!(repeated, vec!["pompe".to_string(), "ada".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{ada}/tags/pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: Vec<String> = serde_json::from_str(&body).unwrap();
+    assert_eq!(other, vec!["pompe".to_string()]);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/nuit?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: Vec<String> = serde_json::from_str(&body).unwrap();
+    assert_eq!(left, vec!["ada".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{ada}/tags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: Vec<String> = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept, vec!["pompe".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe_build["tags"][0], "ada");
+    assert_eq!(pompe_build["result"], "succeeded");
+    assert_eq!(pompe_build["definition"]["name"], "CI");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/tags?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let catalog: Vec<String> = serde_json::from_str(&body).unwrap();
+    assert_eq!(catalog, vec!["ada".to_string(), "pompe".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?tagFilters=ada&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_only: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_only["count"], 1);
+    assert_eq!(ada_only["value"][0]["id"], pompe);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?tagFilters=pompe&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_only: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe_only["count"], 1);
+    assert_eq!(pompe_only["value"][0]["id"], ada);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/builds?tagFilters=ada,pompe&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let both: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(both["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}/tags/pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("étiquette introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{ada}/tags/pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.trim(), "\"pompe\"");
+}

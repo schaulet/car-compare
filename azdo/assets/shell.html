@@ -1163,6 +1163,13 @@
         }
         if (hub === "/_build") {
           const [definitions, builds, groups] = await Promise.all([collection("build/definitions"), collection("build/builds"), collection("distributedtask/variablegroups")]);
+          const tagPages = await Promise.all(builds.map((item) => api("GET", root + "/build/builds/" + encodeURIComponent(item.id) + "/tags?api-version=7.1").catch(() => [])));
+          const tagRows = [];
+          builds.forEach((item, index) => {
+            const tags = Array.isArray(tagPages[index]) ? tagPages[index] : [];
+            tags.forEach((tag) => tagRows.push({ id: item.id, tag }));
+          });
+          const tagTable = tagRows.length ? "<table id='build-tags'><thead><tr><th></th><th>Build</th><th>Étiquette</th></tr></thead><tbody>" + tagRows.map((item) => "<tr><td><button type='button' class='btag-remove' data-build='" + esc(item.id) + "' data-tag='" + esc(item.tag) + "'>Retirer</button></td><td>" + esc(item.id) + "</td><td>" + esc(item.tag) + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-tag-empty' class='sub'>Aucune étiquette.</p>";
           function groupLabel(item) {
             return (item.variableGroups || []).map((group) => group.name || group.id).join(", ");
           }
@@ -1185,7 +1192,7 @@
           const defs = definitions.length ? "<table id='definitions'><thead><tr><th>ID</th><th>Pipeline</th><th>Groupe</th><th>File</th><th>Déclencheur</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(groupLabel(item)) + "</td><td>" + esc(item.queueStatus) + "</td><td class='def-trigger'>" + esc(triggerLabel(item)) + "</td><td><button type='button' class='def-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>").join("") + "</tbody></table>" : "<p id='def-empty' class='sub'>Aucun pipeline.</p>";
           const runs = builds.length ? "<table id='builds'><thead><tr><th>Build</th><th>Numéro</th><th>File</th><th>Raison</th><th>État</th><th>Résultat</th></tr></thead><tbody>" + builds.map((item) => "<tr class='click build' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.buildNumber) + "</td><td>" + esc(item.queue && item.queue.name) + "</td><td class='build-reason'>" + esc(item.reason || "") + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-empty' class='sub'>Aucune exécution.</p>";
           const options = groups.map((item) => "<option value='" + esc(item.id) + "'>" + esc(item.name) + "</option>").join("");
-          view.innerHTML = "<h1>Pipelines</h1><div class='command'><input id='def-name' placeholder='Pompe' /><button id='def-create' type='button'>Créer</button><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
+          view.innerHTML = "<h1>Pipelines</h1><h2>Étiquettes</h2><div class='command'><input id='btag-build' placeholder='Build' /><input id='btag-name' placeholder='ada' /><button id='btag-add' type='button'>Poser</button></div>" + tagTable + "<div class='command'><input id='def-name' placeholder='Pompe' /><button id='def-create' type='button'>Créer</button><select id='def-group'>" + options + "</select><button id='def-link' type='button'>Lier le groupe</button><label><input id='def-ci' type='checkbox'" + (ciOn ? " checked" : "") + " /> CI sur main</label><button id='def-ci-save' type='button'>Enregistrer le déclencheur</button><button id='def-schedule' type='button'>Horaire</button><input id='def-var-key' placeholder='Variable' /><input id='def-var-value' placeholder='Valeur' /><label><input id='def-var-secret' type='checkbox' /> Secret</label><button id='def-var-add' type='button'>Ajouter la variable</button><input id='queue-override' placeholder='host=atelier' /><button id='queue' type='button'>Mettre en file d'attente</button></div>" + defs + "<p id='build-error' class='sub'></p><h2>Variables du pipeline</h2><ul id='def-vars'>" + ownLines + "</ul><h2>Exécutions</h2>" + runs + "<h2 id='vars-title' hidden>Variables</h2><ul id='build-vars' class='panel' hidden></ul><h2 id='timeline-title' hidden>Chronologie</h2><ul id='timeline' class='timeline panel' hidden></ul><pre id='log' class='panel' hidden></pre>";
           function timelineItems(records, parent, depth) {
             return (records || []).filter((record) => String(record.parentId || "") === parent).map((record) => {
               const result = record.result ? " / " + esc(record.result) : "";
@@ -1319,6 +1326,36 @@
             await api("PUT", root + "/build/definitions/" + encodeURIComponent(definition.id) + "?api-version=7.1", { variables });
             location.reload();
           };
+          document.getElementById("btag-add").onclick = async () => {
+            const error = document.getElementById("build-error");
+            error.textContent = "";
+            const buildId = document.getElementById("btag-build").value.trim() || (builds[0] && String(builds[0].id)) || "";
+            const name = document.getElementById("btag-name").value.trim() || "ada";
+            if (!buildId) {
+              error.textContent = "build introuvable";
+              return;
+            }
+            try {
+              await api("PUT", root + "/build/builds/" + encodeURIComponent(buildId) + "/tags/" + encodeURIComponent(name) + "?api-version=7.1");
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.btag-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("build-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/tags/" + encodeURIComponent(button.dataset.tag) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("queue").onclick = async () => {
             const definition = definitions[0];
             if (!definition) return;
