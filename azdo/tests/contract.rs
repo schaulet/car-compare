@@ -19650,3 +19650,273 @@ async fn removing_one_build_lease_keeps_the_sibling_and_the_other_build() {
     assert_eq!(ada_kept["ownerId"], "ada");
     assert_eq!(ada_kept["runId"], pompe);
 }
+
+#[tokio::test]
+async fn removing_one_test_configuration_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let configs = "/azurz/AzurzDemo/_apis/test/configurations?api-version=7.1";
+    let (status, body, _) = call(&app, "POST", configs, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", configs, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","values":"Linux"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("valeur absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","values":[{"name":"  ","value":"Linux"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("valeur absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/test/configurations/1/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" pompe ","isDefault":true,"values":[{"name":"Valeur","value":"atelier"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_id = pompe["id"].as_i64().unwrap();
+    assert_eq!(pompe["name"], "pompe");
+    assert_eq!(pompe["isDefault"], true);
+    assert_eq!(pompe["values"][0]["value"], "atelier");
+    assert!(pompe["url"].as_str().unwrap().contains("/_apis/test/configurations/"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ada","isDefault":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("configuration par défaut"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        configs,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"ada","values":[{"name":"Valeur","value":"Linux"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_id = ada["id"].as_i64().unwrap();
+    assert_ne!(pompe_id, ada_id);
+    assert_eq!(ada["isDefault"], false);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/testplan/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"pompe","values":[{"name":"Valeur","value":"nord"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_id = atelier["id"].as_i64().unwrap();
+    assert!(atelier["url"].as_str().unwrap().contains("/_apis/testplan/configurations/"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/testplan/plans?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let plan_id = plan["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/test/configurations/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("configuration par défaut"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/test/configurations/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"isDefault":false}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cleared: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cleared["isDefault"], false);
+    assert_eq!(cleared["name"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/test/configurations/99?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("configuration introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/test/configurations/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", configs, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], ada_id);
+    assert_eq!(left["value"][0]["name"], "ada");
+    assert_eq!(left["value"][0]["values"][0]["value"], "Linux");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/configurations/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["name"], "ada");
+    assert!(sibling["url"].as_str().unwrap().contains("/_apis/testplan/configurations/"));
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/test/configurations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 1);
+    assert_eq!(other["value"][0]["id"], atelier_id);
+    assert_eq!(other["value"][0]["name"], "pompe");
+    assert_eq!(other["value"][0]["values"][0]["value"], "nord");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_plan["name"], "Ligne");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/test/configurations/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("configuration introuvable"), "{body}");
+}

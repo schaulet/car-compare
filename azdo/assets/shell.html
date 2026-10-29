@@ -1449,7 +1449,36 @@
             }
             detail = "<h2>Suites</h2><div class='command'><input id='suite-name' placeholder='Nouvelle suite' /><button id='add-suite' type='button'>Créer la suite</button></div>" + suiteRows + points;
           }
-          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Pompe' /><button id='create' type='button'>Créer</button></div>" + table + detail + "<p id='plan-error' class='sub'></p>";
+          const configs = await api("GET", root + "/test/configurations?api-version=7.1").catch(() => ({ value: [] }));
+          const configRows = configs.value || [];
+          const configTable = configRows.length ? "<table id='test-configs'><thead><tr><th></th><th>Nom</th><th>Valeur</th></tr></thead><tbody>" + configRows.map((item) => "<tr><td><button type='button' class='tcfg-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc((item.values && item.values[0] && item.values[0].value) || "") + "</td></tr>").join("") + "</tbody></table>" : "<p id='test-config-empty' class='sub'>Aucune configuration.</p>";
+          view.innerHTML = "<h1>Plans de test</h1><h2>Configurations</h2><div class='command'><input id='tcfg-name' placeholder='pompe' /><input id='tcfg-value' placeholder='Linux' /><button id='tcfg-add' type='button'>Ajouter</button></div>" + configTable + "<div class='command'><input id='plan-name' placeholder='Pompe' /><button id='create' type='button'>Créer</button></div>" + table + detail + "<p id='plan-error' class='sub'></p>";
+          document.getElementById("tcfg-add").onclick = async () => {
+            const error = document.getElementById("plan-error");
+            error.textContent = "";
+            const name = document.getElementById("tcfg-name").value.trim() || "pompe";
+            const value = document.getElementById("tcfg-value").value.trim() || "Linux";
+            try {
+              await api("POST", root + "/test/configurations?api-version=7.1", { name, values: [{ name: "Valeur", value }], isDefault: false });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.tcfg-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("plan-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/test/configurations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           document.getElementById("create").onclick = async () => {
             await api("POST", root + "/testplan/plans?api-version=7.1", { name: document.getElementById("plan-name").value || "Plan" });
             location.reload();

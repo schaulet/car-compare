@@ -44,6 +44,7 @@ pub fn dispatch(
         ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
         ("pipelines", "approvals") => pipeline_approvals(state, method, org, project, rest, query, body),
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
+        ("test", "configurations") | ("testplan", "configurations") => test_configurations(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
@@ -4271,6 +4272,179 @@ fn pipeline_runs(state: &AppState, method: &Method, org: &str, project: &str, re
         Some(item) => Json(promote_pipeline(state, org, project, item)).into_response(),
         None => fail(StatusCode::NOT_FOUND, "exécution introuvable"),
     }
+}
+
+fn test_configurations(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "test/configurations";
+    let area = rest.first().map(|value| value.to_ascii_lowercase()).unwrap_or_else(|| "test".into());
+    if rest.len() == 2 {
+        if method == &Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by_key(|item| item.get("id").and_then(json_i64).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_configuration(org, project, &area, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == &Method::POST {
+            return create_configuration(state, org, project, &area, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == &Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "configuration introuvable");
+    }
+    let id = pct_decode(&rest[2]).trim().to_string();
+    if id.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "configuration introuvable");
+    }
+    if method == &Method::GET {
+        return match get_item(state, org, project, key, &id) {
+            Some(item) => Json(dress_configuration(org, project, &area, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "configuration introuvable"),
+        };
+    }
+    if method == &Method::DELETE {
+        let Some(item) = get_item(state, org, project, key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "configuration introuvable");
+        };
+        if item.get("isDefault").and_then(|value| value.as_bool()) == Some(true) {
+            return fail(StatusCode::BAD_REQUEST, "configuration par défaut");
+        }
+        return if delete_item(state, org, project, key, &id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "configuration introuvable")
+        };
+    }
+    if method == &Method::PATCH {
+        return patch_configuration(state, org, project, &area, &id, body);
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn create_configuration(state: &AppState, org: &str, project: &str, area: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    let name = object.get("name").and_then(|value| value.as_str()).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    }
+    let values = match configuration_values(object.get("values")) {
+        Ok(values) => values,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let is_default = object.get("isDefault").and_then(|value| value.as_bool()).unwrap_or(false);
+    if is_default && configuration_default_id(state, org, project).is_some() {
+        return fail(StatusCode::BAD_REQUEST, "configuration par défaut");
+    }
+    let description = object.get("description").and_then(|value| value.as_str()).unwrap_or("").trim().to_string();
+    let next = list(state, org, project, "test/configurations")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(json_i64))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let item = json!({
+        "id": next,
+        "name": name,
+        "description": description,
+        "isDefault": is_default,
+        "state": "active",
+        "values": values
+    });
+    put_item(state, org, project, "test/configurations", item.clone());
+    Json(dress_configuration(org, project, area, item)).into_response()
+}
+
+fn patch_configuration(state: &AppState, org: &str, project: &str, area: &str, id: &str, body: &[u8]) -> Response {
+    let Some(mut current) = get_item(state, org, project, "test/configurations", id) else {
+        return fail(StatusCode::NOT_FOUND, "configuration introuvable");
+    };
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "nom absent");
+    };
+    if let Some(name) = object.get("name") {
+        let name = name.as_str().map(str::trim).unwrap_or("");
+        if name.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "nom absent");
+        }
+        current["name"] = json!(name);
+    }
+    if let Some(description) = object.get("description").and_then(|value| value.as_str()) {
+        current["description"] = json!(description.trim());
+    }
+    if object.contains_key("values") {
+        let values = match configuration_values(object.get("values")) {
+            Ok(values) => values,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        current["values"] = json!(values);
+    }
+    if let Some(is_default) = object.get("isDefault").and_then(|value| value.as_bool()) {
+        if is_default {
+            if let Some(existing) = configuration_default_id(state, org, project) {
+                if existing != id {
+                    return fail(StatusCode::BAD_REQUEST, "configuration par défaut");
+                }
+            }
+        }
+        current["isDefault"] = json!(is_default);
+    }
+    put_item(state, org, project, "test/configurations", current.clone());
+    Json(dress_configuration(org, project, area, current)).into_response()
+}
+
+fn configuration_default_id(state: &AppState, org: &str, project: &str) -> Option<String> {
+    list(state, org, project, "test/configurations").into_iter().find_map(|item| {
+        (item.get("isDefault").and_then(|value| value.as_bool()) == Some(true)).then(|| value_key(&item["id"]))
+    })
+}
+
+fn configuration_values(value: Option<&Value>) -> Result<Vec<Value>, &'static str> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(rows) = value.as_array() else {
+        return Err("valeur absente");
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return Err("valeur absente");
+        };
+        let name = object.get("name").and_then(|item| item.as_str()).map(str::trim).unwrap_or("");
+        let stored = object.get("value").and_then(|item| item.as_str()).map(str::trim).unwrap_or("");
+        if name.is_empty() || stored.is_empty() {
+            return Err("valeur absente");
+        }
+        out.push(json!({"name": name, "value": stored}));
+    }
+    Ok(out)
+}
+
+fn dress_configuration(org: &str, project: &str, area: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.entry("description").or_insert(json!(""));
+        object.entry("isDefault").or_insert(json!(false));
+        object.entry("state").or_insert(json!("active"));
+        object.entry("values").or_insert(json!([]));
+        object.insert("project".into(), json!({"name": project}));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/{area}/configurations/{id}")));
+    }
+    item
 }
 
 fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
