@@ -159,7 +159,7 @@
       return data;
     }
     function esc(value) {
-      return String(value ?? "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     }
     function stateClass(state) {
       const name = String(state || "New").toLowerCase();
@@ -376,13 +376,52 @@
           return;
         }
         if (hub === "/_queries") {
-          view.innerHTML = "<h1>Requêtes</h1><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'</textarea><div class='command'><button id='run' type='button'>Exécuter</button></div><div id='result'></div>";
-          document.getElementById("run").onclick = async () => {
-            const found = await api("POST", root + "/wit/wiql?api-version=7.1", { query: document.getElementById("wiql").value });
+          const tree = await api("GET", root + "/wit/queries?$depth=2&api-version=7.1");
+          const folders = tree.value || [];
+          const lines = [];
+          folders.forEach((folder) => {
+            lines.push("<li class='folder'>" + esc(folder.name) + "</li>");
+            (folder.children || []).forEach((query) => {
+              if (query.isFolder) {
+                lines.push("<li class='folder'>" + esc(query.path) + "</li>");
+                (query.children || []).forEach((child) => lines.push("<li><button type='button' class='page query-open' data-id='" + esc(child.id) + "' data-wiql='" + esc(child.wiql || "") + "'>" + esc(child.name) + "</button></li>"));
+              } else {
+                lines.push("<li><button type='button' class='page query-open' data-id='" + esc(query.id) + "' data-wiql='" + esc(query.wiql || "") + "'>" + esc(folder.name) + " / " + esc(query.name) + "</button></li>");
+              }
+            });
+          });
+          const list = lines.length ? "<ul id='query-tree'>" + lines.join("") + "</ul>" : "<p class='sub'>Aucune requête.</p>";
+          view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'</textarea><div class='command'><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><div id='result'></div>";
+          let currentId = "";
+          async function runQuery(text) {
+            const found = await api("POST", root + "/wit/wiql?api-version=7.1", { query: text });
             const ids = (found.workItems || []).map((item) => item.id);
             const page = ids.length ? await api("GET", root + "/wit/workitems?ids=" + ids.join(",") + "&api-version=7.1") : { value: [] };
             document.getElementById("result").innerHTML = rows(page.value || []);
             bindRows();
+          }
+          document.querySelectorAll("button.query-open").forEach((button) => {
+            button.onclick = () => {
+              currentId = button.dataset.id;
+              document.getElementById("query-name").value = button.textContent.split(" / ").pop();
+              document.getElementById("wiql").value = button.dataset.wiql || "";
+              runQuery(button.dataset.wiql || "");
+            };
+          });
+          document.getElementById("run").onclick = () => runQuery(document.getElementById("wiql").value);
+          document.getElementById("folder-add").onclick = async () => {
+            await api("POST", root + "/wit/queries/shared-queries?api-version=7.1", { name: document.getElementById("folder-name").value || "Dossier", isFolder: true });
+            location.reload();
+          };
+          document.getElementById("query-save").onclick = async () => {
+            const name = document.getElementById("query-name").value || "Requête";
+            const wiql = document.getElementById("wiql").value;
+            if (currentId) {
+              await api("PATCH", root + "/wit/queries/" + encodeURIComponent(currentId) + "?api-version=7.1", { name: name, wiql: wiql });
+            } else {
+              await api("POST", root + "/wit/queries/shared-queries?api-version=7.1", { name: name, wiql: wiql });
+            }
+            location.reload();
           };
           return;
         }

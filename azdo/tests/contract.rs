@@ -2699,3 +2699,149 @@ async fn dashboard_widgets_render_markdown_query_and_build() {
     assert_eq!(stored["widgets"].as_array().unwrap().len(), 2);
     assert_eq!(stored["widgets"][0]["rendered"]["value"], 1);
 }
+
+#[tokio::test]
+async fn saved_queries_live_in_folders_and_run_the_updated_wiql() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/queries?$depth=2&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tree: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = tree["value"].as_array().unwrap().iter().filter_map(|item| item["name"].as_str()).collect();
+    assert!(names.contains(&"Shared Queries"), "{body}");
+    assert!(names.contains(&"My Queries"), "{body}");
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Brouillon"},{"op":"add","path":"/fields/System.State","value":"New"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe active"},{"op":"add","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let active: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let active_id = active["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Actifs ligne","wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let query: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(query["path"], "Shared Queries/Actifs ligne");
+    let query_id = query["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","isFolder":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let folder: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(folder["isFolder"], true);
+    assert_eq!(folder["path"], "Shared Queries/Ligne");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/wiql/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ids: Vec<i64> = found["workItems"].as_array().unwrap().iter().filter_map(|item| item["id"].as_i64()).collect();
+    assert_eq!(ids, vec![active_id]);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"wiql":"SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/wiql/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revised: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let titles_ids: Vec<i64> = revised["workItems"].as_array().unwrap().iter().filter_map(|item| item["id"].as_i64()).collect();
+    assert!(!titles_ids.contains(&active_id), "{body}");
+    assert_eq!(titles_ids.len(), 1);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wit/queries/shared-queries?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/queries/{query_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

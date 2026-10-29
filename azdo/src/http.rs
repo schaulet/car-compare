@@ -298,7 +298,7 @@ impl AppState {
             return self.attachments(method, org, project, rest, query, body);
         }
         if resource.as_deref() == Some("queries") {
-            return self.queries(method, org, project, rest, body);
+            return self.queries(method, org, project, rest, query, body);
         }
         if resource.as_deref() == Some("workitemsbatch") && method == Method::POST {
             return crate::surface::work_items_batch(self, org, project, body);
@@ -451,51 +451,167 @@ impl AppState {
         fail(StatusCode::NOT_FOUND, "pièce jointe introuvable")
     }
 
-    fn queries(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    fn queries(&self, method: &Method, org: &str, project: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+        self.ensure_query_folders(org, project);
         if rest.len() == 2 && method == Method::GET {
-            let value = self.read(|db| {
-                db.project(org, project)
-                    .map(|stored| stored.list_bucket("wit/queries"))
-                    .unwrap_or_default()
-            });
+            let depth = query_param(query, "$depth")
+                .or_else(|| query_param(query, "depth"))
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(2);
+            let items = self.query_items(org, project);
+            let value = nest_queries(&items, "", depth.max(0) as usize);
             return Json(json!({"count": value.len(), "value": value})).into_response();
         }
         if rest.len() == 2 && method == Method::POST {
             let payload = parse_json(body).unwrap_or(json!({}));
-            let name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("Requête").to_string();
-            let wiql = payload
-                .get("wiql")
-                .and_then(|value| value.as_str())
-                .unwrap_or("SELECT [System.Id] FROM WorkItems")
-                .to_string();
-            let created = self.write(|db| {
-                db.ensure_project(org, project);
-                let stored = db.project_mut(org, project)?;
-                let next = stored.list_bucket("wit/queries").len() as i64 + 1;
-                let item = json!({
+            return self.create_query(org, project, "Shared Queries", &payload);
+        }
+        if rest.len() < 3 {
+            return fail(StatusCode::NOT_FOUND, "requête introuvable");
+        }
+        let target = rest[2..].join("/");
+        if method == Method::POST {
+            let items = self.query_items(org, project);
+            let Some(parent) = find_query(&items, &target).filter(|item| item.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false)) else {
+                return fail(StatusCode::NOT_FOUND, "dossier introuvable");
+            };
+            let parent_path = parent.get("path").and_then(|value| value.as_str()).unwrap_or(&target).to_string();
+            let payload = parse_json(body).unwrap_or(json!({}));
+            return self.create_query(org, project, &parent_path, &payload);
+        }
+        let items = self.query_items(org, project);
+        let Some(item) = find_query(&items, &target) else {
+            return fail(StatusCode::NOT_FOUND, "requête introuvable");
+        };
+        let id = item.get("id").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        if method == Method::GET {
+            let depth = query_param(query, "$depth").and_then(|value| value.parse::<i64>().ok()).unwrap_or(1);
+            let path = item.get("path").and_then(|value| value.as_str()).unwrap_or("").to_string();
+            let mut dressed = item;
+            if dressed.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false) {
+                let children = nest_queries(&items, &path, depth.max(0) as usize);
+                if let Some(object) = dressed.as_object_mut() {
+                    object.insert("hasChildren".into(), json!(!children.is_empty()));
+                    object.insert("children".into(), json!(children));
+                }
+            }
+            return Json(dressed).into_response();
+        }
+        if method == Method::PATCH || method == Method::PUT {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let mut updated = item;
+            if let Some(object) = updated.as_object_mut() {
+                if let Some(name) = payload.get("name").and_then(|value| value.as_str()) {
+                    let path = object.get("path").and_then(|value| value.as_str()).unwrap_or("").to_string();
+                    let parent = path.rsplit_once('/').map(|(parent, _)| parent.to_string()).unwrap_or_default();
+                    object.insert("name".into(), json!(name));
+                    object.insert(
+                        "path".into(),
+                        json!(if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") }),
+                    );
+                }
+                if let Some(wiql) = payload.get("wiql").and_then(|value| value.as_str()) {
+                    if object.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false) {
+                        return fail(StatusCode::BAD_REQUEST, "un dossier n'a pas de WIQL");
+                    }
+                    object.insert("wiql".into(), json!(wiql));
+                }
+            }
+            self.write(|db| {
+                if let Some(stored) = db.project_mut(org, project) {
+                    stored.put_bucket("wit/queries", updated.clone());
+                }
+            });
+            return Json(updated).into_response();
+        }
+        if method == Method::DELETE {
+            if id == "shared-queries" || id == "my-queries" {
+                return fail(StatusCode::BAD_REQUEST, "dossier racine");
+            }
+            let removed = self.write(|db| {
+                db.project_mut(org, project)
+                    .and_then(|stored| stored.buckets.get_mut("wit/queries"))
+                    .map(|bucket| bucket.remove(&id))
+                    .unwrap_or(false)
+            });
+            return if removed {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "requête introuvable")
+            };
+        }
+        fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+    }
+
+    fn ensure_query_folders(&self, org: &str, project: &str) {
+        self.write(|db| {
+            db.ensure_project(org, project);
+            let Some(stored) = db.project_mut(org, project) else {
+                return;
+            };
+            for (id, name, public) in [("shared-queries", "Shared Queries", true), ("my-queries", "My Queries", false)] {
+                if stored.get_bucket("wit/queries", id).is_none() {
+                    stored.put_bucket(
+                        "wit/queries",
+                        json!({
+                            "id": id,
+                            "name": name,
+                            "path": name,
+                            "isFolder": true,
+                            "isPublic": public,
+                            "hasChildren": false,
+                            "queryType": "flat"
+                        }),
+                    );
+                }
+            }
+        });
+    }
+
+    fn query_items(&self, org: &str, project: &str) -> Vec<Value> {
+        self.read(|db| db.project(org, project).map(|stored| stored.list_bucket("wit/queries")).unwrap_or_default())
+    }
+
+    fn create_query(&self, org: &str, project: &str, parent_path: &str, payload: &Value) -> Response {
+        let name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("Requête").to_string();
+        let folder = payload.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false);
+        let wiql = payload
+            .get("wiql")
+            .and_then(|value| value.as_str())
+            .unwrap_or("SELECT [System.Id] FROM WorkItems")
+            .to_string();
+        let created = self.write(|db| {
+            db.ensure_project(org, project);
+            let stored = db.project_mut(org, project)?;
+            let next = stored.list_bucket("wit/queries").len() as i64 + 1;
+            let path = if parent_path.is_empty() { name.clone() } else { format!("{parent_path}/{name}") };
+            let item = if folder {
+                json!({
+                    "id": format!("folder-{next}"),
+                    "name": name,
+                    "path": path,
+                    "isFolder": true,
+                    "isPublic": true,
+                    "hasChildren": false,
+                    "queryType": "flat"
+                })
+            } else {
+                json!({
                     "id": format!("query-{next}"),
                     "name": name,
                     "wiql": wiql,
-                    "path": format!("Shared Queries/{name}"),
+                    "path": path,
+                    "isFolder": false,
                     "isPublic": true,
                     "queryType": "flat"
-                });
-                Some(stored.put_bucket("wit/queries", item))
-            });
-            return match created {
-                Some(item) => Json(item).into_response(),
-                None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+                })
             };
+            Some(stored.put_bucket("wit/queries", item))
+        });
+        match created {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
         }
-        if method == Method::GET {
-            let id = rest.get(2).map(String::as_str).unwrap_or("");
-            let found = self.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket("wit/queries", id)));
-            return match found {
-                Some(item) => Json(item).into_response(),
-                None => fail(StatusCode::NOT_FOUND, "requête introuvable"),
-            };
-        }
-        fail(StatusCode::NOT_FOUND, "requête introuvable")
     }
 
     fn collection(
@@ -610,6 +726,48 @@ fn nested_key(rest: &[String]) -> Option<String> {
     } else {
         None
     }
+}
+
+fn find_query(items: &[Value], target: &str) -> Option<Value> {
+    items.iter().find(|item| {
+        item.get("id").and_then(|value| value.as_str()) == Some(target)
+            || item.get("name").and_then(|value| value.as_str()) == Some(target)
+            || item.get("path").and_then(|value| value.as_str()) == Some(target)
+    }).cloned()
+}
+
+fn nest_queries(items: &[Value], parent: &str, depth: usize) -> Vec<Value> {
+    if depth == 0 {
+        return Vec::new();
+    }
+    items
+        .iter()
+        .filter(|item| is_direct_query_child(parent, item.get("path").and_then(|value| value.as_str()).unwrap_or("")))
+        .map(|item| {
+            let mut item = item.clone();
+            let path = item.get("path").and_then(|value| value.as_str()).unwrap_or("").to_string();
+            if item.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false) {
+                let children = nest_queries(items, &path, depth - 1);
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("hasChildren".into(), json!(!children.is_empty()));
+                    object.insert("children".into(), json!(children));
+                }
+            }
+            item
+        })
+        .collect()
+}
+
+fn is_direct_query_child(parent: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if parent.is_empty() {
+        return !path.contains('/');
+    }
+    path.strip_prefix(parent)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
 }
 
 fn project_json(org: &str, name: &str, project: &crate::store::ProjectData) -> Value {
