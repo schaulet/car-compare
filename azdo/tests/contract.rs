@@ -16270,3 +16270,196 @@ async fn removing_one_agent_keeps_the_sibling_and_its_job() {
     assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_yaml_pipeline_keeps_the_sibling_and_its_run() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let mut pompe_id = 0_i64;
+    let mut ada_id = 0_i64;
+    for name in ["Pompe", "Ada"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/pipelines/pipelines?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["name"], name);
+        if name == "Pompe" {
+            pompe_id = created["id"].as_i64().unwrap();
+        } else {
+            ada_id = created["id"].as_i64().unwrap();
+        }
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{ada_id}/runs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_run: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada_run_id = ada_run["id"].as_i64().unwrap();
+    assert_eq!(ada_run["pipeline"]["name"], "Ada");
+    assert_eq!(ada_run["name"], format!("Ada-{ada_run_id}"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{pompe_id}/runs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_run: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe_run_id = pompe_run["id"].as_i64().unwrap();
+    assert_eq!(pompe_run["pipeline"]["name"], "Pompe");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/pipelines/pipelines?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/pipelines/pipelines/999?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("pipeline introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{pompe_id}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/pipelines?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["count"], 3, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/pipelines/pipelines/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{pompe_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("pipeline introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{ada_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["name"], "Ada");
+    assert_eq!(kept["folder"], "\\");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/runs?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let runs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada = runs["value"].as_array().unwrap().iter().find(|item| item["id"].as_i64() == Some(ada_run_id)).unwrap();
+    let pompe = runs["value"].as_array().unwrap().iter().find(|item| item["id"].as_i64() == Some(pompe_run_id)).unwrap();
+    assert_eq!(ada["pipeline"]["name"], "Ada");
+    assert_eq!(ada["state"], "completed");
+    assert_eq!(ada["result"], "succeeded");
+    assert_eq!(pompe["pipeline"]["name"], "Pompe");
+    assert_eq!(pompe["name"], format!("Pompe-{pompe_run_id}"));
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/pipelines/pipelines/{pompe_id}/runs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("pipeline introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/pipelines/pipelines?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = listed["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "CI"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
+}

@@ -3711,12 +3711,39 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     if rest.len() == 2 && method == Method::POST {
         let payload = parse_json(body).unwrap_or(json!({}));
         let name = text_of(&payload, "name").unwrap_or_else(|| "CI".into());
-        let next = list(state, org, project, key).len() as i64 + 1;
+        let next = list(state, org, project, key)
+            .into_iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0)
+            + 1;
         let item = json!({"id": next, "name": name, "folder": "\\", "revision": 1});
         put_item(state, org, project, key, item.clone());
         return Json(item).into_response();
     }
+    if method == Method::DELETE {
+        if rest.len() != 3 {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let Some(found) = get_item(state, org, project, key, &rest[2]) else {
+            return fail(StatusCode::NOT_FOUND, "pipeline introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("runs") && method == Method::POST {
+        let Some(pipeline) = get_item(state, org, project, key, &rest[2]) else {
+            return fail(StatusCode::NOT_FOUND, "pipeline introuvable");
+        };
+        let pipeline_id = pipeline.get("id").and_then(|value| value.as_i64()).unwrap_or(1);
+        let name = text_of(&pipeline, "name").unwrap_or_else(|| "CI".into());
         let payload = parse_json(body).unwrap_or(json!({}));
         let requested = payload
             .get("resources")
@@ -3731,10 +3758,6 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
             };
             targets.push(environment);
         }
-        let pipeline_id = rest[2].parse::<i64>().unwrap_or(1);
-        let name = get_item(state, org, project, key, &pipeline_id.to_string())
-            .and_then(|item| text_of(&item, "name"))
-            .unwrap_or_else(|| "CI".into());
         let runs_key = "pipelines/runs";
         let next = list(state, org, project, runs_key).len() as i64 + 1;
         let resources = json!({
