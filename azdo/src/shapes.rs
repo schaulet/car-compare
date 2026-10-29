@@ -475,6 +475,9 @@ fn git_status_state(value: &str) -> Option<&'static str> {
 }
 
 fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, tail: &[String], body: &[u8]) -> Response {
+    if find_repo(state, org, project, repo_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
+    }
     let key = format!("git/repositories/{repo_id}/pushes");
     if let Some(push_id) = tail.first() {
         if method == Method::GET {
@@ -491,7 +494,17 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
     if method != Method::POST {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
-    let payload = parse_json(body).unwrap_or(json!({}));
+    let payload = if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+        json!({})
+    } else {
+        match parse_json(body) {
+            Some(value) if value.is_object() => value,
+            _ => return fail(StatusCode::BAD_REQUEST, "poussée illisible"),
+        }
+    };
+    if let Err(message) = validate_push_files(state, org, project, repo_id, &payload) {
+        return fail(StatusCode::BAD_REQUEST, message);
+    }
     if payload.get("commits").is_none() && payload.get("refUpdates").is_none() {
         let ref_name = text_of(&payload, "refName")
             .or_else(|| text_of(&payload, "name"))
@@ -945,6 +958,99 @@ fn apply_push(state: &AppState, org: &str, project: &str, repo_id: &str, payload
         stored.put_bucket(&pushes_key, item.clone());
         PushOutcome::Created(item)
     })
+}
+
+fn validate_push_files(state: &AppState, org: &str, project: &str, repo_id: &str, payload: &Value) -> Result<(), &'static str> {
+    let Some(commits) = payload.get("commits") else {
+        return Ok(());
+    };
+    let Some(commits) = commits.as_array() else {
+        return Err("poussée illisible");
+    };
+    let mut files = list(state, org, project, &format!("git/repositories/{repo_id}/items"))
+        .into_iter()
+        .filter_map(|item| {
+            let path = text_of(&item, "path")?;
+            let folder = item.get("isFolder").and_then(|value| value.as_bool()).unwrap_or(false);
+            Some((path, folder))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for commit in commits {
+        if !commit.is_object() {
+            return Err("poussée illisible");
+        }
+        let Some(changes) = commit.get("changes") else {
+            continue;
+        };
+        let Some(changes) = changes.as_array() else {
+            return Err("fichier illisible");
+        };
+        for change in changes {
+            let Some(change) = change.as_object() else {
+                return Err("fichier illisible");
+            };
+            let kind = match change.get("changeType") {
+                None => "add",
+                Some(Value::String(text)) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        return Err("type de changement absent");
+                    }
+                    match trimmed.to_ascii_lowercase().as_str() {
+                        "add" => "add",
+                        "edit" => "edit",
+                        "delete" => "delete",
+                        _ => return Err("type de changement inconnu"),
+                    }
+                }
+                Some(_) => return Err("fichier illisible"),
+            };
+            let path = match change.get("item") {
+                None => return Err("chemin de fichier absent"),
+                Some(Value::Object(item)) => match item.get("path") {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(_) => return Err("fichier illisible"),
+                    None => return Err("chemin de fichier absent"),
+                },
+                Some(_) => return Err("fichier illisible"),
+            };
+            let path = normalize_file_path(&path)?;
+            if path == "/" || files.get(&path) == Some(&true) {
+                return Err("chemin de fichier refusé");
+            }
+            if (kind == "edit" || kind == "delete") && files.get(&path) != Some(&false) {
+                return Err("fichier introuvable");
+            }
+            if kind != "delete" {
+                match change.get("newContent") {
+                    None | Some(Value::String(_)) => {}
+                    Some(Value::Object(content)) => match content.get("content") {
+                        None | Some(Value::String(_)) => {}
+                        Some(_) => return Err("contenu illisible"),
+                    },
+                    Some(_) => return Err("contenu illisible"),
+                }
+            }
+            if kind == "delete" {
+                files.remove(&path);
+            } else {
+                files.insert(path, false);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_file_path(path: &str) -> Result<String, &'static str> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("chemin de fichier absent");
+    }
+    let mut path = if trimmed.starts_with('/') { trimmed.to_string() } else { format!("/{trimmed}") };
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    Ok(path)
 }
 
 fn ref_conflict(current: Option<&str>, old: &str) -> bool {

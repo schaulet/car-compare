@@ -752,15 +752,59 @@
             const page = await api("GET", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/items?recursionLevel=Full&api-version=7.1");
             files = page.value || [];
           }
-          const table = files.length ? "<table><thead><tr><th>Chemin</th><th>Type</th></tr></thead><tbody>" + files.map((item) => "<tr class='file' data-path='" + esc(item.path) + "'><td>" + esc(item.path) + "</td><td>" + esc(item.gitObjectType) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Dépôt vide.</p>";
-          view.innerHTML = "<h1>Fichiers</h1><p class='sub'>" + esc(repo ? repo.name + " · " + (repo.defaultBranch || "") : "Aucun dépôt") + "</p>" + table + "<section id='file' class='panel' hidden></section>";
+          const table = files.length ? "<table id='files'><thead><tr><th>Chemin</th><th>Type</th></tr></thead><tbody>" + files.map((item) => "<tr class='file' data-path='" + esc(item.path) + "' data-kind='" + esc(item.gitObjectType) + "'><td>" + esc(item.path) + "</td><td>" + esc(item.gitObjectType) + "</td></tr>").join("") + "</tbody></table>" : "<p id='files-empty' class='sub'>Dépôt vide.</p>";
+          view.innerHTML = "<h1>Fichiers</h1><p class='sub'>" + esc(repo ? repo.name + " · " + (repo.defaultBranch || "") : "Aucun dépôt") + "</p><div class='command'><input id='file-path' placeholder='/src/pompe.txt' /><input id='file-draft' placeholder='Contenu' /><button id='file-create' type='button'>Créer</button></div><p id='file-create-error' class='error' hidden></p>" + table + "<section id='file' class='panel' hidden></section>";
+          async function pushChange(path, changeType, content) {
+            const refs = await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs");
+            const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
+            const change = { changeType: changeType, item: { path: path } };
+            if (changeType !== "delete") change.newContent = { content: content, contentType: "rawtext" };
+            await api("POST", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/pushes?api-version=7.1", {
+              refUpdates: [{ name: main ? main.name : "refs/heads/main", oldObjectId: main ? main.objectId : "" }],
+              commits: [{ comment: path, changes: [change] }],
+            });
+          }
+          document.getElementById("file-create").onclick = async () => {
+            const note = document.getElementById("file-create-error");
+            if (!repo) return;
+            try {
+              await pushChange(document.getElementById("file-path").value || "/src/pompe.txt", "add", document.getElementById("file-draft").value || "");
+            } catch (error) {
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
+            location.reload();
+          };
           document.querySelectorAll("tr.file").forEach((row) => {
             row.onclick = async () => {
-              if (!repo || row.dataset.path === "/") return;
+              if (!repo || row.dataset.path === "/" || row.dataset.kind === "tree") return;
               const item = await api("GET", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/items?path=" + encodeURIComponent(row.dataset.path) + "&api-version=7.1");
               const panel = document.getElementById("file");
               panel.hidden = false;
-              panel.innerHTML = "<h2>" + esc(item.path) + "</h2><pre>" + esc(item.content || "") + "</pre>";
+              panel.innerHTML = "<h2 id='file-heading'>" + esc(item.path) + "</h2><pre id='file-view'>" + esc(item.content || "") + "</pre><textarea id='file-content' rows='6'>" + esc(item.content || "") + "</textarea><div class='command'><button id='file-save' type='button'>Enregistrer</button><button id='file-delete' type='button'>Supprimer</button></div><p id='file-error' class='error' hidden></p>";
+              document.getElementById("file-save").onclick = async () => {
+                const note = document.getElementById("file-error");
+                try {
+                  await pushChange(item.path, "edit", document.getElementById("file-content").value);
+                } catch (error) {
+                  note.hidden = false;
+                  note.textContent = error.message;
+                  return;
+                }
+                location.reload();
+              };
+              document.getElementById("file-delete").onclick = async () => {
+                const note = document.getElementById("file-error");
+                try {
+                  await pushChange(item.path, "delete", "");
+                } catch (error) {
+                  note.hidden = false;
+                  note.textContent = error.message;
+                  return;
+                }
+                location.reload();
+              };
             };
           });
           return;

@@ -10630,3 +10630,196 @@ async fn release_can_be_abandoned() {
     assert_eq!(notes[0]["resource"]["name"], release["name"]);
     assert_eq!(notes[0]["resource"]["description"], "1.0.0");
 }
+
+#[tokio::test]
+async fn git_file_can_be_edited_and_deleted() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/repositories/00000000-0000-0000-0000-000000000099/pushes?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "dépôt introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let pushes = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let old = refs["value"].as_array().unwrap().iter().find(|item| item["name"] == "refs/heads/main").unwrap()["objectId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(&app, "GET", &pushes, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let before_count = before["count"].as_i64().unwrap();
+
+    let refused = [
+        (r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"OLD"}],"commits":[{"comment":"retrait","changes":[{"changeType":"delete","item":{"path":"/absente.txt"}}]}]}"#, "fichier introuvable"),
+        (r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"OLD"}],"commits":[{"comment":"revue","changes":[{"changeType":"edit","item":{"path":"/absente.txt"},"newContent":{"content":"x","contentType":"rawtext"}}]}]}"#, "fichier introuvable"),
+        (r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"OLD"}],"commits":[{"comment":"vide","changes":[{"changeType":"add","item":{"path":"  "}}]}]}"#, "chemin de fichier absent"),
+        (r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"OLD"}],"commits":[{"comment":"rename","changes":[{"changeType":"rename","item":{"path":"/README.md"}}]}]}"#, "type de changement inconnu"),
+        (r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"OLD"}],"commits":[{"comment":"racine","changes":[{"changeType":"delete","item":{"path":"/"}}]}]}"#, "chemin de fichier refusé"),
+    ];
+    for (template, message) in refused {
+        let payload = template.replace("OLD", &old);
+        let (status, body, _) = call(&app, "POST", &pushes, Some(&auth), None, "application/json", Some(&payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["message"], message, "{body}");
+    }
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(refs["value"].as_array().unwrap().iter().find(|item| item["name"] == "refs/heads/main").unwrap()["objectId"], old);
+    let (status, body, _) = call(&app, "GET", &pushes, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(after["count"], before_count);
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/README.md&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let readme: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(readme["content"], "# AzurzDemo\n");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{old}"}}],"commits":[{{"comment":"ajout pompe","changes":[{{"changeType":"add","item":{{"path":"/src/pompe.txt"}},"newContent":{{"content":"debit 12","contentType":"rawtext"}}}}]}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let added = created["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{added}"}}],"commits":[{{"comment":"dossier","changes":[{{"changeType":"edit","item":{{"path":"/src"}},"newContent":{{"content":"x","contentType":"rawtext"}}}}]}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "chemin de fichier refusé");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{added}"}}],"commits":[{{"comment":"illisible","changes":[{{"changeType":"edit","item":{{"path":"/src/pompe.txt"}},"newContent":{{"content":1}}}}]}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "contenu illisible");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/pompe.txt&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let file: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(file["content"], "debit 12");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"git.push","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{added}"}}],"commits":[{{"comment":"Pompe revue","changes":[{{"changeType":"edit","item":{{"path":"/src/pompe.txt"}},"newContent":{{"content":"debit 18","contentType":"rawtext"}}}}]}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let edited_id = edited["commits"][0]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/pompe.txt&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let file: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(file["content"], "debit 18");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/pompe.txt&versionDescriptor.version={added}&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let previous: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(previous["content"], "debit 12");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/README.md&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let readme: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(readme["content"], "# AzurzDemo\n");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"refUpdates":[{{"name":"refs/heads/main","oldObjectId":"{edited_id}"}}],"commits":[{{"comment":"retrait pompe","changes":[{{"changeType":"delete","item":{{"path":"/src/pompe.txt"}}}}]}}]}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/pompe.txt&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "fichier introuvable");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/src/pompe.txt&versionDescriptor.version={edited_id}&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["content"], "debit 18");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/items?path=/README.md&api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let readme: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(readme["content"], "# AzurzDemo\n");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &pushes,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"refUpdates":[{"name":"refs/heads/main","oldObjectId":"0000000000000000000000000000000000000000"}],"commits":[{"comment":"encore","changes":[{"changeType":"delete","item":{"path":"/src/pompe.txt"}}]}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "fichier introuvable");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "git.push" && item["resource"]["commits"][0]["comment"] == "Pompe revue").collect();
+    assert_eq!(notes.len(), 1);
+}
