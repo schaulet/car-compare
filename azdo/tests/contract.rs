@@ -10379,3 +10379,254 @@ async fn test_suite_can_be_renamed_and_removed_with_its_cases() {
     let deleted_note = inbox["value"].as_array().unwrap().iter().find(|item| item["eventType"] == "test.suite.deleted").unwrap();
     assert_eq!(deleted_note["resource"]["name"], "Atelier");
 }
+
+#[tokio::test]
+async fn release_can_be_abandoned() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/release/releases/99?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Deploiement","environments":[{"name":"Production","rank":1,"preDeployApprovals":{"approvals":[{"approver":{"displayName":"azurz"}}]}}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let definition: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let definition_id = definition["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/releases?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"definitionId":{definition_id},"description":"1.0.0"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let release: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let release_id = release["id"].as_i64().unwrap();
+    assert_eq!(release["status"], "active");
+    assert_eq!(release["environments"][0]["status"], "inProgress");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/release/releases?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"definitionId":{definition_id},"description":"stable"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let sibling_id = sibling["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version illisible");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":" "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "statut de version absent");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":1}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version illisible");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"archive"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "statut de version inconnu");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"abandoned","description":2}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "description illisible");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let unchanged: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(unchanged["status"], "active");
+    assert_eq!(unchanged["description"], "1.0.0");
+    assert_eq!(unchanged["environments"][0]["status"], "inProgress");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"release.abandoned","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"Abandoned"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let abandoned: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(abandoned["status"], "abandoned");
+    assert_eq!(abandoned["description"], "1.0.0");
+    assert_eq!(abandoned["environments"][0]["status"], "canceled");
+    assert_eq!(abandoned["name"], release["name"]);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/release/approvals?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let approvals: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = approvals["value"].as_array().unwrap();
+    let own = rows.iter().find(|item| item["release"]["id"].as_i64() == Some(release_id)).unwrap();
+    let other = rows.iter().find(|item| item["release"]["id"].as_i64() == Some(sibling_id)).unwrap();
+    assert_eq!(own["status"], "canceled");
+    assert_eq!(other["status"], "pending");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{sibling_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["status"], "active");
+    assert_eq!(sibling["description"], "stable");
+    assert_eq!(sibling["environments"][0]["status"], "inProgress");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"abandoned"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"active"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "version abandonnée");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/release/releases/{release_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["status"], "abandoned");
+    assert_eq!(still["environments"][0]["status"], "canceled");
+
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/hooks/inbox?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let notes: Vec<_> = inbox["value"].as_array().unwrap().iter().filter(|item| item["eventType"] == "release.abandoned").collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0]["resource"]["name"], release["name"]);
+    assert_eq!(notes[0]["resource"]["description"], "1.0.0");
+}

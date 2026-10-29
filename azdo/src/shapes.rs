@@ -4586,7 +4586,106 @@ fn release_releases(state: &AppState, method: &Method, org: &str, project: &str,
             None => fail(StatusCode::NOT_FOUND, "version introuvable"),
         };
     }
+    if method == Method::PATCH || method == Method::PUT {
+        return update_release(state, org, project, id, body);
+    }
     fail(StatusCode::NOT_FOUND, "version introuvable")
+}
+
+fn update_release(state: &AppState, org: &str, project: &str, id: &str, body: &[u8]) -> Response {
+    let key = "release/releases";
+    let Some(previous) = get_item(state, org, project, key, id) else {
+        return fail(StatusCode::NOT_FOUND, "version introuvable");
+    };
+    let Some(payload) = parse_json(body).filter(|value| value.is_object()) else {
+        return fail(StatusCode::BAD_REQUEST, "version illisible");
+    };
+    if payload.get("description").is_some_and(|value| !value.is_string()) {
+        return fail(StatusCode::BAD_REQUEST, "description illisible");
+    }
+    let Some(status_value) = payload.get("status") else {
+        return fail(StatusCode::BAD_REQUEST, "statut de version absent");
+    };
+    let Some(status_raw) = status_value.as_str() else {
+        return fail(StatusCode::BAD_REQUEST, "version illisible");
+    };
+    let trimmed = status_raw.trim();
+    if trimmed.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "statut de version absent");
+    }
+    let Some(canonical) = canonical_release_status(trimmed) else {
+        return fail(StatusCode::BAD_REQUEST, "statut de version inconnu");
+    };
+    let previous_status = text_of(&previous, "status").unwrap_or_else(|| "active".into());
+    if canonical == "active" && previous_status.eq_ignore_ascii_case("abandoned") {
+        return fail(StatusCode::BAD_REQUEST, "version abandonnée");
+    }
+    let notify = canonical == "abandoned" && !previous_status.eq_ignore_ascii_case("abandoned");
+    let description = payload.get("description").and_then(|value| value.as_str()).map(str::to_string);
+    let updated = state.write(|db| {
+        let stored = db.project_mut(org, project)?;
+        let mut release = stored.get_bucket(key, id)?;
+        if let Some(object) = release.as_object_mut() {
+            object.insert("status".into(), json!(canonical));
+            if let Some(description) = description.as_deref() {
+                object.insert("description".into(), json!(description));
+            }
+        }
+        if canonical == "abandoned" {
+            cancel_open_environments(&mut release);
+        }
+        let saved = stored.put_bucket(key, release);
+        if canonical == "abandoned" {
+            let approvals = stored.list_bucket("release/approvals");
+            for mut approval in approvals {
+                let same_release = approval
+                    .get("release")
+                    .and_then(|release| release.get("id"))
+                    .map(|value| value_key(value) == id)
+                    .unwrap_or(false);
+                let pending = text_of(&approval, "status").is_some_and(|status| status.eq_ignore_ascii_case("pending"));
+                if same_release && pending {
+                    if let Some(object) = approval.as_object_mut() {
+                        object.insert("status".into(), json!("canceled"));
+                    }
+                    stored.put_bucket("release/approvals", approval);
+                }
+            }
+        }
+        Some(saved)
+    });
+    match updated {
+        Some(item) => {
+            if notify {
+                deliver_work_item(state, org, project, "release.abandoned", &item);
+            }
+            Json(item).into_response()
+        }
+        None => fail(StatusCode::NOT_FOUND, "version introuvable"),
+    }
+}
+
+fn canonical_release_status(status: &str) -> Option<&'static str> {
+    match status.to_ascii_lowercase().as_str() {
+        "active" => Some("active"),
+        "abandoned" => Some("abandoned"),
+        _ => None,
+    }
+}
+
+fn cancel_open_environments(release: &mut Value) {
+    let Some(environments) = release.get_mut("environments").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+    for environment in environments {
+        let status = text_of(environment, "status").unwrap_or_default();
+        if matches!(status.as_str(), "succeeded" | "rejected" | "canceled" | "partiallySucceeded") {
+            continue;
+        }
+        if let Some(object) = environment.as_object_mut() {
+            object.insert("status".into(), json!("canceled"));
+        }
+    }
 }
 
 fn release_approvals(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {

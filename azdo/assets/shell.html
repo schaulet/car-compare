@@ -1509,10 +1509,13 @@
             collection("release/approvals"),
           ]);
           const defs = definitions.length ? "<table><thead><tr><th>ID</th><th>Définition</th><th>Environnements</th><th></th></tr></thead><tbody>" + definitions.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc((item.environments || []).map((env) => env.name).join(", ")) + "</td><td><button type='button' class='release' data-id='" + esc(item.id) + "'>Créer une version</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune définition.</p>";
-          const runs = releases.length ? "<table><thead><tr><th>Version</th><th>Description</th><th>Environnements</th></tr></thead><tbody>" + releases.map((item) => "<tr><td>" + esc(item.name) + "</td><td>" + esc(item.description || "") + "</td><td>" + esc((item.environments || []).map((env) => env.name + " " + env.status).join(", ")) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune version.</p>";
+          const runs = releases.length ? "<table id='releases'><thead><tr><th>Version</th><th>État</th><th>Description</th><th>Environnements</th><th></th></tr></thead><tbody>" + releases.map((item) => {
+            const action = item.status === "abandoned" ? "" : "<button type='button' class='abandon' data-id='" + esc(item.id) + "'>Abandonner</button>";
+            return "<tr data-status='" + esc(item.status) + "'><td>" + esc(item.name) + "</td><td class='release-status'>" + esc(item.status) + "</td><td>" + esc(item.description || "") + "</td><td>" + esc((item.environments || []).map((env) => env.name + " " + env.status).join(", ")) + "</td><td>" + action + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='release-empty' class='sub'>Aucune version.</p>";
           const pending = approvals.filter((item) => item.status === "pending");
           const gates = pending.length ? "<h2>Approbations</h2><table><thead><tr><th>Version</th><th>Environnement</th><th>Approbateur</th><th></th></tr></thead><tbody>" + pending.map((item) => "<tr><td>" + esc(item.release?.name) + "</td><td>" + esc(item.releaseEnvironment?.name) + "</td><td>" + esc(item.approver?.displayName) + "</td><td><button type='button' class='approve' data-id='" + esc(item.id) + "'>Approuver</button></td></tr>").join("") + "</tbody></table>" : "";
-          view.innerHTML = "<h1>Versions</h1><div class='command'><input id='rel-name' placeholder='Définition' /><input id='rel-env' placeholder='Environnement' /><button id='create' type='button'>Créer la définition</button></div>" + defs + "<h2>Versions</h2>" + runs + gates;
+          view.innerHTML = "<h1>Versions</h1><div class='command'><input id='rel-name' placeholder='Définition' /><input id='rel-env' placeholder='Environnement' /><button id='create' type='button'>Créer la définition</button></div>" + defs + "<h2>Versions</h2>" + runs + gates + "<p id='release-error' class='error' hidden></p>";
           document.getElementById("create").onclick = async () => {
             const environment = document.getElementById("rel-env").value || "Production";
             await api("POST", root + "/release/definitions?api-version=7.1", {
@@ -1531,6 +1534,19 @@
           document.querySelectorAll("button.approve").forEach((button) => {
             button.onclick = async () => {
               await api("PATCH", root + "/release/approvals/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { status: "approved", comments: "ok" });
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.abandon").forEach((button) => {
+            button.onclick = async () => {
+              try {
+                await api("PATCH", root + "/release/releases/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { status: "abandoned" });
+              } catch (error) {
+                const note = document.getElementById("release-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
               location.reload();
             };
           });
@@ -1768,10 +1784,12 @@
             const workItem = resource.workItem && resource.workItem.name;
             if (workItem) return workItem;
             if (resource.suiteType && resource.name) return resource.name;
+            if (resource.releaseDefinition && resource.description) return resource.description;
+            if (resource.releaseDefinition && resource.name) return resource.name;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='wiki.page.moved'>wiki.page.moved</option><option value='wiki.page.deleted'>wiki.page.deleted</option><option value='test.suite.updated'>test.suite.updated</option><option value='test.suite.deleted'>test.suite.deleted</option><option value='test.case.removed'>test.case.removed</option><option value='release.abandoned'>release.abandoned</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1847,6 +1865,10 @@
               } else {
                 await api("DELETE", root + "/testplan/plans/" + encodeURIComponent(plan.id) + "/suites/" + encodeURIComponent(suite.id) + "?api-version=7.1");
               }
+            } else if (event === "release.abandoned") {
+              const definition = await api("POST", root + "/release/definitions?api-version=7.1", { name: title, environments: [{ name: "Production", rank: 1 }] });
+              const release = await api("POST", root + "/release/releases?api-version=7.1", { definitionId: definition.id, description: title });
+              await api("PATCH", root + "/release/releases/" + encodeURIComponent(release.id) + "?api-version=7.1", { status: "abandoned" });
             } else if (event === "build.complete") {
               const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
               await api("GET", root + "/build/builds/" + encodeURIComponent(queued.id) + "?api-version=7.1");
