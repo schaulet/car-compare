@@ -553,7 +553,24 @@
             const tagTable = tagRows.length ? "<table id='wit-tags'><thead><tr><th></th><th>Nom</th></tr></thead><tbody>" + tagRows.map((item) => "<tr><td><button type='button' class='wtag-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wit-tag-empty' class='sub'>Aucune étiquette.</p>";
             tagBlock = "<h2>Étiquettes</h2><div class='command'><input id='wtag-name' placeholder='pompe' /><button id='wtag-add' type='button'>Ajouter</button></div>" + tagTable + "<p id='wtag-error' class='sub'></p>";
           }
-          view.innerHTML = "<h1>" + heading + "</h1>" + tagBlock + "<div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items) + "<h2>Corbeille</h2>" + bin;
+          let reactionBlock = "";
+          if (hub === "/_workitems") {
+            const first = items[0];
+            let commentId = "";
+            let reactions = [];
+            if (first) {
+              const comments = await api("GET", root + "/wit/workItems/" + encodeURIComponent(first.id) + "/comments?api-version=7.1-preview.3");
+              const note = (comments.comments || [])[0];
+              if (note) {
+                commentId = String(note.id);
+                const listed = await api("GET", root + "/wit/workItems/" + encodeURIComponent(first.id) + "/comments/" + encodeURIComponent(note.id) + "/reactions?api-version=7.1-preview.4");
+                reactions = listed.value || [];
+              }
+            }
+            const reactionTable = reactions.length ? "<table id='wit-reactions'><thead><tr><th></th><th>Type</th></tr></thead><tbody>" + reactions.map((item) => "<tr><td><button type='button' class='wreact-remove' data-id='" + esc(item.id) + "' data-type='" + esc(item.type) + "' data-item='" + esc(first.id) + "' data-comment='" + esc(commentId) + "'>Retirer</button></td><td>" + esc(item.type) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wreact-empty' class='sub'>Aucune réaction.</p>";
+            reactionBlock = "<h2>Réactions</h2><div class='command'><input id='wreact-item' placeholder='1' value='" + esc(first ? first.id : "") + "' /><input id='wreact-comment' placeholder='1' value='" + esc(commentId) + "' /><select id='wreact-type'><option value='like'>like</option><option value='dislike'>dislike</option><option value='heart'>heart</option><option value='hooray'>hooray</option><option value='smile'>smile</option><option value='confused'>confused</option></select><button id='wreact-add' type='button'>Ajouter</button></div>" + reactionTable + "<p id='wreact-error' class='sub'></p>";
+          }
+          view.innerHTML = "<h1>" + heading + "</h1>" + reactionBlock + tagBlock + "<div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div>" + rows(items) + "<h2>Corbeille</h2>" + bin;
           const addTag = document.getElementById("wtag-add");
           if (addTag) {
             addTag.onclick = async () => {
@@ -575,6 +592,45 @@
               error.textContent = "";
               try {
                 await api("DELETE", root + "/wit/tags/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
+          const addReaction = document.getElementById("wreact-add");
+          if (addReaction) {
+            addReaction.onclick = async () => {
+              const error = document.getElementById("wreact-error");
+              error.textContent = "";
+              const itemId = document.getElementById("wreact-item").value.trim();
+              const commentId = document.getElementById("wreact-comment").value.trim();
+              if (!items.some((item) => String(item.id) === itemId)) {
+                error.textContent = "work item introuvable";
+                return;
+              }
+              if (!commentId) {
+                error.textContent = "commentaire introuvable";
+                return;
+              }
+              try {
+                await api("POST", root + "/wit/workItems/" + encodeURIComponent(itemId) + "/comments/" + encodeURIComponent(commentId) + "/reactions?api-version=7.1-preview.4", {
+                  type: document.getElementById("wreact-type").value || "like",
+                });
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          }
+          document.querySelectorAll("button.wreact-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wreact-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/wit/workItems/" + encodeURIComponent(button.dataset.item) + "/comments/" + encodeURIComponent(button.dataset.comment) + "/reactions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1-preview.4");
               } catch (err) {
                 error.textContent = err.message;
                 return;

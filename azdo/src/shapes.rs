@@ -516,6 +516,130 @@ fn commits(state: &AppState, method: &Method, org: &str, project: &str, repo_id:
     Json(item).into_response()
 }
 
+pub fn comment_reactions(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    work_item: i64,
+    comment_id: i64,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    match comment_reaction_parent(state, org, project, work_item, comment_id) {
+        Ok(()) => {}
+        Err(message) => return fail(StatusCode::NOT_FOUND, message),
+    }
+    let key = format!("wit/workitems/{work_item}/comments/{comment_id}/reactions");
+    if rest.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by_key(|item| json_i64(&item["id"]).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_comment_reaction(org, project, work_item, comment_id, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let kind = match reaction_type_of(body) {
+                Ok(kind) => kind,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if let Some(existing) = list(state, org, project, &key)
+                .into_iter()
+                .find(|item| text_of(item, "type").as_deref() == Some(kind))
+            {
+                return Json(dress_comment_reaction(org, project, work_item, comment_id, existing)).into_response();
+            }
+            let next = list(state, org, project, &key)
+                .into_iter()
+                .filter_map(|item| json_i64(&item["id"]))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let item = json!({ "id": next, "type": kind });
+            put_item(state, org, project, &key, item.clone());
+            return Json(dress_comment_reaction(org, project, work_item, comment_id, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() == 1 {
+        let Ok(reaction_id) = rest[0].parse::<i64>() else {
+            return fail(StatusCode::NOT_FOUND, "réaction introuvable");
+        };
+        let id = reaction_id.to_string();
+        let Some(item) = get_item(state, org, project, &key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "réaction introuvable");
+        };
+        if method == Method::GET {
+            return Json(dress_comment_reaction(org, project, work_item, comment_id, item)).into_response();
+        }
+        if method == Method::DELETE {
+            return if delete_item(state, org, project, &key, &id) {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "réaction introuvable")
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "réaction introuvable")
+}
+
+fn comment_reaction_parent(state: &AppState, org: &str, project: &str, work_item: i64, comment_id: i64) -> Result<(), &'static str> {
+    state.read(|db| {
+        let Some(stored) = db.project(org, project) else {
+            return Err("work item introuvable");
+        };
+        if !stored.work_items.contains_key(&work_item) {
+            return Err("work item introuvable");
+        }
+        let visible = stored.visible_comments(work_item).unwrap_or_default();
+        if visible.iter().any(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id)) {
+            Ok(())
+        } else {
+            Err("commentaire introuvable")
+        }
+    })
+}
+
+fn reaction_type_of(body: &[u8]) -> Result<&'static str, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(text) = payload.as_object().and_then(|object| object.get("type")).and_then(|value| value.as_str()) else {
+        return Err("réaction absente");
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("réaction absente");
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "like" => Ok("like"),
+        "dislike" => Ok("dislike"),
+        "heart" => Ok("heart"),
+        "hooray" => Ok("hooray"),
+        "smile" => Ok("smile"),
+        "confused" => Ok("confused"),
+        _ => Err("réaction inconnue"),
+    }
+}
+
+fn dress_comment_reaction(org: &str, project: &str, work_item: i64, comment_id: i64, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/wit/workItems/{work_item}/comments/{comment_id}/reactions/{id}")),
+        );
+    }
+    item
+}
+
 fn commit_comment_content(body: &[u8]) -> Result<String, &'static str> {
     let Some(payload) = parse_json(body) else {
         return Err("JSON illisible");

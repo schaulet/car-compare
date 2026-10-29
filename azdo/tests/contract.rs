@@ -22472,3 +22472,276 @@ async fn removing_one_commit_comment_keeps_the_sibling_and_the_other_project() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("commentaire introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_comment_reaction_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn open_item(app: &axum::Router, auth: &str, project: &str, title: &str) -> i64 {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/wit/workitems/$User%20Story?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&format!(r#"[{{"op":"add","path":"/fields/System.Title","value":"{title}"}}]"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_i64().unwrap()
+    }
+
+    async fn open_note(app: &axum::Router, auth: &str, project: &str, item: i64, text: &str) -> i64 {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/wit/workItems/{item}/comments?api-version=7.1-preview.3"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"text":"{text}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let note: serde_json::Value = serde_json::from_str(&body).unwrap();
+        note["id"].as_i64().unwrap()
+    }
+
+    let pompe = open_item(&app, &auth, "AzurzDemo", "Pompe").await;
+    let pompe_note = open_note(&app, &auth, "AzurzDemo", pompe, "release").await;
+    let ada = open_item(&app, &auth, "AzurzDemo", "Ada").await;
+    let ada_note = open_note(&app, &auth, "AzurzDemo", ada, "release").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = open_item(&app, &auth, "Atelier", "Pompe").await;
+    let atelier_note = open_note(&app, &auth, "Atelier", atelier, "release").await;
+
+    let reactions = format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions?api-version=7.1-preview.4");
+    let (status, body, _) = call(&app, "POST", &reactions, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &reactions, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("réaction absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &reactions, Some(&auth), None, "application/json", Some(r#"{"type":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("réaction absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &reactions, Some(&auth), None, "application/json", Some(r#"{"type":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("réaction absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &reactions, Some(&auth), None, "application/json", Some(r#"{"type":"rocket"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("réaction inconnue"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &reactions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workItems/40/comments/1/reactions?api-version=7.1-preview.4",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"type":"like"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("work item introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/9/reactions?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"type":"like"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+
+    async fn react(app: &axum::Router, auth: &str, project: &str, item: i64, note: i64, kind: &str) -> serde_json::Value {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/wit/workItems/{item}/comments/{note}/reactions?api-version=7.1-preview.4"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"type":" {kind} "}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let like = react(&app, &auth, "AzurzDemo", pompe, pompe_note, "like").await;
+    assert_eq!(like["id"], 1);
+    assert_eq!(like["type"], "like");
+    assert!(like["url"].as_str().unwrap().contains(&format!("/workItems/{pompe}/comments/{pompe_note}/reactions/1")), "{like}");
+    let heart = react(&app, &auth, "AzurzDemo", pompe, pompe_note, "heart").await;
+    assert_eq!(heart["id"], 2);
+    assert_eq!(heart["type"], "heart");
+    let ada_like = react(&app, &auth, "AzurzDemo", ada, ada_note, "like").await;
+    assert_eq!(ada_like["id"], 1);
+    let atelier_like = react(&app, &auth, "Atelier", atelier, atelier_note, "like").await;
+    assert_eq!(atelier_like["id"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/9?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réaction introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/abc?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réaction introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/1/extra?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/1?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &reactions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], 2);
+    assert_eq!(left["value"][0]["type"], "heart");
+    let smile = react(&app, &auth, "AzurzDemo", pompe, pompe_note, "smile").await;
+    assert_eq!(smile["id"], 3);
+    let (status, body, _) = call(&app, "GET", &reactions, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["count"], 2);
+    assert_eq!(again["value"][0]["id"], 2);
+    assert_eq!(again["value"][1]["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/1?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réaction introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_note: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_note["text"], "release");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["fields"]["System.Title"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{ada}/comments/{ada_note}/reactions/1?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["type"], "like");
+    assert_eq!(ada_kept["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{ada}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_item: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_item["fields"]["System.Title"], "Ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/wit/workItems/{atelier}/comments/{atelier_note}/reactions/1?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["type"], "like");
+    assert_eq!(other["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{pompe}/comments/{pompe_note}/reactions/1?api-version=7.1-preview.4"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réaction introuvable"), "{body}");
+}

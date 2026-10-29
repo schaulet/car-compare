@@ -553,6 +553,15 @@ impl AppState {
     }
 
     fn work_item_comments(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+        if rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("reactions")) {
+            let Some(work_item) = rest.get(2).and_then(|value| value.parse::<i64>().ok()) else {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            };
+            let Some(comment_id) = rest.get(4).and_then(|value| value.parse::<i64>().ok()) else {
+                return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+            };
+            return crate::shapes::comment_reactions(self, method, org, project, work_item, comment_id, &rest[6..], body);
+        }
         let Some(id) = rest.get(2).and_then(|value| value.parse::<i64>().ok()) else {
             return fail(StatusCode::NOT_FOUND, "work item introuvable");
         };
