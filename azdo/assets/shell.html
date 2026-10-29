@@ -1084,8 +1084,17 @@
             const last = list[list.length - 1];
             return "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.eventType) + "</td><td>" + esc(item.consumerInputs && item.consumerInputs.url) + "</td><td class='hook-status'>" + esc(last ? last.status : "") + "</td></tr>";
           }))).join("") + "</tbody></table>" : "<p class='sub'>Aucun abonnement.</p>";
-          const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Titre</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(item.resource && item.resource.fields && item.resource.fields["System.Title"]) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre' /><button id='hook-fire' type='button'>Créer le ticket</button></div><h2>Réceptions</h2>" + received;
+          function hookLabel(item) {
+            const resource = item.resource || {};
+            const title = resource.fields && resource.fields["System.Title"];
+            if (title) return title;
+            const commit = resource.commits && resource.commits[0] && resource.commits[0].comment;
+            if (commit) return commit;
+            if (resource.buildNumber) return resource.buildNumber + " " + (resource.result || "");
+            return "";
+          }
+          const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='git.push'>git.push</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1098,9 +1107,26 @@
             location.reload();
           };
           document.getElementById("hook-fire").onclick = async () => {
-            await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [
-              { op: "add", path: "/fields/System.Title", value: document.getElementById("hook-title").value || "Élément" },
-            ], "application/json-patch+json");
+            const event = document.getElementById("hook-event").value;
+            const title = document.getElementById("hook-title").value || "Sonde";
+            if (event === "git.push") {
+              const repos = await collection("git/repositories");
+              const repo = repos[0];
+              if (!repo) return;
+              const refs = await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs");
+              const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
+              await api("POST", root + "/git/repositories/" + encodeURIComponent(repo.id) + "/pushes?api-version=7.1", {
+                refUpdates: [{ name: "refs/heads/main", oldObjectId: main ? main.objectId : "" }],
+                commits: [{ comment: title, changes: [{ changeType: "add", item: { path: "/hooks/" + Date.now() + ".txt" }, newContent: { content: title, contentType: "rawtext" } }] }],
+              });
+            } else if (event === "build.complete") {
+              const queued = await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
+              await api("GET", root + "/build/builds/" + encodeURIComponent(queued.id) + "?api-version=7.1");
+            } else {
+              await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [
+                { op: "add", path: "/fields/System.Title", value: title },
+              ], "application/json-patch+json");
+            }
             location.reload();
           };
           return;

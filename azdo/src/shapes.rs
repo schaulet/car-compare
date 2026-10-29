@@ -491,10 +491,14 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
             "pushedBy": {"displayName": "azurz"}
         });
         put_item(state, org, project, &key, item.clone());
+        deliver_work_item(state, org, project, "git.push", &item);
         return Json(item).into_response();
     }
     match apply_push(state, org, project, repo_id, &payload) {
-        PushOutcome::Created(item) => Json(item).into_response(),
+        PushOutcome::Created(item) => {
+            deliver_work_item(state, org, project, "git.push", &item);
+            Json(item).into_response()
+        }
         PushOutcome::Conflict => fail(StatusCode::CONFLICT, "la référence a changé"),
         PushOutcome::Missing => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
     }
@@ -2141,7 +2145,7 @@ fn hooks_inbox(state: &AppState, method: &Method, org: &str) -> Response {
 pub fn deliver_work_item(state: &AppState, org: &str, project: &str, event_type: &str, resource: &Value) {
     let matches = org_list(state, org, "hooks/subscriptions")
         .into_iter()
-        .filter(|item| subscription_matches(item, event_type, project))
+        .filter(|item| subscription_matches(item, event_type, project, resource))
         .collect::<Vec<_>>();
     for subscription in matches {
         let id = text_of(&subscription, "id").unwrap_or_default();
@@ -2178,7 +2182,7 @@ pub fn deliver_work_item(state: &AppState, org: &str, project: &str, event_type:
     }
 }
 
-fn subscription_matches(item: &Value, event_type: &str, project: &str) -> bool {
+fn subscription_matches(item: &Value, event_type: &str, project: &str, resource: &Value) -> bool {
     if text_of(item, "status").as_deref() == Some("disabled") {
         return false;
     }
@@ -2193,6 +2197,20 @@ fn subscription_matches(item: &Value, event_type: &str, project: &str) -> bool {
             if !value.is_empty() && value != project {
                 return false;
             }
+        }
+    }
+    if let Some(wanted) = inputs.get("repository").and_then(|value| value.as_str()).filter(|value| !value.is_empty()) {
+        let repository = resource.get("repository");
+        let id = repository.and_then(|value| text_of(value, "id"));
+        let name = repository.and_then(|value| text_of(value, "name"));
+        if id.as_deref() != Some(wanted) && name.as_deref() != Some(wanted) {
+            return false;
+        }
+    }
+    if let Some(wanted) = inputs.get("definitionName").and_then(|value| value.as_str()).filter(|value| !value.is_empty()) {
+        let name = resource.get("definition").and_then(|value| text_of(value, "name")).unwrap_or_default();
+        if name != wanted {
+            return false;
         }
     }
     true
@@ -3242,6 +3260,7 @@ fn promote_build(state: &AppState, org: &str, project: &str, mut item: Value) ->
         item["startTime"] = json!("2026-10-29T00:00:01Z");
         item["finishTime"] = json!("2026-10-29T00:00:02Z");
         put_item(state, org, project, "build/builds", item.clone());
+        deliver_work_item(state, org, project, "build.complete", &item);
     }
     item
 }
