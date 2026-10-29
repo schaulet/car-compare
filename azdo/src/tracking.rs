@@ -49,15 +49,27 @@ fn boards(
         }
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
+    if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("rows") {
+        let board = &rest[2];
+        if method == Method::GET {
+            return Json(page(load_rows(state, org, project, &team_name, board))).into_response();
+        }
+        if method == Method::PUT {
+            return put_rows(state, org, project, &team_name, board, body);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     if rest.len() >= 3 {
         let columns = load_columns(state, org, project, &team_name, &rest[2]);
-        return Json(board_document(org, project, &team_name, &rest[2], columns)).into_response();
+        let rows = load_rows(state, org, project, &team_name, &rest[2]);
+        return Json(board_document(org, project, &team_name, &rest[2], columns, rows)).into_response();
     }
     let columns = load_columns(state, org, project, &team_name, "Stories");
-    Json(page(vec![board_document(org, project, &team_name, "Stories", columns)])).into_response()
+    let rows = load_rows(state, org, project, &team_name, "Stories");
+    Json(page(vec![board_document(org, project, &team_name, "Stories", columns, rows)])).into_response()
 }
 
 fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: Option<&str>, rest: &[String]) -> Response {
@@ -1188,14 +1200,109 @@ fn allowed_mappings(columns: &[Value]) -> Value {
     json!({"User Story": story, "Bug": bug})
 }
 
-fn board_document(org: &str, project: &str, team: &str, name: &str, columns: Vec<Value>) -> Value {
+fn row_key(team: &str, board: &str) -> String {
+    format!("work/boards/{team}/{board}/rows")
+}
+
+fn default_rows() -> Vec<Value> {
+    vec![json!({"id": "row-1", "name": null})]
+}
+
+fn load_rows(state: &AppState, org: &str, project: &str, team: &str, board: &str) -> Vec<Value> {
+    let key = row_key(team, board);
+    state
+        .read(|db| {
+            db.project(org, project)
+                .and_then(|stored| stored.get_bucket(&key, "rows"))
+                .and_then(|item| item.get("rows").and_then(|value| value.as_array().cloned()))
+        })
+        .filter(|rows| !rows.is_empty())
+        .unwrap_or_else(default_rows)
+}
+
+fn put_rows(state: &AppState, org: &str, project: &str, team: &str, board: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "lignes illisibles");
+    };
+    let raw = if payload.is_array() {
+        payload
+    } else {
+        payload.get("value").cloned().unwrap_or(Value::Null)
+    };
+    let rows = match normalize_rows(&raw) {
+        Ok(rows) => rows,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let key = row_key(team, board);
+    let stored = state.write(|db| {
+        let Some(project_data) = db.project_mut(org, project) else {
+            return false;
+        };
+        project_data.put_bucket(&key, json!({"id": "rows", "rows": rows}));
+        true
+    });
+    if !stored {
+        return fail(StatusCode::NOT_FOUND, "projet absent");
+    }
+    Json(page(rows)).into_response()
+}
+
+fn normalize_rows(raw: &Value) -> Result<Vec<Value>, &'static str> {
+    let Some(items) = raw.as_array() else {
+        return Err("lignes illisibles");
+    };
+    if items.is_empty() {
+        return Err("ligne par défaut requise");
+    }
+    let mut names = Vec::new();
+    let mut rows = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let name = match item.get("name") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Err(if index == 0 { "ligne par défaut requise" } else { "nom de ligne absent" });
+                }
+                Some(trimmed.to_string())
+            }
+            Some(_) => return Err("nom de ligne absent"),
+        };
+        if index == 0 && name.is_some() {
+            return Err("ligne par défaut requise");
+        }
+        if index > 0 && name.is_none() {
+            return Err("nom de ligne absent");
+        }
+        if let Some(label) = &name {
+            if names.iter().any(|existing: &String| existing.eq_ignore_ascii_case(label)) {
+                return Err("ligne déjà présente");
+            }
+            names.push(label.clone());
+        }
+        let id = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("row-{}", index + 1));
+        if rows.iter().any(|row: &Value| row["id"].as_str() == Some(id.as_str())) {
+            return Err("ligne déjà présente");
+        }
+        rows.push(json!({"id": id, "name": name}));
+    }
+    Ok(rows)
+}
+
+fn board_document(org: &str, project: &str, team: &str, name: &str, columns: Vec<Value>, rows: Vec<Value>) -> Value {
     let allowed = allowed_mappings(&columns);
     json!({
         "id": name.to_ascii_lowercase(),
         "name": name,
         "url": format!("/{org}/{project}/{team}/_apis/work/boards/{name}"),
         "columns": columns,
-        "rows": [{"id": "row-1", "name": null}],
+        "rows": rows,
         "allowedMappings": allowed
     })
 }

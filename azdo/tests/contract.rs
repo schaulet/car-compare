@@ -8557,3 +8557,127 @@ async fn board_columns_replace_for_one_team_and_keep_the_other() {
     assert_eq!(board["columns"][2]["name"], "Revue");
     assert_eq!(board["allowedMappings"]["User Story"][2], "En revue");
 }
+
+#[tokio::test]
+async fn board_rows_replace_for_one_team_and_keep_the_other() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let rows = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/rows?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", rows, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let defaults: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(defaults["count"], 1);
+    assert!(defaults["value"][0]["name"].is_null(), "{body}");
+    assert_eq!(defaults["value"][0]["id"], "row-1");
+
+    let rejected = [
+        (r#"{"name":null}"#, "lignes illisibles"),
+        (r#"[]"#, "ligne par défaut requise"),
+        (r#"[{"name":"Urgent"}]"#, "ligne par défaut requise"),
+        (r#"[{"name":" "}]"#, "ligne par défaut requise"),
+        (r#"[{"name":null},{"name":" "}]"#, "nom de ligne absent"),
+        (r#"[{"name":null},{"name":"Urgent"},{"name":"urgent"}]"#, "ligne déjà présente"),
+        (r#"[{"id":"row-1","name":null},{"id":"row-1","name":"Autre"}]"#, "ligne déjà présente"),
+    ];
+    for (payload, message) in rejected {
+        let (status, body, _) = call(&app, "PUT", rows, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["message"], message, "{body}");
+    }
+    let (status, body, _) = call(&app, "GET", rows, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let untouched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(untouched["count"], 1, "{body}");
+    assert!(!body.contains("Urgent"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        rows,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"name":null},{"name":"Urgent"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(saved["count"], 2);
+    assert!(saved["value"][0]["name"].is_null());
+    assert_eq!(saved["value"][0]["id"], "row-1");
+    assert_eq!(saved["value"][1]["name"], "Urgent");
+    assert_eq!(saved["value"][1]["id"], "row-2");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        rows,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"name":null},{"name":"Urgent"},{"name":"urgent"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body, _) = call(&app, "GET", rows, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 2);
+    assert_eq!(kept["value"][1]["name"], "Urgent");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/boards/Stories/rows?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Urgent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Autre/_apis/work/boards/Stories/rows?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 1);
+    assert!(!body.contains("Urgent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let columns: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(columns["count"], 4);
+    assert_eq!(columns["value"][1]["name"], "Active");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let board: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(board["rows"][1]["name"], "Urgent");
+    assert!(board["rows"][0]["name"].is_null());
+}

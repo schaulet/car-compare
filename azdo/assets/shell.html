@@ -62,6 +62,8 @@
     .state-failed, .state-error { background: #a4262c; }
     .state-pending { background: #f2cb1d; color: #323130; }
     .type { font-size: 12px; font-weight: 600; }
+    .lane { margin: 0 0 18px; }
+    .lane > h2 { margin: 0 0 8px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
     .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: start; }
     .col { background: var(--page); border: 1px solid var(--line); min-height: 240px; }
     .col h2 { margin: 0; padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -383,15 +385,28 @@
             const map = column.stateMappings || {};
             return map[kind] || column.name;
           }
+          const rowApi = boardApi.replace("/columns?", "/rows?");
+          const rowList = await api("GET", rowApi);
+          const lanes = rowList.value && rowList.value.length ? rowList.value : [{ id: "row-1", name: null }];
+          const knownLanes = new Set(lanes.map((lane) => lane.name || ""));
+          function laneOf(item) {
+            const name = item.fields?.["System.BoardLane"] || "";
+            return knownLanes.has(name) ? name : "";
+          }
           const note = "<p id='board-limit' class='error' hidden></p>";
-          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button></div>" + note + "<div class='board'>" + columns.map((column) => {
-            const cards = items.filter((item) => {
-              if (placed.has(item.id) || mappedState(column, item) !== (item.fields?.["System.State"] || "New")) return false;
-              placed.add(item.id);
-              return true;
-            }).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
-            const remove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
-            return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + remove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
+          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état et la ligne, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button><input id='lane-name' placeholder='Nouvelle ligne' /><button id='lane-add' type='button'>Ajouter une ligne</button></div>" + note + "<div class='lanes'>" + lanes.map((lane) => {
+            const label = lane.name || "Par défaut";
+            const remove = lane.name ? "<button class='lane-remove' type='button'>Retirer</button>" : "";
+            const board = "<div class='board'>" + columns.map((column) => {
+              const cards = items.filter((item) => {
+                if (placed.has(item.id) || laneOf(item) !== (lane.name || "") || mappedState(column, item) !== (item.fields?.["System.State"] || "New")) return false;
+                placed.add(item.id);
+                return true;
+              }).map((item) => "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div></article>").join("") || "<p class='sub empty'>Vide</p>";
+              const columnRemove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
+              return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + columnRemove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
+            }).join("") + "</div>";
+            return "<section class='lane' data-lane='" + esc(lane.name || "") + "'><h2><span>" + esc(label) + "</span>" + remove + "</h2>" + board + "</section>";
           }).join("") + "</div>";
           async function saveColumns(next) {
             try {
@@ -412,6 +427,28 @@
             next.splice(outgoing < 0 ? next.length : outgoing, 0, column);
             saveColumns(next);
           };
+          async function saveRows(next) {
+            try {
+              await api("PUT", rowApi, next);
+              location.reload();
+            } catch (error) {
+              const limit = document.getElementById("board-limit");
+              limit.hidden = false;
+              limit.textContent = error.message;
+            }
+          }
+          document.getElementById("lane-add").onclick = () => {
+            const name = document.getElementById("lane-name").value.trim();
+            if (!name) return;
+            saveRows(lanes.concat([{ name }]));
+          };
+          document.querySelectorAll(".lane-remove").forEach((button) => {
+            button.onclick = (event) => {
+              event.stopPropagation();
+              const lane = button.closest(".lane").dataset.lane;
+              saveRows(lanes.filter((item) => item.name !== lane));
+            };
+          });
           let draggedId = "";
           document.querySelectorAll(".card").forEach((card) => {
             card.ondragstart = (event) => {
@@ -451,7 +488,11 @@
               }
               const map = JSON.parse(column.dataset.map || "{}");
               const state = map[card.dataset.type] || column.dataset.name;
-              const patch = JSON.stringify([{ op: "replace", path: "/fields/System.State", value: state }]);
+              const lane = column.closest(".lane").dataset.lane || "";
+              const patch = JSON.stringify([
+                { op: "replace", path: "/fields/System.State", value: state },
+                { op: "replace", path: "/fields/System.BoardLane", value: lane },
+              ]);
               try {
                 await api("PATCH", root + "/wit/workitems/" + id + "?api-version=7.1", patch, "application/json-patch+json");
               } catch (error) {
