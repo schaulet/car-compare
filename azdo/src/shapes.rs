@@ -903,7 +903,7 @@ fn pull_requests(
                 .get("completionOptions")
                 .and_then(|options| text_of(options, "mergeStrategy"))
             {
-                if !strategy.eq_ignore_ascii_case("squash") && !strategy.eq_ignore_ascii_case("noFastForward") {
+                if !known_merge_strategy(&strategy) {
                     return fail(StatusCode::BAD_REQUEST, "stratégie de fusion inconnue");
                 }
             }
@@ -912,7 +912,13 @@ fn pull_requests(
                 Some(item) => {
                     let completed = text_of(&item, "status").as_deref() == Some("completed");
                     let item = if completed && previous.as_deref() != Some("completed") {
-                        let prepared = squash_requested(&item).then(|| prepare_squash(state, org, project, &item));
+                        let prepared = if squash_requested(&item) {
+                            Some(Prepared::Squash(prepare_squash(state, org, project, &item)))
+                        } else if rebase_requested(&item) {
+                            Some(Prepared::Rebase(prepare_rebase(state, org, project, &item)))
+                        } else {
+                            None
+                        };
                         finish_pull(state, org, project, &id, prepared).unwrap_or(item)
                     } else if completed {
                         finish_pull(state, org, project, &id, None).unwrap_or(item)
@@ -989,12 +995,19 @@ fn pull_tips(state: &AppState, org: &str, project: &str, pull: &Value) -> PullTi
             .find(|item| text_of(item, "name").as_deref() == Some(name))
             .and_then(|item| text_of(item, "objectId"))
     };
-    let source_id = object_of(&source_name).or_else(|| {
-        text_of(&pull["lastMergeSourceCommit"], "commitId").filter(|id| !id.is_empty())
-    });
-    let target_id = object_of(&target_name).or_else(|| {
-        text_of(&pull["lastMergeTargetCommit"], "commitId").filter(|id| !id.is_empty())
-    });
+    let frozen_source = text_of(&pull["lastMergeSourceCommit"], "commitId").filter(|id| !id.is_empty());
+    let frozen_target = text_of(&pull["lastMergeTargetCommit"], "commitId").filter(|id| !id.is_empty());
+    let (source_id, target_id) = if text_of(pull, "status").as_deref() == Some("completed")
+        && frozen_source.is_some()
+        && frozen_target.is_some()
+    {
+        (frozen_source, frozen_target)
+    } else {
+        (
+            object_of(&source_name).or(frozen_source),
+            object_of(&target_name).or(frozen_target),
+        )
+    };
     tips_from_commits(state, org, project, &repo_id, source_id, target_id)
 }
 
@@ -1434,10 +1447,40 @@ fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_i
     }
 }
 
+enum Prepared {
+    Squash(SquashPrep),
+    Rebase(RebasePrep),
+}
+
 struct SquashPrep {
     changes: Vec<Value>,
     message: String,
     delete_source: bool,
+}
+
+struct RebasePrep {
+    replay: Vec<ReplayCommit>,
+    delete_source: bool,
+    merge_after: bool,
+    merge_message: String,
+}
+
+struct ReplayCommit {
+    comment: String,
+    changes: Vec<Value>,
+}
+
+fn known_merge_strategy(strategy: &str) -> bool {
+    matches!(
+        strategy.to_ascii_lowercase().as_str(),
+        "squash" | "nofastforward" | "rebase" | "rebasemerge"
+    )
+}
+
+fn rebase_requested(pull: &Value) -> bool {
+    text_of(&pull["completionOptions"], "mergeStrategy").is_some_and(|strategy| {
+        strategy.eq_ignore_ascii_case("rebase") || strategy.eq_ignore_ascii_case("rebaseMerge")
+    })
 }
 
 fn squash_requested(pull: &Value) -> bool {
@@ -1497,7 +1540,82 @@ fn prepare_squash(state: &AppState, org: &str, project: &str, pull: &Value) -> S
     }
 }
 
-fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepared: Option<SquashPrep>) -> Option<Value> {
+fn prepare_rebase(state: &AppState, org: &str, project: &str, pull: &Value) -> RebasePrep {
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let tips = pull_tips(state, org, project, pull);
+    let mut replay = Vec::new();
+    for commit in tips.ahead.iter().rev() {
+        let commit_id = text_of(commit, "commitId").or_else(|| text_of(commit, "id")).unwrap_or_default();
+        if commit_id.is_empty() {
+            continue;
+        }
+        replay.push(ReplayCommit {
+            comment: text_of(commit, "comment").unwrap_or_else(|| "Mise à jour".into()),
+            changes: list(
+                state,
+                org,
+                project,
+                &format!("git/repositories/{repo_id}/commits/{commit_id}/changes"),
+            ),
+        });
+    }
+    let strategy = text_of(&pull["completionOptions"], "mergeStrategy").unwrap_or_default();
+    let source = text_of(pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
+    let target = text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+    let merge_message = text_of(&pull["completionOptions"], "mergeCommitMessage")
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| format!("Fusion de {source} dans {target}"));
+    RebasePrep {
+        replay,
+        delete_source: pull["completionOptions"].get("deleteSourceBranch").and_then(|value| value.as_bool()) == Some(true),
+        merge_after: strategy.eq_ignore_ascii_case("rebaseMerge"),
+        merge_message,
+    }
+}
+
+fn replay_commits(
+    stored: &mut crate::store::ProjectData,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pull_id: &str,
+    commits_key: &str,
+    mut parent: Option<String>,
+    replay: &[ReplayCommit],
+) -> Option<String> {
+    for (index, commit) in replay.iter().enumerate() {
+        let commit_id = object_id(&format!(
+            "rebase:{pull_id}:{index}:{}:{}",
+            commit.comment,
+            parent.clone().unwrap_or_default()
+        ));
+        let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+        stored.put_bucket(
+            commits_key,
+            json!({
+                "id": commit_id,
+                "commitId": commit_id,
+                "comment": commit.comment,
+                "author": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                "committer": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                "parents": parents,
+                "changeCounts": change_counts(&commit.changes),
+                "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{commit_id}")
+            }),
+        );
+        for change in &commit.changes {
+            stored.put_bucket(&format!("{commits_key}/{commit_id}/changes"), change.clone());
+        }
+        let snapshot = stored.list_bucket(&format!("git/repositories/{repo_id}/items"));
+        for blob in snapshot {
+            stored.put_bucket(&format!("{commits_key}/{commit_id}/blobs"), blob);
+        }
+        parent = Some(commit_id);
+    }
+    parent
+}
+
+fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepared: Option<Prepared>) -> Option<Value> {
     state.write(|db| {
         let stored = db.project_mut(org, project)?;
         let mut pull = stored.get_bucket("git/pullrequests", pull_id)?;
@@ -1515,9 +1633,59 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepar
         let commits_key = format!("git/repositories/{repo_id}/commits");
         let parent = stored.get_bucket(&refs_key, &target).and_then(|item| text_of(&item, "objectId"));
         let source_id = stored.get_bucket(&refs_key, &source).and_then(|item| text_of(&item, "objectId"));
-        let squash = prepared.is_some();
-        let delete_source = prepared.as_ref().is_some_and(|prep| prep.delete_source);
-        let (commit_id, comment, parents, changes) = if let Some(prep) = prepared {
+        if let Some(Prepared::Rebase(prep)) = prepared {
+            let base = parent.clone().unwrap_or_default();
+            let tip = replay_commits(stored, org, project, &repo_id, pull_id, &commits_key, parent.clone(), &prep.replay);
+            let rebased = tip.clone().unwrap_or_else(|| base.clone());
+            let landing = if prep.merge_after && !prep.replay.is_empty() {
+                let merge_id = object_id(&format!("rebase-merge:{pull_id}:{base}:{rebased}:{}", prep.merge_message));
+                stored.put_bucket(
+                    &commits_key,
+                    json!({
+                        "id": merge_id,
+                        "commitId": merge_id,
+                        "comment": prep.merge_message,
+                        "author": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                        "committer": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
+                        "parents": [json!(base), json!(rebased)],
+                        "changeCounts": change_counts(&[]),
+                        "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{merge_id}")
+                    }),
+                );
+                merge_id
+            } else {
+                rebased.clone()
+            };
+            stored.put_bucket(
+                &refs_key,
+                json!({"id": target, "name": target, "objectId": landing, "newObjectId": landing, "success": true}),
+            );
+            if prep.delete_source {
+                if let Some(bucket) = stored.buckets.get_mut(&refs_key) {
+                    bucket.remove(&source);
+                }
+            } else {
+                stored.put_bucket(
+                    &refs_key,
+                    json!({"id": source, "name": source, "objectId": rebased, "newObjectId": rebased, "success": true}),
+                );
+            }
+            pull["status"] = json!("completed");
+            pull["mergeStatus"] = json!("succeeded");
+            pull["closedDate"] = json!("2026-10-29T00:00:00Z");
+            pull["closedBy"] = json!({"displayName": "azurz", "uniqueName": "azurz"});
+            pull["lastMergeCommit"] = json!({"commitId": landing});
+            pull["lastMergeSourceCommit"] = json!({"commitId": rebased});
+            pull["lastMergeTargetCommit"] = json!({"commitId": base});
+            return Some(stored.put_bucket("git/pullrequests", pull));
+        }
+        let squash_prep = match prepared {
+            Some(Prepared::Squash(prep)) => Some(prep),
+            _ => None,
+        };
+        let squash = squash_prep.is_some();
+        let delete_source = squash_prep.as_ref().is_some_and(|prep| prep.delete_source);
+        let (commit_id, comment, parents, changes) = if let Some(prep) = squash_prep {
             let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
             let commit_id = object_id(&format!(
                 "squash:{pull_id}:{}:{}:{}",
@@ -1571,7 +1739,7 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepar
         pull["closedDate"] = json!("2026-10-29T00:00:00Z");
         pull["closedBy"] = json!({"displayName": "azurz", "uniqueName": "azurz"});
         pull["lastMergeCommit"] = json!({"commitId": commit_id});
-        pull["lastMergeSourceCommit"] = json!({"commitId": if squash { source_id.unwrap_or_default() } else { parent.clone().unwrap_or_default() }});
+        pull["lastMergeSourceCommit"] = json!({"commitId": if squash { source_id.unwrap_or_default() } else { source_id.clone().unwrap_or_else(|| parent.clone().unwrap_or_default()) }});
         pull["lastMergeTargetCommit"] = json!({"commitId": parent.unwrap_or_default()});
         Some(stored.put_bucket("git/pullrequests", pull))
     })
