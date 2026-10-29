@@ -21684,3 +21684,277 @@ async fn removing_one_release_folder_keeps_the_sibling_and_the_other_project() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("dossier introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_wiki_comment_keeps_the_sibling_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn wiki(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/wiki/wikis?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    async fn page(app: &axum::Router, auth: &str, project: &str, wiki_id: &str, path: &str, content: &str) {
+        let (status, body, _) = call(
+            app,
+            "PUT",
+            &format!("/azurz/{project}/_apis/wiki/wikis/{wiki_id}/pages?path={path}&api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"content":"{content}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let pompe = wiki(&app, &auth, "AzurzDemo", "Pompe").await;
+    let ada = wiki(&app, &auth, "AzurzDemo", "Ada").await;
+    assert_eq!(pompe, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(ada, "00000000-0000-0000-0000-000000000002");
+    page(&app, &auth, "AzurzDemo", &pompe, "/manuel", "pompe").await;
+    page(&app, &auth, "AzurzDemo", &pompe, "/schema", "schema").await;
+    page(&app, &auth, "AzurzDemo", &ada, "/manuel", "ada").await;
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = wiki(&app, &auth, "Atelier", "Pompe").await;
+    page(&app, &auth, "Atelier", &atelier, "/manuel", "atelier").await;
+
+    let comments = format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments?api-version=7.1");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("texte absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some(r#"{"text":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("texte absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &comments, Some(&auth), None, "application/json", Some(r#"{"text":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("texte absent"), "{body}");
+    let (status, body, _) = call(&app, "DELETE", &comments, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/absent/pages/%2Fmanuel/comments?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"release"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("wiki introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fabsente/comments?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"release"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("page introuvable"), "{body}");
+
+    async fn note(app: &axum::Router, auth: &str, project: &str, wiki_id: &str, path: &str, text: &str) -> serde_json::Value {
+        let encoded = path.replace('/', "%2F");
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/{project}/_apis/wiki/wikis/{wiki_id}/pages/{encoded}/comments?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"text":"{text}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    let release = note(&app, &auth, "AzurzDemo", &pompe, "/manuel", " release ").await;
+    assert_eq!(release["id"], 1);
+    assert_eq!(release["text"], "release");
+    assert_eq!(release["pageId"], "/manuel");
+    assert_eq!(release["wikiId"], pompe);
+    assert!(release["url"].as_str().unwrap().contains(&format!("/pages/%2Fmanuel/comments/1")), "{release}");
+    let sibling = note(&app, &auth, "AzurzDemo", &pompe, "/manuel", "preprod").await;
+    assert_eq!(sibling["id"], 2);
+    assert_eq!(sibling["text"], "preprod");
+    let other_page = note(&app, &auth, "AzurzDemo", &pompe, "/schema", "annexe").await;
+    assert_eq!(other_page["id"], 1);
+    assert_eq!(other_page["text"], "annexe");
+    let ada_note = note(&app, &auth, "AzurzDemo", &ada, "/manuel", "release").await;
+    assert_eq!(ada_note["id"], 1);
+    let atelier_note = note(&app, &auth, "Atelier", &atelier, "/manuel", "release").await;
+    assert_eq!(atelier_note["id"], 1);
+    assert_eq!(atelier_note["text"], "release");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/9?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/abc?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/1/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &comments, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["value"][0]["id"], 2);
+    assert_eq!(left["value"][0]["text"], "preprod");
+    assert_eq!(left["value"][0]["pageId"], "/manuel");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages?path=/manuel&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_page["content"], "pompe");
+    assert_eq!(kept_page["path"], "/manuel");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fschema/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let schema: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(schema["text"], "annexe");
+    assert_eq!(schema["pageId"], "/schema");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{ada}/pages/%2Fmanuel/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["text"], "release");
+    assert_eq!(ada_kept["wikiId"], ada);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/wiki/wikis/{atelier}/pages/%2Fmanuel/comments?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(other["count"], 1);
+    assert_eq!(other["value"][0]["text"], "release");
+    assert_eq!(other["value"][0]["id"], 1);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/wiki/wikis/{atelier}/pages?path=/manuel&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier_page["content"], "atelier");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wiki/wikis/{pompe}/pages/%2Fmanuel/comments/1?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("commentaire introuvable"), "{body}");
+}

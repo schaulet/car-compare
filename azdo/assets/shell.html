@@ -1967,9 +1967,43 @@
             const listed = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages?api-version=7.1");
             pages = listed.value || [];
           }
+          const commentPage = pages[0] ? pages[0].path : "";
+          let comments = [];
+          if (wiki && commentPage) {
+            const listedComments = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/pages/" + encodeURIComponent(commentPage) + "/comments?api-version=7.1");
+            comments = listedComments.value || [];
+          }
+          const commentTable = comments.length ? "<table id='wiki-comments'><thead><tr><th></th><th>Texte</th><th>Page</th></tr></thead><tbody>" + comments.map((item) => "<tr><td><button type='button' class='wcomment-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.text) + "' data-wiki='" + esc(wiki.id) + "' data-page='" + esc(item.pageId || commentPage) + "'>Retirer</button></td><td>" + esc(item.text) + "</td><td>" + esc(item.pageId || commentPage) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wiki-comment-empty' class='sub'>Aucun commentaire.</p>";
           const table = wikis.length ? "<table id='wikis'><thead><tr><th></th><th>Nom</th><th>ID</th></tr></thead><tbody>" + wikis.map((item) => "<tr><td><button type='button' class='wiki-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.id) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wiki-empty' class='sub'>Aucun wiki.</p>";
           const list = pages.length ? "<ul id='pages'>" + pages.map((page) => "<li><button type='button' class='page' data-path='" + esc(page.path) + "'>" + esc(page.path) + "</button></li>").join("") + "</ul>" : "<p id='pages-empty' class='sub'>Aucune page.</p>";
-          view.innerHTML = "<h1>Wiki</h1><div class='command'><input id='wiki-name' placeholder='Pompe' /><button id='wiki-create' type='button'>Créer le wiki</button></div>" + table + "<p class='sub'>" + esc(wiki ? wiki.name : "") + "</p><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button><button id='page-delete' type='button'>Supprimer</button></div><div class='command'><input id='page-new-path' placeholder='/Nouveau chemin' /><button id='page-move' type='button'>Déplacer</button></div><p id='wiki-error' class='sub'></p>";
+          view.innerHTML = "<h1>Wiki</h1><h2>Commentaires</h2><div class='command'><input id='wcomment-wiki' placeholder='Pompe' value='" + esc(wiki ? wiki.name : "") + "' /><input id='wcomment-page' placeholder='/manuel' value='" + esc(commentPage) + "' /><input id='wcomment-text' placeholder='release' /><button id='wcomment-add' type='button'>Ajouter</button></div>" + commentTable + "<p id='wcomment-error' class='sub'></p><div class='command'><input id='wiki-name' placeholder='Pompe' /><button id='wiki-create' type='button'>Créer le wiki</button></div>" + table + "<p class='sub'>" + esc(wiki ? wiki.name : "") + "</p><div class='command'><input id='page-path' placeholder='/Accueil' /><button id='page-load' type='button'>Ouvrir</button></div>" + list + "<textarea id='page-content' rows='10'></textarea><div class='command'><button id='page-save' type='button'>Enregistrer la page</button><button id='page-delete' type='button'>Supprimer</button></div><div class='command'><input id='page-new-path' placeholder='/Nouveau chemin' /><button id='page-move' type='button'>Déplacer</button></div><p id='wiki-error' class='sub'></p>";
+          document.getElementById("wcomment-add").onclick = async () => {
+            const error = document.getElementById("wcomment-error");
+            error.textContent = "";
+            const wikiName = document.getElementById("wcomment-wiki").value.trim() || "Pompe";
+            const pagePath = document.getElementById("wcomment-page").value.trim() || "/manuel";
+            const text = document.getElementById("wcomment-text").value.trim() || "release";
+            try {
+              await api("POST", root + "/wiki/wikis/" + encodeURIComponent(wikiName) + "/pages/" + encodeURIComponent(pagePath) + "/comments?api-version=7.1", { text });
+            } catch (err) {
+              error.textContent = err.message;
+              return;
+            }
+            location.reload();
+          };
+          document.querySelectorAll("button.wcomment-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wcomment-error");
+              error.textContent = "";
+              try {
+                await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(button.dataset.wiki) + "/pages/" + encodeURIComponent(button.dataset.page) + "/comments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (err) {
+                error.textContent = err.message;
+                return;
+              }
+              location.reload();
+            };
+          });
           async function loadPage(path) {
             if (!wiki) return;
             document.getElementById("page-path").value = path;

@@ -5126,6 +5126,21 @@ fn wiki_pages_key(wiki_key: &str) -> String {
     format!("wiki/wikis/{wiki_key}/pages")
 }
 
+fn wiki_comments_key(wiki_key: &str, page_path: &str) -> String {
+    format!("wiki/wikis/{wiki_key}/pages/{page_path}/comments")
+}
+
+fn pct_encode_segment(raw: &str) -> String {
+    let mut out = String::new();
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn wiki_page(org: &str, project: &str, wiki_key: &str, path: &str, content: &str) -> Value {
     json!({
         "id": path,
@@ -5276,6 +5291,107 @@ fn move_wiki_page(state: &AppState, method: &Method, org: &str, project: &str, w
     Json(moved).into_response()
 }
 
+fn wiki_comment_text(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(text) = payload.as_object().and_then(|object| object.get("text")).and_then(|value| value.as_str()) else {
+        return Err("texte absent");
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("texte absent");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn dress_wiki_comment(org: &str, project: &str, wiki_key: &str, page_path: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("pageId".into(), json!(page_path));
+        object.insert("wikiId".into(), json!(wiki_key));
+        object.insert(
+            "url".into(),
+            json!(format!(
+                "/{org}/{project}/_apis/wiki/wikis/{wiki_key}/pages/{}/comments/{id}",
+                pct_encode_segment(page_path)
+            )),
+        );
+    }
+    item
+}
+
+fn wiki_page_comments(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    wiki_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(wiki) = resolve_wiki(state, org, project, wiki_id) else {
+        return fail(StatusCode::NOT_FOUND, "wiki introuvable");
+    };
+    let wiki_key = value_key(&wiki["id"]);
+    let page_path = page_path_of(rest.get(4).map(String::as_str).unwrap_or(""));
+    if page_path.is_empty() || get_item(state, org, project, &wiki_pages_key(&wiki_key), &page_path).is_none() {
+        return fail(StatusCode::NOT_FOUND, "page introuvable");
+    }
+    let key = wiki_comments_key(&wiki_key, &page_path);
+    if rest.len() == 6 {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &key);
+            rows.sort_by_key(|item| json_i64(&item["id"]).unwrap_or(0));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_wiki_comment(org, project, &wiki_key, &page_path, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let text = match wiki_comment_text(body) {
+                Ok(text) => text,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = list(state, org, project, &key)
+                .into_iter()
+                .filter_map(|item| json_i64(&item["id"]))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let item = json!({"id": next, "text": text});
+            put_item(state, org, project, &key, item.clone());
+            return Json(dress_wiki_comment(org, project, &wiki_key, &page_path, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() == 7 {
+        let Ok(comment_id) = rest[6].parse::<i64>() else {
+            return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+        };
+        let id = comment_id.to_string();
+        let Some(item) = get_item(state, org, project, &key, &id) else {
+            return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+        };
+        if method == Method::GET {
+            return Json(dress_wiki_comment(org, project, &wiki_key, &page_path, item)).into_response();
+        }
+        if method == Method::DELETE {
+            return if delete_item(state, org, project, &key, &id) {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "commentaire introuvable")
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "commentaire introuvable")
+}
+
 fn wikis(
     state: &AppState,
     method: &Method,
@@ -5309,6 +5425,12 @@ fn wikis(
         return Json(item).into_response();
     }
     let wiki_id = rest.get(2).map(String::as_str).unwrap_or("");
+    if rest.len() >= 6
+        && rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("pages"))
+        && rest.get(5).is_some_and(|value| value.eq_ignore_ascii_case("comments"))
+    {
+        return wiki_page_comments(state, method, org, project, wiki_id, rest, body);
+    }
     if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("pagemoves")) {
         return move_wiki_page(state, method, org, project, wiki_id, body);
     }
