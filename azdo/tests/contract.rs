@@ -9113,3 +9113,320 @@ async fn work_item_delete_moves_it_to_the_recycle_bin_and_restore_brings_it_back
         .collect();
     assert!(titles.contains(&"Pompe"), "{body}");
 }
+
+#[tokio::test]
+async fn work_item_comment_can_be_revised_and_removed() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workItems/40/comments?api-version=7.1-preview.3",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"absent"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "work item introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = created["id"].as_i64().unwrap();
+    let rev = created["rev"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire illisible");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":" "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire absent");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["totalCount"], 0);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"Pompe à réviser"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(first["id"], 1);
+    assert_eq!(first["version"], 1);
+    assert_eq!(first["text"], "Pompe à réviser");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"Voisin"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(second["id"], 2);
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":" "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire absent");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let unchanged: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(unchanged["text"], "Pompe à réviser");
+    assert_eq!(unchanged["version"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/9?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/2?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire illisible");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/2?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let neighbor: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(neighbor["text"], "Voisin");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"Pompe révisée"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revised: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(revised["text"], "Pompe révisée");
+    assert_eq!(revised["version"], 2);
+    assert_eq!(revised["modifiedBy"]["displayName"], "azurz");
+    assert_eq!(revised["modifiedBy"]["uniqueName"], "azurz");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2);
+    assert_eq!(listed["comments"][1]["text"], "Voisin");
+    assert_eq!(listed["comments"][1]["version"], 1);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(left["count"], 1);
+    assert_eq!(left["comments"][0]["text"], "Voisin");
+    assert_eq!(left["comments"][0]["id"], 2);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"encore"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire introuvable");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments/1?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["message"], "commentaire introuvable");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let item: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(item["rev"], rev);
+    assert_eq!(item["fields"]["System.Title"], "Pompe");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"workitem.commented","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"text":"Pompe signalée"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(again["id"], 3);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/hooks/inbox?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let inbox: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let texts: Vec<&str> = inbox["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("resource").and_then(|resource| resource.get("text")).and_then(|value| value.as_str()))
+        .collect();
+    assert!(texts.contains(&"Pompe signalée"), "{body}");
+}

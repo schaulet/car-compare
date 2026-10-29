@@ -86,7 +86,10 @@
     .timeline { list-style: none; margin: 0; padding: 0; }
     .timeline li { padding: 4px 0; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .row[hidden] { display: none; }
     .error { color: #a4262c; }
+    li.note { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+    li.note .note-text { flex: 1; min-width: 8em; }
     @media (max-width: 900px) {
       .layout { grid-template-columns: 1fr; }
       nav { display: flex; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -227,7 +230,7 @@
       }
       const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
       const assigned = assignedName(item);
-      const notes = (comments.comments || []).map((note) => "<li>" + esc(note.text) + "</li>").join("") || "<li>Aucun commentaire.</li>";
+      const notes = (comments.comments || []).map((note) => "<li class='note' data-id='" + note.id + "'><span class='note-text'>" + esc(note.text) + "</span><button class='note-edit' type='button'>Modifier</button><button class='note-delete' type='button'>Retirer</button></li>").join("") || "<li>Aucun commentaire.</li>";
       const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
       const history = (updates.value || []).map((update) => {
         const fields = update.fields || {};
@@ -256,7 +259,8 @@
         "<div class='command'><button id='wi-save' type='button'>Enregistrer</button><button id='wi-delete' type='button'>Supprimer</button></div>" +
         "<h3>Liens</h3><ul>" + links + "</ul>" +
         "<h3>Historique</h3><ul id='wi-updates'>" + history + "</ul></div>" +
-        "<aside><h3>Discussion</h3><ul>" + notes + "</ul>" +
+        "<aside><h3>Discussion</h3><ul id='wi-notes'>" + notes + "</ul>" +
+        "<div id='note-editor' class='row' hidden><input id='note-edit' placeholder='Commentaire révisé' style='flex:1' /><button id='note-save' type='button'>Enregistrer</button></div>" +
         "<div class='row'><input id='wi-note' placeholder='Commentaire' style='flex:1' /><button id='wi-comment' type='button'>Ajouter</button></div></aside></div>";
       document.getElementById("view").appendChild(panel);
       panel.querySelector("#wi-save").onclick = async () => {
@@ -290,8 +294,50 @@
         }
         location.href = location.pathname;
       };
+      let editing = "";
+      panel.querySelectorAll(".note-edit").forEach((button) => {
+        button.onclick = () => {
+          const row = button.closest(".note");
+          editing = row.dataset.id;
+          const editor = panel.querySelector("#note-editor");
+          editor.hidden = false;
+          panel.querySelector("#note-edit").value = row.querySelector(".note-text").textContent;
+        };
+      });
+      panel.querySelector("#note-save").onclick = async () => {
+        if (!editing) return;
+        try {
+          await api("PATCH", root + "/wit/workItems/" + id + "/comments/" + editing + "?api-version=7.1-preview.3", { text: panel.querySelector("#note-edit").value });
+        } catch (error) {
+          const note = panel.querySelector("#wi-error");
+          note.hidden = false;
+          note.textContent = error.message;
+          return;
+        }
+        location.reload();
+      };
+      panel.querySelectorAll(".note-delete").forEach((button) => {
+        button.onclick = async () => {
+          try {
+            await api("DELETE", root + "/wit/workItems/" + id + "/comments/" + button.closest(".note").dataset.id + "?api-version=7.1-preview.3");
+          } catch (error) {
+            const note = panel.querySelector("#wi-error");
+            note.hidden = false;
+            note.textContent = error.message;
+            return;
+          }
+          location.reload();
+        };
+      });
       panel.querySelector("#wi-comment").onclick = async () => {
-        await api("POST", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3", { text: panel.querySelector("#wi-note").value });
+        try {
+          await api("POST", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3", { text: panel.querySelector("#wi-note").value });
+        } catch (error) {
+          const note = panel.querySelector("#wi-error");
+          note.hidden = false;
+          note.textContent = error.message;
+          return;
+        }
         location.reload();
       };
     }
@@ -1598,10 +1644,11 @@
             const commit = resource.commits && resource.commits[0] && resource.commits[0].comment;
             if (commit) return commit;
             if (resource.buildNumber) return resource.buildNumber + " " + (resource.result || "");
+            if (resource.text) return resource.text;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1642,6 +1689,9 @@
               if (event === "git.pullrequest.merged") {
                 await api("PATCH", pullPath + "?api-version=7.1", { status: "completed" });
               }
+            } else if (event === "workitem.commented") {
+              const created = await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [{ op: "add", path: "/fields/System.Title", value: title }], "application/json-patch+json");
+              await api("POST", root + "/wit/workItems/" + created.id + "/comments?api-version=7.1-preview.3", { text: title });
             } else if (event === "workitem.deleted" || event === "workitem.restored") {
               const created = await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [{ op: "add", path: "/fields/System.Title", value: title }], "application/json-patch+json");
               await api("DELETE", root + "/wit/workitems/" + created.id + "?api-version=7.1");

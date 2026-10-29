@@ -414,16 +414,62 @@ impl ProjectData {
             return Err(format!("work item {id} introuvable"));
         }
         let notes = self.comments.entry(id).or_default();
-        let comment_id = notes.len() as i64 + 1;
+        let comment_id = notes.iter().filter_map(|note| note.get("id").and_then(|value| value.as_i64())).max().unwrap_or(0) + 1;
         let note = json!({
             "id": comment_id,
             "text": text,
             "workItemId": id,
+            "version": 1,
             "createdBy": {"displayName": "azurz", "uniqueName": "azurz"},
             "createdDate": "2026-10-29T00:00:00Z"
         });
         notes.push(note.clone());
         Ok(note)
+    }
+
+    pub fn update_comment(&mut self, work_item: i64, comment_id: i64, text: &str) -> Result<Value, &'static str> {
+        if !self.work_items.contains_key(&work_item) {
+            return Err("work item introuvable");
+        }
+        let notes = self.comments.get_mut(&work_item).ok_or("commentaire introuvable")?;
+        let note = notes
+            .iter_mut()
+            .find(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id) && note.get("isDeleted").and_then(|value| value.as_bool()) != Some(true))
+            .ok_or("commentaire introuvable")?;
+        let version = note.get("version").and_then(|value| value.as_i64()).unwrap_or(1) + 1;
+        if let Some(object) = note.as_object_mut() {
+            object.insert("text".into(), json!(text));
+            object.insert("version".into(), json!(version));
+            object.insert("modifiedBy".into(), json!({"displayName": "azurz", "uniqueName": "azurz"}));
+            object.insert("modifiedDate".into(), json!("2026-10-29T00:00:00Z"));
+        }
+        Ok(note.clone())
+    }
+
+    pub fn delete_comment(&mut self, work_item: i64, comment_id: i64) -> Result<(), &'static str> {
+        if !self.work_items.contains_key(&work_item) {
+            return Err("work item introuvable");
+        }
+        let notes = self.comments.get_mut(&work_item).ok_or("commentaire introuvable")?;
+        let note = notes
+            .iter_mut()
+            .find(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id) && note.get("isDeleted").and_then(|value| value.as_bool()) != Some(true))
+            .ok_or("commentaire introuvable")?;
+        if let Some(object) = note.as_object_mut() {
+            object.insert("isDeleted".into(), json!(true));
+        }
+        Ok(())
+    }
+
+    pub fn visible_comments(&self, work_item: i64) -> Option<Vec<Value>> {
+        let notes = self.comments.get(&work_item)?;
+        Some(
+            notes
+                .iter()
+                .filter(|note| note.get("isDeleted").and_then(|value| value.as_bool()) != Some(true))
+                .cloned()
+                .collect(),
+        )
     }
 
     pub fn add_attachment(&mut self, name: &str, bytes: &[u8]) -> Value {

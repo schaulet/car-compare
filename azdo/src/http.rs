@@ -455,29 +455,7 @@ impl AppState {
             return Json(json!({"count": history.len(), "value": history})).into_response();
         }
         if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("comments") {
-            let Ok(id) = rest[2].parse::<i64>() else {
-                return fail(StatusCode::NOT_FOUND, "work item introuvable");
-            };
-            if method == Method::POST {
-                let payload = parse_json(body).unwrap_or(json!({}));
-                let text = payload.get("text").and_then(|value| value.as_str()).unwrap_or("").to_string();
-                let note = self.write(|db| {
-                    db.project_mut(org, project)
-                        .and_then(|stored| stored.add_comment(id, &text).ok())
-                });
-                return match note {
-                    Some(note) => Json(note).into_response(),
-                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
-                };
-            }
-            let notes = self.read(|db| {
-                db.project(org, project)
-                    .and_then(|stored| stored.comments.get(&id).cloned())
-            });
-            return match notes {
-                Some(notes) => Json(json!({"count": notes.len(), "totalCount": notes.len(), "comments": notes})).into_response(),
-                None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
-            };
+            return self.work_item_comments(method, org, project, rest, body);
         }
         if rest.len() == 2 && method == Method::GET {
             let ids = query_param(query, "ids");
@@ -552,6 +530,118 @@ impl AppState {
             }
         }
         fail(StatusCode::NOT_FOUND, "route work item inconnue")
+    }
+
+    fn work_item_comments(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+        let Some(id) = rest.get(2).and_then(|value| value.parse::<i64>().ok()) else {
+            return fail(StatusCode::NOT_FOUND, "work item introuvable");
+        };
+        let comment_id = if rest.len() >= 5 {
+            match rest[4].parse::<i64>() {
+                Ok(value) => Some(value),
+                Err(_) => return fail(StatusCode::NOT_FOUND, "commentaire introuvable"),
+            }
+        } else {
+            None
+        };
+        let live = self.read(|db| {
+            db.project(org, project)
+                .and_then(|stored| stored.work_items.get(&id).cloned())
+                .is_some()
+        });
+        if matches!(*method, Method::POST | Method::PATCH | Method::DELETE) && !live {
+            return fail(StatusCode::NOT_FOUND, "work item introuvable");
+        }
+        if method == Method::POST {
+            if comment_id.is_some() {
+                return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+            }
+            let Some(text) = readable_comment(body) else {
+                return fail(StatusCode::BAD_REQUEST, "commentaire illisible");
+            };
+            if text.trim().is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "commentaire absent");
+            }
+            let created = self.write(|db| {
+                db.project_mut(org, project)
+                    .map(|stored| stored.add_comment(id, &text))
+            });
+            return match created {
+                Some(Ok(note)) => {
+                    crate::shapes::deliver_work_item(self, org, project, "workitem.commented", &note);
+                    Json(note).into_response()
+                }
+                _ => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+            };
+        }
+        if method == Method::PATCH || method == Method::DELETE {
+            let Some(comment_id) = comment_id else {
+                return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+            };
+            let present = self.read(|db| {
+                db.project(org, project).is_some_and(|stored| {
+                    stored.visible_comments(id).is_some_and(|notes| {
+                        notes.iter().any(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id))
+                    })
+                })
+            });
+            if !present {
+                return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+            }
+            if method == Method::DELETE {
+                let removed = self.write(|db| {
+                    db.project_mut(org, project)
+                        .map(|stored| stored.delete_comment(id, comment_id))
+                });
+                return match removed {
+                    Some(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+                    Some(Err(message)) => fail(StatusCode::NOT_FOUND, message),
+                    None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+                };
+            }
+            let Some(text) = readable_comment(body) else {
+                return fail(StatusCode::BAD_REQUEST, "commentaire illisible");
+            };
+            if text.trim().is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "commentaire absent");
+            }
+            let updated = self.write(|db| {
+                db.project_mut(org, project)
+                    .map(|stored| stored.update_comment(id, comment_id, &text))
+            });
+            return match updated {
+                Some(Ok(note)) => {
+                    crate::shapes::deliver_work_item(self, org, project, "workitem.commented", &note);
+                    Json(note).into_response()
+                }
+                Some(Err(message)) => fail(StatusCode::NOT_FOUND, message),
+                None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+            };
+        }
+        if method == Method::GET {
+            if let Some(comment_id) = comment_id {
+                let found = self.read(|db| {
+                    db.project(org, project).and_then(|stored| {
+                        stored.visible_comments(id).and_then(|notes| {
+                            notes.into_iter().find(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id))
+                        })
+                    })
+                });
+                return match found {
+                    Some(note) => Json(note).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "commentaire introuvable"),
+                };
+            }
+            let listed = self.read(|db| db.project(org, project).and_then(|stored| stored.visible_comments(id)));
+            return match listed {
+                Some(notes) => {
+                    let count = notes.len();
+                    Json(json!({"count": count, "totalCount": count, "comments": notes})).into_response()
+                }
+                None => fail(StatusCode::NOT_FOUND, "work item introuvable"),
+            };
+        }
+        fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
     }
 
     fn recycle_bin(&self, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
@@ -1007,6 +1097,14 @@ fn split_api(path: &str) -> Option<(Option<String>, Option<String>, Option<Strin
     } else {
         None
     }
+}
+
+fn readable_comment(body: &[u8]) -> Option<String> {
+    parse_json(body)?
+        .as_object()
+        .and_then(|object| object.get("text"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 pub(crate) fn parse_json(body: &[u8]) -> Option<Value> {
