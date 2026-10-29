@@ -77,6 +77,9 @@ fn tfvc(state: &AppState, method: &Method, org: &str, project: &str, rest: &[Str
     if resource == "changesets" {
         return changesets(state, method, org, project, rest, body);
     }
+    if resource == "shelvesets" {
+        return shelvesets(state, method, org, project, rest, body);
+    }
     if resource == "items" && method == Method::GET {
         ensure_tfvc_root(state, org, project);
         let path = crate::http::query_param(query, "path").map(pct_decode).unwrap_or_else(|| "$/".into());
@@ -159,6 +162,116 @@ fn changesets(state: &AppState, method: &Method, org: &str, project: &str, rest:
         };
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn shelvesets(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "tfvc/shelvesets";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = list_project(state, org, project, key);
+            rows.sort_by(|left, right| value_text(&left["id"]).cmp(&value_text(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_shelveset(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, comment) = match shelveset_create(body) {
+                Ok(pair) => pair,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let existing = list_project(state, org, project, key);
+            if existing.iter().any(|item| text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name))) {
+                return fail(StatusCode::BAD_REQUEST, "étagère existante");
+            }
+            let next = existing
+                .iter()
+                .filter_map(|item| text(item, "id"))
+                .filter_map(|id| id.strip_prefix("shelf-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let id = format!("shelf-{next}");
+            let item = json!({
+                "id": id,
+                "name": name,
+                "comment": comment,
+                "owner": {"displayName": "azurz", "uniqueName": "azurz"},
+                "createdDate": "2026-10-29T00:00:00Z"
+            });
+            put_project(state, org, project, key, item.clone());
+            return Json(dress_shelveset(org, project, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "étagère introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match get_project(state, org, project, key, id) {
+            Some(item) => Json(dress_shelveset(org, project, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "étagère introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = get_project(state, org, project, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "étagère introuvable");
+        };
+        let stored_id = value_text(&found["id"]);
+        let removed = delete_project(state, org, project, key, &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "étagère introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn shelveset_create(body: &[u8]) -> Result<(String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("étagère illisible");
+    };
+    let Some(name) = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    let comment = match object.get("comment") {
+        None => String::new(),
+        Some(value) => {
+            let Some(text) = value.as_str() else {
+                return Err("commentaire absent");
+            };
+            text.trim().to_string()
+        }
+    };
+    Ok((name, comment))
+}
+
+fn dress_shelveset(org: &str, project: &str, mut item: Value) -> Value {
+    let id = text(&item, "id").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/tfvc/shelvesets/{id}")));
+    }
+    item
+}
+
+fn delete_project(state: &AppState, org: &str, project: &str, key: &str, id: &str) -> bool {
+    state.write(|db| {
+        db.project_mut(org, project)
+            .and_then(|stored| stored.buckets.get_mut(key))
+            .is_some_and(|bucket| bucket.remove(id))
+    })
 }
 
 fn search(state: &AppState, method: &Method, org: &str, project: Option<&str>, rest: &[String], body: &[u8]) -> Response {
