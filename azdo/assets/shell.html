@@ -193,17 +193,34 @@
       const item = await api("GET", root + "/wit/workitems/" + id + "?api-version=7.1");
       const fields = item.fields || {};
       const comments = await api("GET", root + "/wit/workItems/" + id + "/comments?api-version=7.1-preview.3");
+      const updates = await api("GET", root + "/wit/workItems/" + id + "/updates?api-version=7.1");
       const panel = document.createElement("section");
       panel.className = "panel";
       const states = ["New", "Active", "Resolved", "Closed"].map((state) => "<option" + (state === fields["System.State"] ? " selected" : "") + ">" + state + "</option>").join("");
       const notes = (comments.comments || []).map((note) => "<li>" + esc(note.text) + "</li>").join("") || "<li>Aucun commentaire.</li>";
       const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
+      const history = (updates.value || []).map((update) => {
+        const fields = update.fields || {};
+        const bits = Object.keys(fields).map((key) => {
+          const change = fields[key] || {};
+          const name = key.split(".").pop();
+          if (change.oldValue != null && change.newValue != null) return name + " " + change.oldValue + " → " + change.newValue;
+          if (change.newValue != null) return name + " " + change.newValue;
+          return name + " retiré";
+        });
+        const added = update.relations && update.relations.added ? update.relations.added.length : 0;
+        const removed = update.relations && update.relations.removed ? update.relations.removed.length : 0;
+        if (added) bits.push(added + " lien ajouté");
+        if (removed) bits.push(removed + " lien retiré");
+        return "<li>Révision " + esc(update.rev) + " · " + esc(bits.join(", ") || "aucun champ") + "</li>";
+      }).join("") || "<li>Aucune mise à jour.</li>";
       panel.innerHTML = "<div class='form'><div><h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
         "<div class='row'><input id='wi-title' value='" + esc(fields["System.Title"] || "") + "' style='flex:1' />" +
         "<select id='wi-state'>" + states + "</select></div>" +
         "<textarea id='wi-desc' rows='6'>" + esc(fields["System.Description"] || "") + "</textarea>" +
         "<div class='command'><button id='wi-save' type='button'>Enregistrer</button></div>" +
-        "<h3>Liens</h3><ul>" + links + "</ul></div>" +
+        "<h3>Liens</h3><ul>" + links + "</ul>" +
+        "<h3>Historique</h3><ul id='wi-updates'>" + history + "</ul></div>" +
         "<aside><h3>Discussion</h3><ul>" + notes + "</ul>" +
         "<div class='row'><input id='wi-note' placeholder='Commentaire' style='flex:1' /><button id='wi-comment' type='button'>Ajouter</button></div></aside></div>";
       document.getElementById("view").appendChild(panel);

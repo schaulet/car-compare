@@ -5877,3 +5877,159 @@ async fn pull_request_labels_are_shared_and_can_be_removed() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+#[tokio::test]
+async fn work_item_updates_record_field_and_relation_changes() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe historique"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = created["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/updates?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updates: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(updates["count"], 1);
+    assert_eq!(updates["value"][0]["rev"], 1);
+    assert_eq!(updates["value"][0]["workItemId"], id);
+    assert_eq!(updates["value"][0]["fields"]["System.Title"]["newValue"], "Pompe historique");
+    assert!(updates["value"][0]["fields"]["System.Title"].get("oldValue").is_none());
+    assert!(updates["value"][0].get("relations").is_none());
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/updates/2?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let update: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(update["rev"], 2);
+    assert_eq!(update["fields"]["System.State"]["oldValue"], "New");
+    assert_eq!(update["fields"]["System.State"]["newValue"], "Active");
+    assert!(update["fields"].get("System.Title").is_none(), "{body}");
+    let artifact = "vstfs:///Git/PullRequestId/azurz%2Fdemo%2F1";
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&format!(
+            r#"[{{"op":"add","path":"/relations/-","value":{{"rel":"ArtifactLink","url":"{artifact}"}}}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/updates/3?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let update: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(update["relations"]["added"][0]["rel"], "ArtifactLink");
+    assert_eq!(update["relations"]["added"][0]["url"], artifact);
+    assert!(update["relations"]["removed"].as_array().unwrap().is_empty());
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"remove","path":"/relations/0"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/updates/4?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let update: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(update["relations"]["removed"][0]["url"], artifact);
+    assert!(update["relations"]["added"].as_array().unwrap().is_empty());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/revisions?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revisions: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(revisions["count"], 4);
+    assert_eq!(revisions["value"][3]["rev"], 4);
+    assert_eq!(revisions["value"][3]["fields"]["System.State"], "Active");
+    assert!(revisions["value"][3].get("revisedBy").is_none());
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workItems/{id}/updates/9?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workItems/99/updates?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}

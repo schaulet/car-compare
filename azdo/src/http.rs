@@ -4,7 +4,7 @@ use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::store::{apply_wiql, fields_from_patch, Bucket, RESOURCE_AREAS};
 use crate::web::{login_page, shell_page};
@@ -52,6 +52,94 @@ pub async fn dispatch(
             .into_response(),
         Identity::Anonymous => Html(login_page(&state.names().0, false)).into_response(),
     }
+}
+
+fn work_item_updates(id: i64, history: &[Value]) -> Vec<Value> {
+    let mut previous_fields = Value::Object(Map::new());
+    let mut previous_relations = Value::Array(Vec::new());
+    let mut updates = Vec::new();
+    for (index, snapshot) in history.iter().enumerate() {
+        let fields = snapshot.get("fields").cloned().unwrap_or_else(|| Value::Object(Map::new()));
+        let relations = snapshot.get("relations").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let rev = snapshot.get("rev").and_then(|value| value.as_i64()).unwrap_or(index as i64 + 1);
+        let mut record = json!({
+            "id": index as i64 + 1,
+            "workItemId": id,
+            "rev": rev,
+            "revisedBy": {"displayName": "azurz", "uniqueName": "azurz"},
+            "revisedDate": "2026-10-29T00:00:00Z",
+            "fields": diff_fields(&previous_fields, &fields)
+        });
+        if let Some(relations) = diff_relations(&previous_relations, &relations) {
+            record["relations"] = relations;
+        }
+        updates.push(record);
+        previous_fields = fields;
+        previous_relations = relations;
+    }
+    updates
+}
+
+fn diff_fields(before: &Value, after: &Value) -> Value {
+    let before = before.as_object();
+    let after = after.as_object();
+    let mut names = std::collections::BTreeSet::new();
+    if let Some(before) = before {
+        names.extend(before.keys().cloned());
+    }
+    if let Some(after) = after {
+        names.extend(after.keys().cloned());
+    }
+    let mut fields = Map::new();
+    for name in names {
+        let old = before.and_then(|object| object.get(&name));
+        let new = after.and_then(|object| object.get(&name));
+        if old == new {
+            continue;
+        }
+        let mut change = Map::new();
+        if let Some(old) = old {
+            change.insert("oldValue".into(), old.clone());
+        }
+        if let Some(new) = new {
+            change.insert("newValue".into(), new.clone());
+        }
+        fields.insert(name, Value::Object(change));
+    }
+    Value::Object(fields)
+}
+
+fn diff_relations(before: &Value, after: &Value) -> Option<Value> {
+    let before = before.as_array().map(|rows| rows.as_slice()).unwrap_or(&[]);
+    let after = after.as_array().map(|rows| rows.as_slice()).unwrap_or(&[]);
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+    for relation in after {
+        match before.iter().find(|item| relation_identity(item) == relation_identity(relation)) {
+            Some(previous) if previous != relation => updated.push(relation.clone()),
+            None => added.push(relation.clone()),
+            _ => {}
+        }
+    }
+    for relation in before {
+        if !after.iter().any(|item| relation_identity(item) == relation_identity(relation)) {
+            removed.push(relation.clone());
+        }
+    }
+    if added.is_empty() && removed.is_empty() && updated.is_empty() {
+        None
+    } else {
+        Some(json!({"added": added, "removed": removed, "updated": updated}))
+    }
+}
+
+fn relation_identity(relation: &Value) -> String {
+    format!(
+        "{} {}",
+        relation.get("rel").and_then(|value| value.as_str()).unwrap_or(""),
+        relation.get("url").and_then(|value| value.as_str()).unwrap_or("")
+    )
 }
 
 fn sign_in(state: &AppState, body: &Bytes) -> Response {
@@ -324,9 +412,28 @@ impl AppState {
                 None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
             };
         }
-        if rest.len() >= 4
-            && (rest[3].eq_ignore_ascii_case("updates") || rest[3].eq_ignore_ascii_case("revisions"))
-        {
+        if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("updates") {
+            let Ok(id) = rest[2].parse::<i64>() else {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            };
+            let history = self.read(|db| {
+                db.project(org, project)
+                    .and_then(|stored| stored.history.get(&id).cloned())
+                    .unwrap_or_default()
+            });
+            if history.is_empty() && self.read(|db| db.project(org, project).and_then(|stored| stored.work_items.get(&id).cloned())).is_none() {
+                return fail(StatusCode::NOT_FOUND, "work item introuvable");
+            }
+            let updates = work_item_updates(id, &history);
+            if let Some(update_id) = rest.get(4) {
+                return match updates.iter().find(|item| item.get("id").and_then(|value| value.as_i64()).map(|value| value.to_string()).as_deref() == Some(update_id.as_str())) {
+                    Some(item) => Json(item.clone()).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "mise à jour introuvable"),
+                };
+            }
+            return Json(json!({"count": updates.len(), "value": updates})).into_response();
+        }
+        if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("revisions") {
             let Ok(id) = rest[2].parse::<i64>() else {
                 return fail(StatusCode::NOT_FOUND, "work item introuvable");
             };
