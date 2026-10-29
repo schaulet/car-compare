@@ -932,9 +932,93 @@ fn pull_requests(
     Json(item).into_response()
 }
 
+fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let source_name = text_of(&pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
+    let target_name = text_of(&pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+    let refs = list(state, org, project, &format!("git/repositories/{repo_id}/refs"));
+    let object_of = |name: &str| {
+        refs.iter()
+            .find(|item| text_of(item, "name").as_deref() == Some(name))
+            .and_then(|item| text_of(item, "objectId"))
+    };
+    let commits = list(state, org, project, &format!("git/repositories/{repo_id}/commits"));
+    let mut by_id = std::collections::BTreeMap::new();
+    for commit in commits {
+        let id = text_of(&commit, "commitId").or_else(|| text_of(&commit, "id")).unwrap_or_default();
+        if !id.is_empty() {
+            by_id.insert(id, commit);
+        }
+    }
+    let blocked = commits_reachable(object_of(&target_name).as_deref(), &by_id);
+    let ahead = commits_ahead(object_of(&source_name).as_deref(), &blocked, &by_id);
+    Json(page(ahead)).into_response()
+}
+
+fn commits_reachable(tip: Option<&str>, commits: &std::collections::BTreeMap<String, Value>) -> std::collections::BTreeSet<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = Vec::new();
+    if let Some(id) = tip {
+        stack.push(id.to_string());
+    }
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(commit) = commits.get(&id) else {
+            continue;
+        };
+        let Some(parents) = commit.get("parents").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        for parent in parents {
+            if let Some(text) = parent.as_str() {
+                stack.push(text.to_string());
+            }
+        }
+    }
+    seen
+}
+
+fn commits_ahead(
+    tip: Option<&str>,
+    blocked: &std::collections::BTreeSet<String>,
+    commits: &std::collections::BTreeMap<String, Value>,
+) -> Vec<Value> {
+    let mut ahead = Vec::new();
+    let mut current = tip.map(str::to_string);
+    let mut guard = 0;
+    while let Some(id) = current {
+        if blocked.contains(&id) || guard > 1000 {
+            break;
+        }
+        guard += 1;
+        let Some(commit) = commits.get(&id) else {
+            break;
+        };
+        ahead.push(commit.clone());
+        current = commit
+            .get("parents")
+            .and_then(|value| value.as_array())
+            .and_then(|parents| parents.first())
+            .and_then(|parent| parent.as_str())
+            .map(str::to_string);
+    }
+    ahead
+}
+
 fn pull_child(rest: &[String]) -> Option<(String, String)> {
     let index = rest.iter().position(|part| {
-        matches!(part.to_ascii_lowercase().as_str(), "threads" | "statuses" | "iterations" | "reviewers" | "workitems")
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "threads" | "statuses" | "iterations" | "reviewers" | "workitems" | "commits"
+        )
     })?;
     let id = rest.get(index.checked_sub(1)?)?.clone();
     if id.eq_ignore_ascii_case("pullrequests") || id.eq_ignore_ascii_case("repositories") {
@@ -955,6 +1039,9 @@ fn pull_child_resource(
     let key = format!("git/pullrequests/{pull_id}/{kind}");
     if kind == "workitems" {
         return pull_work_items(state, method, org, project, pull_id);
+    }
+    if kind == "commits" {
+        return pull_commits(state, method, org, project, pull_id);
     }
     if kind == "reviewers" {
         return reviewers(state, method, org, project, pull_id, body);
