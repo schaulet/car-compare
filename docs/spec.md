@@ -55,7 +55,7 @@ Côté Azure DevOps : New, Active, Resolved. Le détail d'état est aussi un tag
 
 1. L'opérateur ouvre le service Rust `azdo`.
 2. Il saisit un nom d'utilisateur quelconque et le PAT comme mot de passe.
-3. Le portail affiche le projet et les hubs (éléments de travail, tableaux, fichiers du dépôt, commits, branches, demandes de tirage, pipelines, plans de test, artefacts, wiki, bibliothèque).
+3. Le portail affiche le projet et les hubs (éléments de travail, tableaux, fichiers du dépôt, commits, branches, demandes de tirage, pipelines, plans de test avec suites et cas, artefacts, wiki, bibliothèque).
 4. Les clients REST continuent d'appeler les mêmes chemins `/{org}/{project}/_apis/...` avec `api-version=7.1` : work items, git, builds, pipelines, plans de test, wiki, flux, paquets NuGet et universels, évaluation de permissions et abonnements de service hooks.
 
 ## Annexe — Car Compare

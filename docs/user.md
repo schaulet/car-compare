@@ -11,7 +11,7 @@ docker compose -f lab/docker-compose.yml up --build
 ```
 
 - Pont et écran de suivi : http://localhost:8080
-- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`). La page d'accueil demande un nom d'utilisateur et un mot de passe. Le mot de passe est le PAT `azurz-lab-pat`. Le nom d'utilisateur peut rester vide ou prendre n'importe quelle valeur, par exemple `azurz`. Après connexion, l'écran reprend les hubs du portail : éléments de travail, tableaux, fichiers du dépôt, commits, branches, demandes de tirage (relecteurs et terminaison), pipelines (mise en file d'attente), plans de test, artefacts, wiki et bibliothèque de variables. Une poussée dont l'ancien identifiant de commit ne correspond plus est refusée. Une build mise en file est lue ensuite comme terminée avec succès.
+- Azure DevOps du lab : http://localhost:8081 (organisation `azurz`, projet `AzurzDemo`). La page d'accueil demande un nom d'utilisateur et un mot de passe. Le mot de passe est le PAT `azurz-lab-pat`. Le nom d'utilisateur peut rester vide ou prendre n'importe quelle valeur, par exemple `azurz`. Après connexion, l'écran reprend les hubs du portail : éléments de travail, tableaux, fichiers du dépôt, commits, branches, demandes de tirage (relecteurs et terminaison), pipelines (mise en file d'attente), plans de test (suites, cas et exécution), artefacts, wiki et bibliothèque de variables. Une poussée dont l'ancien identifiant de commit ne correspond plus est refusée. Une build mise en file est lue ensuite comme terminée avec succès.
 
 ```bash
 curl -u azurz:azurz-lab-pat http://localhost:8081/azurz/_apis/projects

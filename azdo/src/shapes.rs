@@ -1,7 +1,7 @@
 use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::http::{fail, parse_json, query_param};
 use crate::store::{object_id, value_key, Bucket};
@@ -935,6 +935,18 @@ fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest:
         let next = list(state, org, project, key).len() as i64 + 1;
         let item = dress_plan(project, json!({"id": next, "name": name}));
         put_item(state, org, project, key, item.clone());
+        put_item(
+            state,
+            org,
+            project,
+            &format!("testplan/plans/{next}/suites"),
+            json!({
+                "id": next,
+                "name": name,
+                "suiteType": "staticTestSuite",
+                "plan": {"id": next, "name": name}
+            }),
+        );
         return Json(item).into_response();
     }
     let plan_id = rest.get(2).map(String::as_str).unwrap_or("");
@@ -945,20 +957,169 @@ fn test_plans(state: &AppState, method: &Method, org: &str, project: &str, rest:
         };
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("suites") {
-        let suites = format!("testplan/plans/{plan_id}/suites");
-        if method == Method::GET {
-            return Json(page(list(state, org, project, &suites))).into_response();
-        }
-        if method == Method::POST {
-            let payload = parse_json(body).unwrap_or(json!({}));
-            let name = text_of(&payload, "name").unwrap_or_else(|| "Suite".into());
-            let next = list(state, org, project, &suites).len() as i64 + 1;
-            let item = json!({"id": next, "name": name, "plan": {"id": plan_id.parse::<i64>().unwrap_or(next)}, "suiteType": "staticTestSuite"});
-            put_item(state, org, project, &suites, item.clone());
-            return Json(item).into_response();
-        }
+        return plan_suites(state, method, org, project, plan_id, rest, body);
     }
     fail(StatusCode::NOT_FOUND, "plan introuvable")
+}
+
+fn plan_suites(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let suites_key = format!("testplan/plans/{plan_id}/suites");
+    ensure_root_suite(state, org, project, plan_id);
+    if rest.len() == 4 && method == Method::GET {
+        return Json(page(list(state, org, project, &suites_key))).into_response();
+    }
+    if rest.len() == 4 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_else(|| "Suite".into());
+        let next = list(state, org, project, &suites_key).len() as i64 + 1;
+        let parent = payload.get("parentSuite").and_then(|value| value.get("id")).cloned().unwrap_or(json!(plan_id.parse::<i64>().unwrap_or(next)));
+        let item = json!({
+            "id": next,
+            "name": name,
+            "suiteType": text_of(&payload, "suiteType").unwrap_or_else(|| "staticTestSuite".into()),
+            "plan": {"id": plan_id.parse::<i64>().unwrap_or(0)},
+            "parentSuite": {"id": parent}
+        });
+        put_item(state, org, project, &suites_key, item.clone());
+        return Json(item).into_response();
+    }
+    let suite_id = rest.get(4).map(String::as_str).unwrap_or("");
+    let child = rest.get(5).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
+    if child == "testcase" || child == "testcases" {
+        return suite_cases(state, method, org, project, plan_id, suite_id, body);
+    }
+    if (child == "testpoint" || child == "testpoints") && method == Method::GET {
+        return Json(page(list(state, org, project, &format!("testplan/plans/{plan_id}/suites/{suite_id}/points")))).into_response();
+    }
+    if rest.len() == 5 && method == Method::GET {
+        return match get_item(state, org, project, &suites_key, suite_id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "suite introuvable"),
+        };
+    }
+    fail(StatusCode::NOT_FOUND, "suite introuvable")
+}
+
+fn ensure_root_suite(state: &AppState, org: &str, project: &str, plan_id: &str) {
+    let suites_key = format!("testplan/plans/{plan_id}/suites");
+    if !list(state, org, project, &suites_key).is_empty() {
+        return;
+    }
+    let Some(plan) = get_item(state, org, project, "testplan/plans", plan_id) else {
+        return;
+    };
+    let name = text_of(&plan, "name").unwrap_or_else(|| "Plan".into());
+    put_item(
+        state,
+        org,
+        project,
+        &suites_key,
+        json!({
+            "id": plan_id.parse::<i64>().unwrap_or(1),
+            "name": name,
+            "suiteType": "staticTestSuite",
+            "plan": {"id": plan_id.parse::<i64>().unwrap_or(1), "name": name}
+        }),
+    );
+}
+
+fn record_point_outcomes(state: &AppState, org: &str, project: &str, rows: &[Value]) {
+    state.write(|db| {
+        let Some(stored) = db.project_mut(org, project) else {
+            return;
+        };
+        let keys: Vec<String> = stored.buckets.keys().filter(|key| key.ends_with("/points")).cloned().collect();
+        for key in keys {
+            let Some(bucket) = stored.buckets.get_mut(&key) else {
+                continue;
+            };
+            for item in bucket.items.values_mut() {
+                let point_id = item.get("id").and_then(|value| value.as_i64());
+                let case_id = item.get("testCase").and_then(|case| case.get("id")).and_then(|value| value.as_i64());
+                for row in rows {
+                    let wanted_point = row.get("testPoint").and_then(|point| point.get("id")).and_then(|value| value.as_i64());
+                    let wanted_case = row.get("testCase").and_then(|case| case.get("id")).and_then(|value| value.as_i64());
+                    let matches = (wanted_point.is_some() && wanted_point == point_id) || (wanted_case.is_some() && wanted_case == case_id);
+                    if !matches {
+                        continue;
+                    }
+                    let Some(outcome) = text_of(row, "outcome") else {
+                        continue;
+                    };
+                    if let Some(object) = item.as_object_mut() {
+                        object.insert("outcome".into(), json!(outcome));
+                        object.insert("state".into(), json!("Completed"));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn suite_cases(state: &AppState, method: &Method, org: &str, project: &str, plan_id: &str, suite_id: &str, body: &[u8]) -> Response {
+    let cases_key = format!("testplan/plans/{plan_id}/suites/{suite_id}/testcases");
+    let points_key = format!("testplan/plans/{plan_id}/suites/{suite_id}/points");
+    if method == Method::GET {
+        return Json(page(list(state, org, project, &cases_key))).into_response();
+    }
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!([]));
+    let rows = payload.as_array().cloned().unwrap_or_else(|| vec![payload]);
+    let mut stored = Vec::new();
+    for row in rows {
+        let work_item = row.get("workItem").cloned().unwrap_or(json!({}));
+        let mut work_id = work_item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+        let mut title = text_of(&row, "title")
+            .or_else(|| text_of(&work_item, "name"))
+            .unwrap_or_else(|| "Cas de test".into());
+        if work_id == 0 {
+            let created = state.write(|db| {
+                db.ensure_project(org, project);
+                let stored = db.project_mut(org, project)?;
+                let mut fields = Map::new();
+                fields.insert("System.Title".into(), json!(title.clone()));
+                Some(stored.create_work_item(project, "Test Case", fields))
+            });
+            let Some(item) = created else {
+                return fail(StatusCode::NOT_FOUND, "projet inconnu");
+            };
+            work_id = item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+            title = item
+                .get("fields")
+                .and_then(|fields| text_of(fields, "System.Title"))
+                .unwrap_or(title);
+        }
+        let case = json!({
+            "id": work_id,
+            "workItem": {"id": work_id, "name": title},
+            "pointAssignments": [],
+            "project": {"name": project}
+        });
+        put_item(state, org, project, &cases_key, case.clone());
+        if get_item(state, org, project, &points_key, &work_id.to_string()).is_none()
+            && list(state, org, project, &points_key).iter().all(|point| point.get("testCase").and_then(|item| item.get("id")).and_then(|id| id.as_i64()) != Some(work_id))
+        {
+            let point_id = list(state, org, project, &points_key).len() as i64 + 1;
+            put_item(
+                state,
+                org,
+                project,
+                &points_key,
+                json!({
+                    "id": point_id,
+                    "testCase": {"id": work_id, "name": title},
+                    "outcome": "Unspecified",
+                    "state": "Ready",
+                    "plan": {"id": plan_id},
+                    "suite": {"id": suite_id}
+                }),
+            );
+        }
+        stored.push(case);
+    }
+    Json(page(stored)).into_response()
 }
 
 fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
@@ -1007,6 +1168,7 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
                 put_item(state, org, project, &results_key, item.clone());
                 stored_rows.push(item);
             }
+            record_point_outcomes(state, org, project, &stored_rows);
             let passed = list(state, org, project, &results_key)
                 .iter()
                 .filter(|item| text_of(item, "outcome").as_deref() == Some("Passed"))

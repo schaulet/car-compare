@@ -392,13 +392,58 @@
           return;
         }
         if (hub === "/_testPlans") {
+          const params = new URLSearchParams(location.search);
+          const planId = params.get("plan");
+          const suiteId = params.get("suite");
           const plans = await collection("testplan/plans");
-          const table = plans.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Zone</th></tr></thead><tbody>" + plans.map((item) => "<tr><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.areaPath) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun plan.</p>";
-          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Nouveau plan' /><button id='create' type='button'>Créer</button></div>" + table;
+          const table = plans.length ? "<table><thead><tr><th>ID</th><th>Nom</th><th>État</th><th>Zone</th></tr></thead><tbody>" + plans.map((item) => "<tr class='plan' data-id='" + esc(item.id) + "'><td>" + esc(item.id) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.state) + "</td><td>" + esc(item.areaPath) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun plan.</p>";
+          let detail = "";
+          if (planId) {
+            const suites = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites");
+            const suiteRows = suites.length ? "<ul>" + suites.map((item) => "<li><button type='button' class='page suite' data-id='" + esc(item.id) + "'>" + esc(item.name) + "</button></li>").join("") + "</ul>" : "<p class='sub'>Aucune suite.</p>";
+            let points = "";
+            if (suiteId) {
+              const rows = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testpoint");
+              points = "<h2>Points</h2><div class='command'><input id='case-title' placeholder='Nouveau cas' /><button id='add-case' type='button'>Ajouter le cas</button><button id='run-suite' type='button'>Exécuter</button></div>" + (rows.length ? "<table><thead><tr><th>Cas</th><th>Résultat</th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(item.testCase?.name || item.testCase?.id) + "</td><td>" + esc(item.outcome) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucun cas.</p>");
+            }
+            detail = "<h2>Suites</h2><div class='command'><input id='suite-name' placeholder='Nouvelle suite' /><button id='add-suite' type='button'>Créer la suite</button></div>" + suiteRows + points;
+          }
+          view.innerHTML = "<h1>Plans de test</h1><div class='command'><input id='plan-name' placeholder='Nouveau plan' /><button id='create' type='button'>Créer</button></div>" + table + detail;
           document.getElementById("create").onclick = async () => {
             await api("POST", root + "/testplan/plans?api-version=7.1", { name: document.getElementById("plan-name").value || "Plan" });
-            location.reload();
+            location.href = location.pathname;
           };
+          document.querySelectorAll("tr.plan").forEach((row) => {
+            row.onclick = () => { location.href = location.pathname + "?plan=" + encodeURIComponent(row.dataset.id); };
+          });
+          const addSuite = document.getElementById("add-suite");
+          if (addSuite) {
+            addSuite.onclick = async () => {
+              await api("POST", root + "/testplan/plans/" + encodeURIComponent(planId) + "/suites?api-version=7.1", { name: document.getElementById("suite-name").value || "Suite" });
+              location.reload();
+            };
+          }
+          document.querySelectorAll("button.suite").forEach((button) => {
+            button.onclick = () => { location.href = location.pathname + "?plan=" + encodeURIComponent(planId) + "&suite=" + encodeURIComponent(button.dataset.id); };
+          });
+          const addCase = document.getElementById("add-case");
+          if (addCase) {
+            addCase.onclick = async () => {
+              await api("POST", root + "/testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testcases?api-version=7.1", [{ title: document.getElementById("case-title").value || "Cas" }]);
+              location.reload();
+            };
+          }
+          const runSuite = document.getElementById("run-suite");
+          if (runSuite) {
+            runSuite.onclick = async () => {
+              const rows = await collection("testplan/plans/" + encodeURIComponent(planId) + "/suites/" + encodeURIComponent(suiteId) + "/testpoint");
+              const run = await api("POST", root + "/test/runs?api-version=7.1", { name: "Exécution", plan: { id: Number(planId) } });
+              if (rows.length) {
+                await api("POST", root + "/test/runs/" + run.id + "/results?api-version=7.1", rows.map((item) => ({ testPoint: { id: item.id }, testCase: item.testCase, outcome: "Passed" })));
+              }
+              location.reload();
+            };
+          }
           return;
         }
         if (hub === "/_artifacts") {

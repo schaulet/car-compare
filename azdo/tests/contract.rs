@@ -1430,3 +1430,128 @@ async fn git_push_writes_files_and_a_pull_request_can_be_completed() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(main["objectId"].as_str().unwrap(), merge.as_str(), "refs={body} pull={done}");
 }
+
+#[tokio::test]
+async fn test_plan_suites_cases_and_points_record_a_result() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/testplan/plans?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Recette pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let plan_id = plan["id"].as_i64().unwrap();
+    let root_id = plan["rootSuite"]["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let suites: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(suites["value"][0]["name"], "Recette pompe");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Debit","parentSuite":{{"id":{root_id}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let suite: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let suite_id = suite["id"].as_i64().unwrap();
+    assert_eq!(suite["suiteType"], "staticTestSuite");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites/{suite_id}/testcases?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"title":"Debit nominal"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cases: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cases["value"][0]["workItem"]["name"], "Debit nominal");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites/{suite_id}/testpoint?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["value"][0]["outcome"], "Unspecified");
+    let point_id = points["value"][0]["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/test/runs?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"name":"Campagne pompe","plan":{{"id":{plan_id}}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let run: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let run_id = run["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/test/runs/{run_id}/results?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"testPoint":{{"id":{point_id}}},"outcome":"Passed"}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/plans/{plan_id}/suites/{suite_id}/testpoint?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let points: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(points["value"][0]["outcome"], "Passed");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/test/runs/{run_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    let run: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(run["state"], "Completed");
+    assert_eq!(run["passedTests"], 1);
+}
