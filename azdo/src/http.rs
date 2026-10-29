@@ -166,7 +166,7 @@ impl AppState {
             return self.projects(&method, &org, &rest, body);
         }
         let Some(project) = project else {
-            if let Some(response) = crate::shapes::org_dispatch(self, &method, &org, &rest, body) {
+            if let Some(response) = crate::shapes::org_dispatch(self, &method, &org, &rest, query, body) {
                 return response;
             }
             if let Some(response) = crate::surface::org(self, &method, &org, &rest, body) {

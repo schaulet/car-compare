@@ -2280,3 +2280,109 @@ async fn maven_and_pypi_publish_then_read_the_package() {
     assert_eq!(pypi["value"][0]["version"], "1.2.0");
     assert_eq!(pypi["value"][0]["filename"], "oee-1.2.0.tar.gz");
 }
+
+#[tokio::test]
+async fn pool_agent_comes_online_and_finishes_a_job() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/distributedtask/pools/1/agents?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"azdo-linux","version":"3.248.0","osDescription":"Ubuntu 24.04","status":"offline"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["name"], "azdo-linux");
+    assert_eq!(created["status"], "offline");
+    assert_eq!(created["osDescription"], "Ubuntu 24.04");
+    let agent_id = created["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/distributedtask/pools/1/agents?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let agents: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(agents["count"], 1);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/distributedtask/pools/1/agents/{agent_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"online","systemCapabilities":{"Agent.OS":"Linux","Agent.Version":"3.248.0"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let online: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(online["status"], "online");
+    assert_eq!(online["systemCapabilities"]["Agent.OS"], "Linux");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/distributedtask/pools?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pools: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pools["value"][0]["name"], "Azure Pipelines");
+    assert_eq!(pools["value"][0]["size"], 1);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/distributedtask/pools/1/jobrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"agentId":{agent_id},"planType":"Build","definition":{{"id":1,"name":"CI"}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(request["status"], "queued");
+    assert_eq!(request["reservedAgent"]["name"], "azdo-linux");
+    assert!(request["result"].is_null());
+    let request_id = request["requestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/distributedtask/pools/1/jobrequests?agentId={agent_id}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(queued["value"][0]["requestId"], request_id);
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/_apis/distributedtask/pools/1/jobrequests/{request_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"result":"succeeded"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let finished: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["result"], "succeeded");
+}

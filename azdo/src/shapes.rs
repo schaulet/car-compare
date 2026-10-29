@@ -27,7 +27,7 @@ pub fn dispatch(
         ("build", "definitions") => definitions(state, method, org, project, body),
         ("build", "builds") => builds(state, method, org, project, rest, body),
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
-            task_agents(state, method, org, Some(project), rest)
+            task_agents(state, method, org, Some(project), rest, query, body)
         }
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
@@ -46,7 +46,7 @@ pub fn dispatch(
     Some(response)
 }
 
-pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Option<Response> {
+pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Option<Response> {
     let area = rest.first()?.to_ascii_lowercase();
     if area == "securitynamespaces" && method == Method::GET {
         return Some(Json(security_namespaces(org)).into_response());
@@ -54,7 +54,9 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     let resource = rest.get(1)?.to_ascii_lowercase();
     let response = match (area.as_str(), resource.as_str()) {
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
-        ("distributedtask", "pools") | ("distributedtask", "queues") => task_agents(state, method, org, None, rest),
+        ("distributedtask", "pools") | ("distributedtask", "queues") => {
+            task_agents(state, method, org, None, rest, query, body)
+        }
         ("graph", "users") => graph(state, method, org, "graph/users", "azurz"),
         ("graph", "groups") => graph(state, method, org, "graph/groups", format!("{org} Team")),
         _ => return None,
@@ -2188,21 +2190,199 @@ fn dress_policy(org: &str, project: &str, mut item: Value) -> Value {
     item
 }
 
-fn task_agents(state: &AppState, method: &Method, org: &str, project: Option<&str>, rest: &[String]) -> Response {
-    if method != Method::GET {
-        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
-    }
+fn task_agents(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
     let resource = rest.get(1).map(|item| item.to_ascii_lowercase()).unwrap_or_default();
-    if resource == "pools" {
-        return Json(page(org_list(state, org, "distributedtask/pools"))).into_response();
-    }
     if resource == "queues" {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
         let Some(project) = project else {
             return fail(StatusCode::NOT_FOUND, "file introuvable");
         };
         return Json(page(list(state, org, project, "distributedtask/queues"))).into_response();
     }
-    fail(StatusCode::NOT_FOUND, "ressource introuvable")
+    if resource != "pools" {
+        return fail(StatusCode::NOT_FOUND, "ressource introuvable");
+    }
+    if rest.len() <= 2 {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let value = org_list(state, org, "distributedtask/pools")
+            .into_iter()
+            .map(|item| dress_pool(state, org, item))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    let pool_id = &rest[2];
+    let Some(pool) = org_get(state, org, "distributedtask/pools", pool_id) else {
+        return fail(StatusCode::NOT_FOUND, "pool introuvable");
+    };
+    let pool_key = value_key(&pool["id"]);
+    if rest.len() == 3 && method == Method::GET {
+        return Json(dress_pool(state, org, pool)).into_response();
+    }
+    match rest.get(3).map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("agents") => pool_agents(state, method, org, &pool_key, rest, body),
+        Some("jobrequests") => pool_jobs(state, method, org, &pool_key, rest, query, body),
+        _ => fail(StatusCode::NOT_FOUND, "ressource introuvable"),
+    }
+}
+
+fn dress_pool(state: &AppState, org: &str, mut pool: Value) -> Value {
+    let id = value_key(&pool["id"]);
+    let size = org_list(state, org, &format!("distributedtask/pools/{id}/agents")).len();
+    if let Some(object) = pool.as_object_mut() {
+        object.insert("size".into(), json!(size));
+    }
+    pool
+}
+
+fn pool_agents(state: &AppState, method: &Method, org: &str, pool_id: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = format!("distributedtask/pools/{pool_id}/agents");
+    if rest.len() == 4 && method == Method::GET {
+        return Json(page(org_list(state, org, &key))).into_response();
+    }
+    if rest.len() == 4 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let name = text_of(&payload, "name").unwrap_or_else(|| "agent".into());
+        let next = org_list(state, org, &key).len() as i64 + 1;
+        let item = json!({
+            "id": next,
+            "name": name,
+            "version": text_of(&payload, "version").unwrap_or_else(|| "3.248.0".into()),
+            "osDescription": text_of(&payload, "osDescription").unwrap_or_else(|| "Linux".into()),
+            "enabled": payload.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true),
+            "status": text_of(&payload, "status").unwrap_or_else(|| "offline".into()),
+            "provisioningState": "Provisioned",
+            "systemCapabilities": payload.get("systemCapabilities").cloned().unwrap_or(json!({})),
+            "poolId": pool_id.parse::<i64>().unwrap_or(1),
+            "createdOn": "2026-10-29T00:00:00Z",
+            "url": format!("/{org}/_apis/distributedtask/pools/{pool_id}/agents/{next}")
+        });
+        org_put(state, org, &key, item.clone());
+        return Json(item).into_response();
+    }
+    if rest.len() >= 5 {
+        let agent_id = &rest[4];
+        let Some(current) = org_get(state, org, &key, agent_id) else {
+            return fail(StatusCode::NOT_FOUND, "agent introuvable");
+        };
+        if method == Method::GET {
+            return Json(current).into_response();
+        }
+        if method == Method::PATCH || method == Method::PUT {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let mut item = current;
+            if let Some(object) = item.as_object_mut() {
+                for field in ["name", "version", "osDescription", "status", "enabled", "systemCapabilities", "provisioningState"] {
+                    if let Some(value) = payload.get(field) {
+                        object.insert(field.to_string(), value.clone());
+                    }
+                }
+            }
+            org_put(state, org, &key, item.clone());
+            return Json(item).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "agent introuvable")
+}
+
+fn pool_jobs(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    pool_id: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let key = format!("distributedtask/pools/{pool_id}/jobrequests");
+    if rest.len() == 4 && method == Method::GET {
+        let agent_id = query_param(query, "agentId").map(|value| crate::http::pct_decode(&value));
+        let value = org_list(state, org, &key)
+            .into_iter()
+            .filter(|item| agent_id.as_ref().is_none_or(|wanted| request_agent_id(item) == *wanted))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 4 && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let agent_id = payload
+            .get("agentId")
+            .map(value_key)
+            .filter(|id| !id.is_empty())
+            .or_else(|| payload.get("reservedAgent").map(|agent| value_key(&agent["id"])));
+        let agent = agent_id
+            .as_ref()
+            .and_then(|id| org_get(state, org, &format!("distributedtask/pools/{pool_id}/agents"), id));
+        if agent_id.is_some() && agent.is_none() {
+            return fail(StatusCode::NOT_FOUND, "agent introuvable");
+        }
+        let next = org_list(state, org, &key).len() as i64 + 1;
+        let agent_name = agent.as_ref().and_then(|item| text_of(item, "name")).unwrap_or_default();
+        let definition = payload.get("definition").cloned().unwrap_or(json!({"id": 1, "name": "CI"}));
+        let item = json!({
+            "requestId": next,
+            "id": next,
+            "poolId": pool_id.parse::<i64>().unwrap_or(1),
+            "agentId": agent_id.as_ref().and_then(|id| id.parse::<i64>().ok()),
+            "reservedAgent": agent.as_ref().map(|item| json!({"id": item["id"], "name": agent_name})).unwrap_or(Value::Null),
+            "planType": text_of(&payload, "planType").unwrap_or_else(|| "Build".into()),
+            "definition": definition,
+            "demands": payload.get("demands").cloned().unwrap_or(json!([])),
+            "status": "queued",
+            "result": Value::Null,
+            "queueTime": "2026-10-29T00:00:00Z",
+            "url": format!("/{org}/_apis/distributedtask/pools/{pool_id}/jobrequests/{next}")
+        });
+        org_put(state, org, &key, item.clone());
+        return Json(item).into_response();
+    }
+    if rest.len() >= 5 {
+        let request_id = &rest[4];
+        let Some(current) = org_get(state, org, &key, request_id) else {
+            return fail(StatusCode::NOT_FOUND, "demande introuvable");
+        };
+        if method == Method::GET {
+            return Json(current).into_response();
+        }
+        if method == Method::PATCH || method == Method::PUT {
+            let payload = parse_json(body).unwrap_or(json!({}));
+            let mut item = current;
+            if let Some(object) = item.as_object_mut() {
+                if let Some(result) = text_of(&payload, "result") {
+                    object.insert("result".into(), json!(result));
+                    object.insert("status".into(), json!("completed"));
+                    object.insert("finishTime".into(), json!("2026-10-29T00:05:00Z"));
+                }
+                if let Some(status) = text_of(&payload, "status") {
+                    object.insert("status".into(), json!(status));
+                }
+            }
+            org_put(state, org, &key, item.clone());
+            return Json(item).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "demande introuvable")
+}
+
+fn request_agent_id(item: &Value) -> String {
+    item.get("agentId")
+        .map(value_key)
+        .filter(|id| !id.is_empty())
+        .or_else(|| item.get("reservedAgent").map(|agent| value_key(&agent["id"])))
+        .unwrap_or_default()
 }
 
 fn build_timeline(state: &AppState, method: &Method, org: &str, project: &str, id: &str, body: &[u8]) -> Response {

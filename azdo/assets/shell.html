@@ -113,6 +113,7 @@
       <a href="/__ORG__/__PROJECT__/_tfvc">TFVC</a>
       <div class="group">Pipelines</div>
       <a href="/__ORG__/__PROJECT__/_build">Pipelines</a>
+      <a href="/__ORG__/__PROJECT__/_agents">Agents</a>
       <a href="/__ORG__/__PROJECT__/_environments">Environnements</a>
       <a href="/__ORG__/__PROJECT__/_release">Versions</a>
       <a href="/__ORG__/__PROJECT__/_library">Bibliothèque</a>
@@ -689,6 +690,61 @@
           document.querySelectorAll("button.approve").forEach((button) => {
             button.onclick = async () => {
               await api("PATCH", root + "/release/approvals/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { status: "approved", comments: "ok" });
+              location.reload();
+            };
+          });
+          return;
+        }
+        if (hub === "/_agents") {
+          const pools = await api("GET", "/" + org + "/_apis/distributedtask/pools?api-version=7.1");
+          const pool = (pools.value || [])[0] || { id: 1, name: "Azure Pipelines", size: 0 };
+          const poolId = pool.id;
+          const agentsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1");
+          const jobsPage = await api("GET", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1");
+          const agents = agentsPage.value || [];
+          const jobs = jobsPage.value || [];
+          const table = agents.length ? "<table id='agents'><thead><tr><th>Nom</th><th>Statut</th><th>Système</th><th>Version</th><th></th></tr></thead><tbody>" + agents.map((item) => {
+            const action = item.status === "online"
+              ? "<button type='button' class='assign' data-id='" + esc(item.id) + "'>Confier</button>"
+              : "<button type='button' class='online' data-id='" + esc(item.id) + "'>En ligne</button>";
+            return "<tr><td>" + esc(item.name) + "</td><td class='status'>" + esc(item.status) + "</td><td>" + esc(item.osDescription) + "</td><td>" + esc(item.version) + "</td><td>" + action + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p class='sub'>Aucun agent.</p>";
+          const work = jobs.length ? "<table id='jobs'><thead><tr><th>Demande</th><th>Agent</th><th>Définition</th><th>État</th><th>Résultat</th><th></th></tr></thead><tbody>" + jobs.map((item) => {
+            const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(item.requestId || item.id) + "'>Terminer</button>" : "";
+            return "<tr><td>" + esc(item.requestId || item.id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de travail.</p>";
+          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Nom' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<h2>Demandes</h2>" + work;
+          document.getElementById("agent-add").onclick = async () => {
+            await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1", {
+              name: document.getElementById("agent-name").value || "azdo-linux",
+              version: "3.248.0",
+              osDescription: document.getElementById("agent-os").value || "Linux",
+              status: "offline",
+            });
+            location.reload();
+          };
+          document.querySelectorAll("button.online").forEach((button) => {
+            button.onclick = async () => {
+              await api("PATCH", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", {
+                status: "online",
+                systemCapabilities: { "Agent.OS": "Linux" },
+              });
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.assign").forEach((button) => {
+            button.onclick = async () => {
+              await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1", {
+                agentId: Number(button.dataset.id),
+                planType: "Build",
+                definition: { id: 1, name: "CI" },
+              });
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.finish").forEach((button) => {
+            button.onclick = async () => {
+              await api("PATCH", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { result: "succeeded" });
               location.reload();
             };
           });
