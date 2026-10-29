@@ -2155,7 +2155,10 @@
             const settings = await api("GET", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(team.name) + "/_apis/work/teamsettings?api-version=7.1");
             const card = document.getElementById("team-card");
             card.hidden = false;
-            const people = (members.value || []).map((member) => "<li>" + esc(member.identity && member.identity.displayName) + " · " + esc(member.identity && member.identity.uniqueName) + (member.isTeamAdmin ? " · admin" : "") + "</li>").join("") || "<li>Aucun membre.</li>";
+            const people = (members.value || []).map((member) => {
+              const unique = (member.identity && member.identity.uniqueName) || member.id || "";
+              return "<li>" + esc(member.identity && member.identity.displayName) + " · " + esc(unique) + (member.isTeamAdmin ? " · admin" : "") + " <button class='member-remove' type='button' data-id='" + esc(unique) + "'>Retirer</button></li>";
+            }).join("") || "<li id='member-empty'>Aucun membre.</li>";
             const remove = id === "1" ? "" : "<button id='team-delete' type='button'>Supprimer</button>";
             card.innerHTML = "<h2>" + esc(team.name) + "</h2><p class='sub' id='team-blurb'>" + esc(team.description || "") + "</p><h3>Membres</h3><ul id='member-list'>" + people + "</ul><div class='row'><input id='member-name' placeholder='Nom' /><input id='member-unique' placeholder='identite@azurz.lab' /><button id='member-add' type='button'>Ajouter</button></div><h3>Réglages</h3><div class='row'><select id='bugs-behavior'><option value='off'>Bugs hors backlog</option><option value='asTasks'>Bugs comme des tâches</option><option value='asRequirements'>Bugs comme des exigences</option></select><input id='working-days' /><button id='settings-save' type='button'>Enregistrer</button>" + remove + "</div>";
             document.getElementById("bugs-behavior").value = settings.bugsBehavior || "off";
@@ -2166,8 +2169,14 @@
                 uniqueName: document.getElementById("member-unique").value || "membre@azurz.lab",
                 isTeamAdmin: false,
               });
-              location.href = location.pathname + "?team=" + encodeURIComponent(id);
+              location.reload();
             };
+            document.querySelectorAll("button.member-remove").forEach((button) => {
+              button.onclick = async () => {
+                await api("DELETE", teamsRoot + "/" + encodeURIComponent(id) + "/members/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              };
+            });
             document.getElementById("settings-save").onclick = async () => {
               const workingDays = document.getElementById("working-days").value.split(",").map((day) => day.trim()).filter(Boolean);
               await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(team.name) + "/_apis/work/teamsettings?api-version=7.1", {

@@ -181,7 +181,7 @@ pub fn teams(state: &AppState, method: &Method, org: &str, project_key: &str, ta
     };
     let team_id = item_id(&team);
     if tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("members")) {
-        return team_members(state, method, org, project_key, &team_id, body);
+        return team_members(state, method, org, project_key, &team_id, &tail[2..], body);
     }
     if tail.len() != 1 {
         return fail(StatusCode::NOT_FOUND, "équipe introuvable");
@@ -273,8 +273,17 @@ fn patch_team(
     }
 }
 
-fn team_members(state: &AppState, method: &Method, org: &str, project_key: &str, team_id: &str, body: &[u8]) -> Response {
+fn team_members(state: &AppState, method: &Method, org: &str, project_key: &str, team_id: &str, rest: &[String], body: &[u8]) -> Response {
     let key = format!("core/teams/{team_id}/members");
+    if rest.len() > 1 {
+        return fail(StatusCode::NOT_FOUND, "membre introuvable");
+    }
+    if let Some(member_id) = rest.first() {
+        if method != Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return remove_team_member(state, org, project_key, &key, member_id);
+    }
     if method == Method::GET {
         let value = state.read(|db| db.project(org, project_key).map(|stored| stored.list_bucket(&key)).unwrap_or_default());
         return Json(page(value)).into_response();
@@ -297,6 +306,40 @@ fn team_members(state: &AppState, method: &Method, org: &str, project_key: &str,
         Some(item) => Json(item).into_response(),
         None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
     }
+}
+
+fn remove_team_member(state: &AppState, org: &str, project_key: &str, key: &str, member_id: &str) -> Response {
+    let stored_id = state.read(|db| {
+        db.project(org, project_key)
+            .map(|stored| stored.list_bucket(key))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|item| member_matches(item, member_id))
+            .map(|item| item_id(&item))
+            .filter(|id| !id.is_empty())
+    });
+    let Some(stored_id) = stored_id else {
+        return fail(StatusCode::NOT_FOUND, "membre introuvable");
+    };
+    let removed = state.write(|db| {
+        db.project_mut(org, project_key)
+            .and_then(|stored| stored.buckets.get_mut(key))
+            .is_some_and(|bucket| bucket.remove(&stored_id))
+    });
+    if removed {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        fail(StatusCode::NOT_FOUND, "membre introuvable")
+    }
+}
+
+fn member_matches(item: &Value, token: &str) -> bool {
+    item_id(item).eq_ignore_ascii_case(token)
+        || item
+            .get("identity")
+            .and_then(|identity| identity.get("uniqueName"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(token))
 }
 
 fn resolve_team_id(state: &AppState, org: &str, project_key: &str, team: Option<&str>) -> Option<String> {
