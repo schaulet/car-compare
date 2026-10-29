@@ -12243,3 +12243,305 @@ async fn work_item_type_states_keep_a_known_state_and_a_board_mapping() {
     assert_eq!(bug_states["count"], 4);
     assert!(bug_states["value"].as_array().unwrap().iter().all(|state| state["name"] != "En revue" && state["name"] != "Revue"));
 }
+
+#[tokio::test]
+async fn work_item_type_transitions_refuse_a_hop_between_mapped_states() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypes/Inconnu/transitions?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("type introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypes/user%20story/transitions?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let mut keys: Vec<_> = before.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["", "Active", "Closed", "New", "Resolved"]);
+    assert!(before.get("En revue").is_none());
+    assert!(before["New"][0]["actions"].is_null());
+    let new_targets: Vec<_> = before["New"].as_array().unwrap().iter().map(|edge| edge["to"].as_str().unwrap().to_string()).collect();
+    assert_eq!(new_targets, vec!["New", "Active", "Resolved", "Closed"]);
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(
+            r#"[{"name":"New","columnType":"incoming"},{"name":"Active","columnType":"inProgress"},{"name":"Revue","stateMappings":{"User Story":"En revue"}},{"name":"Bloqué","stateMappings":{"User Story":"Bloqué"}},{"name":"Closed","columnType":"outgoing"}]"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypes/User%20Story/transitions?api-version=7.1-preview.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let graph: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let targets = |key: &str| -> Vec<String> {
+        graph[key].as_array().unwrap().iter().map(|edge| edge["to"].as_str().unwrap().to_string()).collect()
+    };
+    let from_new = targets("New");
+    assert!(from_new.iter().any(|name| name == "En revue"));
+    assert!(from_new.iter().any(|name| name == "Bloqué"));
+    let from_review = targets("En revue");
+    assert!(from_review.iter().any(|name| name == "Active"));
+    assert!(from_review.iter().any(|name| name == "En revue"));
+    assert!(from_review.iter().all(|name| name != "Bloqué"));
+    assert!(targets("").iter().any(|name| name == "Bloqué"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypes/User%20Story/states?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let states: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(states["count"], 4);
+    assert!(states["value"].as_array().unwrap().iter().all(|state| state["name"] != "En revue" && state["name"] != "Bloqué"));
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"},{"op":"add","path":"/fields/System.State","value":"active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let item: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(item["fields"]["System.State"], "Active");
+    let id = item["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"En revue"},{"op":"replace","path":"/fields/System.State","value":"Bloqué"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("transition inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stayed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(stayed["fields"]["System.State"], "Active");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"En revue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reviewed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reviewed["fields"]["System.State"], "En revue");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Bloqué"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("transition inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["fields"]["System.State"], "En revue");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Bloqué"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let blocked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(blocked["fields"]["System.State"], "Bloqué");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"En revue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("transition inconnue"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Fermee"},{"op":"add","path":"/fields/System.State","value":"New"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_id = other["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{other_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Closed"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let closed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(closed["fields"]["System.State"], "Closed");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Bug?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Fuite"},{"op":"add","path":"/fields/System.State","value":"En revue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état inconnu"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"name":"New","columnType":"incoming"},{"name":"Active","columnType":"inProgress"},{"name":"Resolved"},{"name":"Closed","columnType":"outgoing"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"En revue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("état inconnu"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"replace","path":"/fields/System.State","value":"Active"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let back: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(back["fields"]["System.State"], "Active");
+}

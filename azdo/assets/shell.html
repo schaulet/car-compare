@@ -231,11 +231,14 @@
         return values.map((path) => "<option" + (path === current ? " selected" : "") + ">" + esc(path) + "</option>").join("");
       }
       const typeName = fields["System.WorkItemType"] || "User Story";
-      const catalog = await api("GET", root + "/wit/workitemtypes/" + encodeURIComponent(typeName) + "/states?api-version=7.1");
-      const names = (catalog.value || []).map((state) => state.name);
+      const graph = await api("GET", root + "/wit/workitemtypes/" + encodeURIComponent(typeName) + "/transitions?api-version=7.1-preview.1");
       const currentState = fields["System.State"] || "New";
+      const edges = graph[currentState] || graph[""] || [];
+      const names = edges.map((edge) => edge.to).filter(Boolean);
       if (currentState && names.indexOf(currentState) < 0) names.unshift(currentState);
       const states = names.map((state) => "<option" + (state === currentState ? " selected" : "") + ">" + esc(state) + "</option>").join("");
+      const others = names.filter((state) => state !== currentState);
+      const transitionLine = "Depuis " + currentState + " : " + (others.join(", ") || "aucune");
       const assigned = assignedName(item);
       const notes = (comments.comments || []).map((note) => "<li class='note' data-id='" + note.id + "'><span class='note-text'>" + esc(note.text) + "</span><button class='note-edit' type='button'>Modifier</button><button class='note-delete' type='button'>Retirer</button></li>").join("") || "<li>Aucun commentaire.</li>";
       const links = (item.relations || []).map((link) => "<li>" + esc(link.rel) + " " + esc(link.url) + "</li>").join("") || "<li>Aucun lien.</li>";
@@ -258,6 +261,7 @@
       panel.innerHTML = "<div class='form'><div><h2>#" + item.id + " " + esc(fields["System.WorkItemType"]) + "</h2>" +
         "<div class='row'><input id='wi-title' value='" + esc(fields["System.Title"] || "") + "' style='flex:1' />" +
         "<select id='wi-state'>" + states + "</select></div>" +
+        "<p id='wi-transitions' class='sub'>" + esc(transitionLine) + "</p>" +
         "<div class='row'><select id='wi-area' aria-label='Zone'>" + options(collectPaths(areas, []), fields["System.AreaPath"] || project) + "</select>" +
         "<select id='wi-iteration' aria-label='Itération'>" + options(collectPaths(iterations, []), fields["System.IterationPath"] || "") + "</select></div>" +
         "<div class='row'><input id='wi-assigned' placeholder='Assigné à' value='" + esc(assigned) + "' /><input id='wi-tags' placeholder='Étiquettes' value='" + esc(fields["System.Tags"] || "") + "' /></div>" +

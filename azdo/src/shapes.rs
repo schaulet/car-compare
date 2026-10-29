@@ -73,7 +73,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
     Some(response)
 }
 
-pub fn wit_catalog(method: &Method, _org: &str, _project: &str, rest: &[String]) -> Option<Response> {
+pub fn wit_catalog(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String]) -> Option<Response> {
     if method != Method::GET {
         return None;
     }
@@ -102,6 +102,10 @@ pub fn wit_catalog(method: &Method, _org: &str, _project: &str, rest: &[String])
                     None => fail(StatusCode::NOT_FOUND, "état introuvable"),
                 });
             }
+        }
+        if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("transitions")) && rest.len() == 4 {
+            let extras = mapped_work_item_states(state, org, project, kind);
+            return Some(Json(work_item_transitions(&extras)).into_response());
         }
         return Some(fail(StatusCode::NOT_FOUND, "type introuvable"));
     }
@@ -5356,6 +5360,61 @@ fn work_item_types() -> Value {
     page(value)
 }
 
+fn catalog_state_names() -> Vec<String> {
+    type_state_values()
+        .iter()
+        .filter_map(|state| state.get("name").and_then(|value| value.as_str()).map(str::to_string))
+        .collect()
+}
+
+fn transition_edges(names: &[String]) -> Vec<Value> {
+    names.iter().map(|name| json!({"to": name, "actions": null})).collect()
+}
+
+fn work_item_transitions(extras: &[String]) -> Value {
+    let catalog = catalog_state_names();
+    let mut extra_names = Vec::new();
+    for extra in extras {
+        if catalog.iter().any(|name| name.eq_ignore_ascii_case(extra)) {
+            continue;
+        }
+        if extra_names.iter().any(|name: &String| name.eq_ignore_ascii_case(extra)) {
+            continue;
+        }
+        extra_names.push(extra.clone());
+    }
+    let mut broad = catalog.clone();
+    broad.extend(extra_names.iter().cloned());
+    let mut graph = Map::new();
+    graph.insert(String::new(), Value::Array(transition_edges(&broad)));
+    for name in &catalog {
+        graph.insert(name.clone(), Value::Array(transition_edges(&broad)));
+    }
+    for extra in &extra_names {
+        let mut narrow = catalog.clone();
+        narrow.push(extra.clone());
+        graph.insert(extra.clone(), Value::Array(transition_edges(&narrow)));
+    }
+    Value::Object(graph)
+}
+
+fn transition_allowed(current: &str, next: &str, extras: &[String]) -> Result<(), &'static str> {
+    let graph = work_item_transitions(extras);
+    let Some(object) = graph.as_object() else {
+        return Err("transition inconnue");
+    };
+    if let Some(edges) = object.iter().find(|(key, _)| key.eq_ignore_ascii_case(current)).and_then(|(_, value)| value.as_array()) {
+        if edges.iter().any(|edge| edge.get("to").and_then(|value| value.as_str()).is_some_and(|name| name.eq_ignore_ascii_case(next))) {
+            return Ok(());
+        }
+        return Err("transition inconnue");
+    }
+    if catalog_state_names().iter().any(|name| name.eq_ignore_ascii_case(next)) {
+        return Ok(());
+    }
+    Err("transition inconnue")
+}
+
 fn type_state_values() -> Vec<Value> {
     [
         ("New", "b2b2b2", "Proposed"),
@@ -5604,11 +5663,12 @@ pub fn classification_nodes(
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
-pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, kind: &str, ops: &[Value]) -> Result<Vec<Value>, &'static str> {
+pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, kind: &str, current: &str, ops: &[Value]) -> Result<Vec<Value>, &'static str> {
     ensure_classification(state, org, project);
     let areas = work_item_paths(state, org, project, "areas");
     let iterations = work_item_paths(state, org, project, "iterations");
     let mapped = mapped_work_item_states(state, org, project, kind);
+    let mut cursor = current.to_string();
     let mut prepared = Vec::new();
     for op in ops {
         let mut op = op.clone();
@@ -5639,7 +5699,12 @@ pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, kind: &
             )?),
             "System.AssignedTo" => canonical_identity(&value)?,
             "System.Tags" => json!(canonical_tags(&value)?),
-            "System.State" => json!(canonical_work_item_state(&value, &mapped)?),
+            "System.State" => {
+                let next = canonical_work_item_state(&value, &mapped)?;
+                transition_allowed(&cursor, &next, &mapped)?;
+                cursor = next.clone();
+                json!(next)
+            }
             _ => value,
         };
         if let Some(object) = op.as_object_mut() {

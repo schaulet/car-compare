@@ -355,7 +355,7 @@ impl AppState {
         if resource.as_deref() == Some("classificationnodes") {
             return crate::shapes::classification_nodes(self, method, org, project, rest, query, body);
         }
-        if let Some(response) = crate::shapes::wit_catalog(method, org, project, rest) {
+        if let Some(response) = crate::shapes::wit_catalog(self, method, org, project, rest) {
             return response;
         }
         if resource.as_deref() == Some("wiql") && method == Method::POST {
@@ -398,7 +398,7 @@ impl AppState {
             let kind = rest[2].trim_start_matches('$').replace("%20", " ");
             let ops = parse_json(body).unwrap_or(json!([]));
             let ops = ops.as_array().cloned().unwrap_or_default();
-            let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &kind, &ops) {
+            let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &kind, "", &ops) {
                 Ok(ops) => ops,
                 Err(message) => return fail(StatusCode::BAD_REQUEST, message),
             };
@@ -512,16 +512,24 @@ impl AppState {
                     return fail(StatusCode::NOT_FOUND, "work item introuvable");
                 }
                 let ops = parse_json(body).unwrap_or(json!([])).as_array().cloned().unwrap_or_default();
-                let kind = self.read(|db| {
-                    db.project(org, project)
+                let (kind, current) = self.read(|db| {
+                    let fields = db
+                        .project(org, project)
                         .and_then(|stored| stored.work_items.get(&id))
-                        .and_then(|item| item.get("fields"))
+                        .and_then(|item| item.get("fields"));
+                    let kind = fields
                         .and_then(|fields| fields.get("System.WorkItemType"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("User Story")
-                        .to_string()
+                        .to_string();
+                    let current = fields
+                        .and_then(|fields| fields.get("System.State"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("New")
+                        .to_string();
+                    (kind, current)
                 });
-                let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &kind, &ops) {
+                let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &kind, &current, &ops) {
                     Ok(ops) => ops,
                     Err(message) => return fail(StatusCode::BAD_REQUEST, message),
                 };
