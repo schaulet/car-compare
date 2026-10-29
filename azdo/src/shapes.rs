@@ -863,8 +863,8 @@ fn pull_requests(
     body: &[u8],
 ) -> Response {
     let key = "git/pullrequests";
-    if let Some((kind, pull_id)) = pull_child(rest) {
-        return pull_child_resource(state, method, org, project, &kind, &pull_id, body);
+    if let Some((kind, pull_id, tail)) = pull_child(rest) {
+        return pull_child_resource(state, method, org, project, &kind, &pull_id, tail, body);
     }
     let listing = method == Method::GET && rest.last().is_some_and(|part| part.eq_ignore_ascii_case("pullrequests"));
     if listing {
@@ -936,22 +936,25 @@ fn pull_requests(
     Json(item).into_response()
 }
 
-fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
-    if method != Method::GET {
-        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
-    }
-    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
-        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
-    };
+struct PullTips {
+    source_id: Option<String>,
+    target_id: Option<String>,
+    common_id: Option<String>,
+    ahead: Vec<Value>,
+}
+
+fn pull_tips(state: &AppState, org: &str, project: &str, pull: &Value) -> PullTips {
     let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
-    let source_name = text_of(&pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
-    let target_name = text_of(&pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
+    let source_name = text_of(pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into());
+    let target_name = text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into());
     let refs = list(state, org, project, &format!("git/repositories/{repo_id}/refs"));
     let object_of = |name: &str| {
         refs.iter()
             .find(|item| text_of(item, "name").as_deref() == Some(name))
             .and_then(|item| text_of(item, "objectId"))
     };
+    let source_id = object_of(&source_name);
+    let target_id = object_of(&target_name);
     let commits = list(state, org, project, &format!("git/repositories/{repo_id}/commits"));
     let mut by_id = std::collections::BTreeMap::new();
     for commit in commits {
@@ -960,9 +963,123 @@ fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pul
             by_id.insert(id, commit);
         }
     }
-    let blocked = commits_reachable(object_of(&target_name).as_deref(), &by_id);
-    let ahead = commits_ahead(object_of(&source_name).as_deref(), &blocked, &by_id);
-    Json(page(ahead)).into_response()
+    let blocked = commits_reachable(target_id.as_deref(), &by_id);
+    let ahead = commits_ahead(source_id.as_deref(), &blocked, &by_id);
+    let common_id = if ahead.is_empty() {
+        source_id.clone()
+    } else {
+        ahead.last().and_then(|commit| {
+            commit
+                .get("parents")
+                .and_then(|value| value.as_array())
+                .and_then(|parents| parents.first())
+                .and_then(|parent| parent.as_str())
+                .map(str::to_string)
+        })
+    };
+    PullTips {
+        source_id,
+        target_id,
+        common_id,
+        ahead,
+    }
+}
+
+fn pull_commits(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    Json(page(pull_tips(state, org, project, &pull).ahead)).into_response()
+}
+
+fn iteration_document(pull: &Value, tips: &PullTips) -> Value {
+    json!({
+        "id": 1,
+        "description": "Iteration 1",
+        "sourceRefName": text_of(pull, "sourceRefName").unwrap_or_else(|| "refs/heads/feature".into()),
+        "targetRefName": text_of(pull, "targetRefName").unwrap_or_else(|| "refs/heads/main".into()),
+        "sourceRefCommit": {"commitId": tips.source_id.clone().unwrap_or_default()},
+        "targetRefCommit": {"commitId": tips.target_id.clone().unwrap_or_default()},
+        "commonRefCommit": {"commitId": tips.common_id.clone().unwrap_or_default()}
+    })
+}
+
+fn pull_iterations(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, tail: &[String]) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) else {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    };
+    let tips = pull_tips(state, org, project, &pull);
+    let iteration = iteration_document(&pull, &tips);
+    if tail.is_empty() {
+        return Json(page(vec![iteration])).into_response();
+    }
+    if tail[0] != "1" {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    }
+    if tail.len() == 1 {
+        return Json(iteration).into_response();
+    }
+    if tail.len() == 2 && tail[1].eq_ignore_ascii_case("changes") {
+        let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+        return Json(json!({"changeEntries": net_change_entries(state, org, project, &repo_id, &tips.ahead)})).into_response();
+    }
+    fail(StatusCode::NOT_FOUND, "itération introuvable")
+}
+
+fn net_change_entries(state: &AppState, org: &str, project: &str, repo_id: &str, ahead_newest_first: &[Value]) -> Vec<Value> {
+    let mut nets: Vec<(String, String)> = Vec::new();
+    for commit in ahead_newest_first.iter().rev() {
+        let commit_id = text_of(commit, "commitId").or_else(|| text_of(commit, "id")).unwrap_or_default();
+        if commit_id.is_empty() {
+            continue;
+        }
+        for change in list(state, org, project, &format!("git/repositories/{repo_id}/commits/{commit_id}/changes")) {
+            let path = change
+                .get("item")
+                .and_then(|item| text_of(item, "path"))
+                .unwrap_or_else(|| value_key(&change["id"]));
+            if path.is_empty() {
+                continue;
+            }
+            let kind = text_of(&change, "changeType").unwrap_or_else(|| "add".into()).to_ascii_lowercase();
+            if let Some(index) = nets.iter().position(|(stored, _)| stored == &path) {
+                let previous = nets[index].1.clone();
+                if previous == "add" && kind == "delete" {
+                    nets.remove(index);
+                    continue;
+                }
+                nets[index].1 = if previous == "add" {
+                    "add".to_string()
+                } else if previous == "delete" && kind == "add" {
+                    "edit".to_string()
+                } else if kind == "delete" {
+                    "delete".to_string()
+                } else {
+                    previous
+                };
+            } else {
+                nets.push((path, kind));
+            }
+        }
+    }
+    nets.into_iter()
+        .enumerate()
+        .map(|(index, (path, kind))| {
+            let id = index as i64 + 1;
+            json!({
+                "changeTrackingId": id,
+                "changeId": id,
+                "item": {"path": path},
+                "changeType": kind
+            })
+        })
+        .collect()
 }
 
 fn commits_reachable(tip: Option<&str>, commits: &std::collections::BTreeMap<String, Value>) -> std::collections::BTreeSet<String> {
@@ -1017,7 +1134,7 @@ fn commits_ahead(
     ahead
 }
 
-fn pull_child(rest: &[String]) -> Option<(String, String)> {
+fn pull_child(rest: &[String]) -> Option<(String, String, &[String])> {
     let index = rest.iter().position(|part| {
         matches!(
             part.to_ascii_lowercase().as_str(),
@@ -1028,7 +1145,7 @@ fn pull_child(rest: &[String]) -> Option<(String, String)> {
     if id.eq_ignore_ascii_case("pullrequests") || id.eq_ignore_ascii_case("repositories") {
         return None;
     }
-    Some((rest[index].to_ascii_lowercase(), id))
+    Some((rest[index].to_ascii_lowercase(), id, &rest[index + 1..]))
 }
 
 fn pull_child_resource(
@@ -1038,6 +1155,7 @@ fn pull_child_resource(
     project: &str,
     kind: &str,
     pull_id: &str,
+    tail: &[String],
     body: &[u8],
 ) -> Response {
     let key = format!("git/pullrequests/{pull_id}/{kind}");
@@ -1050,17 +1168,8 @@ fn pull_child_resource(
     if kind == "reviewers" {
         return reviewers(state, method, org, project, pull_id, body);
     }
-    if kind == "iterations" && method == Method::GET {
-        let pull = get_item(state, org, project, "git/pullrequests", pull_id);
-        let source = pull.as_ref().and_then(|item| text_of(item, "sourceRefName")).unwrap_or_else(|| "refs/heads/feature".into());
-        let target = pull.as_ref().and_then(|item| text_of(item, "targetRefName")).unwrap_or_else(|| "refs/heads/main".into());
-        return Json(page(vec![json!({
-            "id": 1,
-            "sourceRefName": source,
-            "targetRefName": target,
-            "description": "Iteration 1"
-        })]))
-        .into_response();
+    if kind == "iterations" {
+        return pull_iterations(state, method, org, project, pull_id, tail);
     }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
