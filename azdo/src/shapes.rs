@@ -74,6 +74,7 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
         ("hooks", "subscriptions") => subscriptions(state, method, org, rest, body),
         ("hooks", "inbox") => hooks_inbox(state, method, org),
         ("notification", "subscriptions") => notification_subscriptions(state, method, org, rest, body),
+        ("favorite", "favorites") => favorites(state, method, org, rest, query, body),
         ("distributedtask", "pools") | ("distributedtask", "queues") => {
             task_agents(state, method, org, None, rest, query, body)
         }
@@ -7052,6 +7053,176 @@ fn environment_needs_approval(environment: &Value) -> bool {
         .and_then(|value| value.get("approvals"))
         .and_then(|value| value.as_array())
         .is_some_and(|rows| !rows.is_empty())
+}
+
+fn favorites(state: &AppState, method: &Method, org: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
+    let key = "favorite/favorites";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = org_list(state, org, key);
+            rows.retain(|item| favorite_listed(item, query));
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_favorite(org, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let mut item = match favorite_create(body) {
+                Ok(item) => item,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let next = org_list(state, org, key)
+                .into_iter()
+                .filter_map(|item| text_of(&item, "id"))
+                .filter_map(|id| id.strip_prefix("fav-").and_then(|number| number.parse::<i64>().ok()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            if let Some(object) = item.as_object_mut() {
+                object.insert("id".into(), json!(format!("fav-{next}")));
+                object.entry("artifactScope").or_insert(json!({"type": "Project", "id": org, "name": org}));
+            }
+            org_put(state, org, key, item.clone());
+            return Json(dress_favorite(org, item)).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        if method == Method::DELETE {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return fail(StatusCode::NOT_FOUND, "favori introuvable");
+    }
+    let id = rest[2].as_str();
+    if method == Method::GET {
+        return match org_get(state, org, key, id) {
+            Some(item) => Json(dress_favorite(org, item)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "favori introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = org_get(state, org, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "favori introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> Option<bool> {
+            let bucket = db.orgs.get_mut(org)?.buckets.get_mut(key)?;
+            let key_name = bucket
+                .items
+                .iter()
+                .find_map(|(stored, item)| (stored == &stored_id || value_key(&item["id"]) == stored_id).then(|| stored.clone()))?;
+            Some(bucket.items.remove(&key_name).is_some())
+        });
+        return if removed == Some(true) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "favori introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn favorite_listed(item: &Value, query: &str) -> bool {
+    if let Some(kind) = query_param(query, "artifactType").map(pct_decode).filter(|value| !value.is_empty()) {
+        if !text_of(item, "artifactType").is_some_and(|value| value.eq_ignore_ascii_case(&kind)) {
+            return false;
+        }
+    }
+    let scope = item.get("artifactScope");
+    if let Some(scope_type) = query_param(query, "artifactScopeType").map(pct_decode).filter(|value| !value.is_empty()) {
+        let stored = scope.and_then(|value| value.get("type")).and_then(|value| value.as_str()).unwrap_or("");
+        if !stored.eq_ignore_ascii_case(&scope_type) {
+            return false;
+        }
+    }
+    if let Some(scope_id) = query_param(query, "artifactScopeId").map(pct_decode).filter(|value| !value.is_empty()) {
+        let id = scope.and_then(|value| value.get("id")).and_then(|value| value.as_str()).unwrap_or("");
+        let name = scope.and_then(|value| value.get("name")).and_then(|value| value.as_str()).unwrap_or("");
+        if !id.eq_ignore_ascii_case(&scope_id) && !name.eq_ignore_ascii_case(&scope_id) {
+            return false;
+        }
+    }
+    true
+}
+
+fn favorite_create(body: &[u8]) -> Result<Value, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("favori illisible");
+    };
+    let Some(artifact_id) = object
+        .get("artifactId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("artefact absent");
+    };
+    let Some(artifact_type) = object
+        .get("artifactType")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("type absent");
+    };
+    let artifact_name = match object.get("artifactName") {
+        None => artifact_id.to_string(),
+        Some(value) => {
+            let Some(name) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("nom absent");
+            };
+            name.to_string()
+        }
+    };
+    let scope = match object.get("artifactScope") {
+        None => None,
+        Some(value) => {
+            let Some(scope) = value.as_object() else {
+                return Err("portée absente");
+            };
+            let Some(id) = scope.get("id").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("portée absente");
+            };
+            let kind = scope
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Project");
+            let name = scope
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id);
+            Some(json!({"type": kind, "id": id, "name": name}))
+        }
+    };
+    let mut item = Map::new();
+    item.insert("artifactId".into(), json!(artifact_id));
+    item.insert("artifactType".into(), json!(artifact_type));
+    item.insert("artifactName".into(), json!(artifact_name));
+    item.insert("artifactIsDeleted".into(), json!(false));
+    item.insert("creationDate".into(), json!("2026-10-29T00:00:00Z"));
+    item.insert("owner".into(), json!({"id": "azurz", "name": "azurz"}));
+    if let Some(scope) = scope {
+        item.insert("artifactScope".into(), scope);
+    }
+    Ok(Value::Object(item))
+}
+
+fn dress_favorite(org: &str, mut item: Value) -> Value {
+    let id = text_of(&item, "id").unwrap_or_default();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("url".into(), json!(format!("/{org}/_apis/favorite/favorites/{id}")));
+        object.insert(
+            "_links".into(),
+            json!({"self": {"href": format!("/{org}/_apis/favorite/favorites/{id}")}}),
+        );
+    }
+    item
 }
 
 fn notification_subscriptions(state: &AppState, method: &Method, org: &str, rest: &[String], body: &[u8]) -> Response {

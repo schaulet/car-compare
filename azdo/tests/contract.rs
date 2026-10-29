@@ -24169,3 +24169,228 @@ async fn removing_one_notification_keeps_the_sibling_the_hook_and_the_other_proj
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("abonnement introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_favorite_keeps_the_sibling_the_notification_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/_apis/favorite/favorites?api-version=7.1";
+    let repo = "Microsoft.TeamFoundation.Git.Repository";
+    let query = "Microsoft.TeamFoundation.WorkItemTracking.QueryItem";
+
+    async fn star(app: &axum::Router, auth: &str, name: &str, kind: &str, project: &str) -> String {
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/_apis/favorite/favorites?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json",
+            Some(&format!(
+                r#"{{"artifactId":"{name}","artifactName":"{name}","artifactType":"{kind}","artifactScope":{{"type":"Project","id":"{project}","name":"{project}"}}}}"#
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["artifactName"], name);
+        assert_eq!(created["artifactId"], name);
+        assert_eq!(created["artifactType"], kind);
+        assert_eq!(created["artifactScope"]["id"], project);
+        assert_eq!(created["artifactIsDeleted"], false);
+        assert_eq!(created["owner"]["id"], "azurz");
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("favori illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("null")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("favori illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("artefact absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"artifactId":"  "}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("artefact absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"artifactId":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("artefact absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(r#"{"artifactId":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"artifactId":"Pompe","artifactType":"  "}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"artifactId":"Pompe","artifactType":1}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"Pompe","artifactType":"{repo}","artifactName":1}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"Pompe","artifactType":"{repo}","artifactScope":"AzurzDemo"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("portée absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"{{"artifactId":"Pompe","artifactType":"{repo}","artifactScope":{{}}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("portée absente"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe = star(&app, &auth, "Pompe", repo, "AzurzDemo").await;
+    let relais = star(&app, &auth, "Relais", query, "AzurzDemo").await;
+    let atelier = star(&app, &auth, "Atelier", repo, "Atelier").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/notification/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"description":"Pompe","filter":{"type":"Expression","eventType":"ms.vss-work.workitem-changed-event"},"scope":{"type":"project","id":"AzurzDemo","name":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let note: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 3, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["artifactName"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert!(pompe_row["url"].as_str().unwrap().ends_with(&format!("/favorite/favorites/{pompe}")), "{pompe_row}");
+    let scoped = "/azurz/_apis/favorite/favorites?artifactScopeId=AzurzDemo&api-version=7.1";
+    let (status, body, _) = call(&app, "GET", scoped, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let project_rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(project_rows["count"], 2, "{body}");
+    assert!(project_rows["value"].as_array().unwrap().iter().any(|item| item["artifactName"] == "Pompe"));
+    assert!(project_rows["value"].as_array().unwrap().iter().any(|item| item["artifactName"] == "Relais"));
+    let one = format!("/azurz/_apis/favorite/favorites/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fetched["artifactName"], "Pompe");
+    assert_eq!(fetched["artifactScope"]["name"], "AzurzDemo");
+    assert_eq!(fetched["artifactType"], repo);
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/favorite/favorites/absent?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("favori introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/favorite/favorites/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/favorite/favorites/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("favori introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("favori introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 2, "{body}");
+    let sibling = kept["value"].as_array().unwrap().iter().find(|item| item["artifactName"] == "Relais").unwrap();
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["artifactType"], query);
+    assert_eq!(sibling["artifactScope"]["id"], "AzurzDemo");
+    let other = kept["value"].as_array().unwrap().iter().find(|item| item["artifactName"] == "Atelier").unwrap();
+    assert_eq!(other["id"], atelier);
+    assert_eq!(other["artifactScope"]["name"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/notification/subscriptions/{note_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_note: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_note["description"], "Pompe");
+    assert_eq!(kept_note["scope"]["id"], "AzurzDemo");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("favori introuvable"), "{body}");
+}

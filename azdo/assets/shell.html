@@ -147,6 +147,7 @@
       <a href="/__ORG__/__PROJECT__/_wiki">Wiki</a>
       <a href="/__ORG__/__PROJECT__/_hooks">Abonnements</a>
       <a href="/__ORG__/__PROJECT__/_notifications">Notifications</a>
+      <a href="/__ORG__/__PROJECT__/_favorites">Favoris</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
       <a href="/__ORG__/__PROJECT__/_settings">Paramètres</a>
     </nav>
@@ -3181,6 +3182,47 @@
               error.hidden = true;
               try {
                 await api("DELETE", "/" + org + "/_apis/notification/subscriptions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_favorites") {
+          const page = await api("GET", "/" + org + "/_apis/favorite/favorites?api-version=7.1");
+          const rows = (page.value || []).filter((item) => {
+            const scope = item.artifactScope || {};
+            return scope.id === project || scope.name === project;
+          });
+          const kindLabel = (kind) => kind === "Microsoft.TeamFoundation.WorkItemTracking.QueryItem" ? "Requête" : "Dépôt";
+          const table = rows.length ? "<table id='favorites'><thead><tr><th></th><th>Nom</th><th>Type</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='fav-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.artifactName) + "'>Retirer</button></td><td>" + esc(item.artifactName) + "</td><td>" + esc(kindLabel(item.artifactType)) + "</td></tr>").join("") + "</tbody></table>" : "<p id='fav-empty' class='sub'>Aucun favori.</p>";
+          view.innerHTML = "<h1>Favoris</h1><div class='command'><input id='fav-name' placeholder='Pompe' /><select id='fav-type'><option value='Microsoft.TeamFoundation.Git.Repository'>Dépôt</option><option value='Microsoft.TeamFoundation.WorkItemTracking.QueryItem'>Requête</option></select><button id='fav-add' type='button'>Ajouter</button></div>" + table + "<p id='fav-error' class='error' hidden></p>";
+          document.getElementById("fav-add").onclick = async () => {
+            const error = document.getElementById("fav-error");
+            error.hidden = true;
+            const name = document.getElementById("fav-name").value;
+            try {
+              await api("POST", "/" + org + "/_apis/favorite/favorites?api-version=7.1", {
+                artifactId: name,
+                artifactName: name,
+                artifactType: document.getElementById("fav-type").value,
+                artifactScope: { type: "Project", id: project, name: project },
+              });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.fav-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("fav-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", "/" + org + "/_apis/favorite/favorites/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
