@@ -14350,3 +14350,378 @@ async fn removing_one_test_run_keeps_the_sibling_and_its_results() {
     assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
     assert!(!names.iter().any(|name| name == "Pompe"), "{names:?}");
 }
+
+#[tokio::test]
+async fn removing_one_pull_request_reviewer_keeps_the_sibling() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Ligne","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let repo_id = pull["repository"]["id"].as_str().unwrap();
+    let path = format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Ada","uniqueName":"ada@azurz.lab","vote":5,"isRequired":false}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Pompe","uniqueName":"pompe@azurz.lab","vote":0,"isRequired":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Voisin","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let voisin: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let voisin_id = voisin["pullRequestId"].as_i64().unwrap();
+    let voisin_repo = voisin["repository"]["id"].as_str().unwrap();
+    let voisin_path = format!("/azurz/AzurzDemo/_apis/git/repositories/{voisin_repo}/pullrequests/{voisin_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{voisin_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Pompe","uniqueName":"pompe@azurz.lab","vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/999/reviewers/Pompe?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("demande de tirage introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}/reviewers/inconnu?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("relecteur introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}/reviewers/Pompe/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("relecteur introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(before.as_array().unwrap().len(), 2, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"git.pullrequest.updated","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo","repository":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let updated_hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let updated_id = updated_hook["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}/reviewers/POMPE@azurz.lab?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{path}/reviewers/POMPE@azurz.lab?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("relecteur introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rows = kept.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["displayName"], "Ada");
+    assert_eq!(rows[0]["uniqueName"], "ada@azurz.lab");
+    assert_eq!(rows[0]["vote"], 5);
+    assert_eq!(rows[0]["isRequired"], false);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["status"], "active");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{updated_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(notes["count"], 1, "{body}");
+    assert_eq!(notes["value"][0]["eventType"], "git.pullrequest.updated");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{voisin_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let voisin_rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(voisin_rows.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(voisin_rows[0]["displayName"], "Pompe");
+    assert_eq!(voisin_rows[0]["vote"], 10);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/git/pullrequests?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Auto","sourceRefName":"refs/heads/feature","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let auto: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let auto_id = auto["pullRequestId"].as_i64().unwrap();
+    let auto_repo = auto["repository"]["id"].as_str().unwrap();
+    let auto_path = format!("/azurz/AzurzDemo/_apis/git/repositories/{auto_repo}/pullrequests/{auto_id}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{auto_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Ada","uniqueName":"ada@azurz.lab","vote":10}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("{auto_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Bruit","uniqueName":"bruit@azurz.lab","vote":0,"isRequired":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("{auto_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"autoCompleteSetBy":{"id":"azurz"},"completionOptions":{"mergeStrategy":"noFastForward","deleteSourceBranch":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let armed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(armed["status"], "active");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{updated_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before_merge: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let updated_before = before_merge["count"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/hooks/subscriptions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"publisherId":"tfs","eventType":"git.pullrequest.merged","consumerId":"webHooks","consumerActionId":"httpRequest","consumerInputs":{"url":"/_hooks/inbox"},"publisherInputs":{"projectId":"AzurzDemo","repository":"AzurzDemo"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let merged_hook: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let merged_id = merged_hook["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("{auto_path}/reviewers/bruit@azurz.lab?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{auto_path}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let merged: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(merged["status"], "completed");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{auto_path}/reviewers?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let auto_rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(auto_rows.as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(auto_rows[0]["displayName"], "Ada");
+    assert_eq!(auto_rows[0]["vote"], 10);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{merged_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let merged_notes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(merged_notes["count"], 1, "{body}");
+    assert_eq!(merged_notes["value"][0]["eventType"], "git.pullrequest.merged");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/hooks/subscriptions/{updated_id}/notifications?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after_merge: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(after_merge["count"].as_i64().unwrap(), updated_before, "{body}");
+}

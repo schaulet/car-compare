@@ -2017,7 +2017,7 @@ fn pull_child_resource(
         return pull_commits(state, method, org, project, pull_id);
     }
     if kind == "reviewers" {
-        return reviewers(state, method, org, project, pull_id, body);
+        return reviewers(state, method, org, project, pull_id, tail, body);
     }
     if kind == "iterations" {
         return pull_iterations(state, method, org, project, pull_id, tail);
@@ -2213,10 +2213,46 @@ fn artifact_targets_pull(url: &str, project: &str, project_id: &str, repo_id: &s
     project_ok && repo_ok && pull_ok
 }
 
-fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, body: &[u8]) -> Response {
+fn reviewer_matches(item: &Value, id: &str) -> bool {
+    text_of(item, "id").is_some_and(|value| value.eq_ignore_ascii_case(id))
+        || text_of(item, "displayName").is_some_and(|value| value.eq_ignore_ascii_case(id))
+        || text_of(item, "uniqueName").is_some_and(|value| value.eq_ignore_ascii_case(id))
+}
+
+fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_id: &str, tail: &[String], body: &[u8]) -> Response {
     let key = format!("git/pullrequests/{pull_id}/reviewers");
     if method == Method::GET {
         return Json(Value::Array(list(state, org, project, &key))).into_response();
+    }
+    if method == Method::DELETE {
+        if get_item(state, org, project, "git/pullrequests", pull_id).is_none() {
+            return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+        }
+        if tail.is_empty() {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        if tail.len() != 1 {
+            return fail(StatusCode::NOT_FOUND, "relecteur introuvable");
+        }
+        let Some(found) = list(state, org, project, &key).into_iter().find(|item| reviewer_matches(item, &tail[0])) else {
+            return fail(StatusCode::NOT_FOUND, "relecteur introuvable");
+        };
+        let stored_id = text_of(&found, "id").unwrap_or_default();
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(&key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        if try_autocomplete(state, org, project, pull_id).is_none() {
+            if let Some(pull) = get_item(state, org, project, "git/pullrequests", pull_id) {
+                if text_of(&pull, "status").as_deref() != Some("completed") {
+                    deliver_work_item(state, org, project, "git.pullrequest.updated", &pull);
+                }
+            }
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method != Method::POST && method != Method::PUT {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
