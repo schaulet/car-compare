@@ -122,17 +122,19 @@ fn team_settings(
                 return team_days_off(state, method, org, project, iteration, body);
             }
         }
+        if rest.len() == 3 && method == Method::POST {
+            return add_team_iteration(state, org, project, body);
+        }
+        if rest.len() == 4 && method == Method::DELETE {
+            return remove_team_iteration(state, org, project, &rest[3]);
+        }
         if method != Method::GET {
             return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
         }
-        let value = state.read(|db| {
-            db.project(org, project)
-                .map(|stored| stored.list_bucket("work/teamsettings/iterations"))
-                .unwrap_or_default()
-        });
+        let value = team_iterations(state, org, project);
         if rest.len() >= 4 {
             let id = &rest[3];
-            return match value.into_iter().find(|item| item_id(item) == *id || item_text(item, "name").as_deref() == Some(id.as_str())) {
+            return match value.into_iter().find(|item| iteration_matches(item, id)) {
                 Some(item) => Json(dress_iteration(item)).into_response(),
                 None => fail(StatusCode::NOT_FOUND, "itération introuvable"),
             };
@@ -565,6 +567,157 @@ fn team_days_off(state: &AppState, method: &Method, org: &str, project: &str, it
         return Json(json!({"daysOff": days_off, "url": item["url"]})).into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn team_iterations(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket("work/teamsettings/iterations"))
+            .unwrap_or_default()
+    })
+}
+
+fn classification_iterations(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let _ = crate::shapes::classification_nodes(
+        state,
+        &Method::GET,
+        org,
+        project,
+        &["wit".into(), "classificationnodes".into(), "iterations".into()],
+        "$depth=1",
+        b"",
+    );
+    state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket("wit/classification/iterations"))
+            .unwrap_or_default()
+    })
+}
+
+fn iteration_matches(item: &Value, id: &str) -> bool {
+    item_id(item).eq_ignore_ascii_case(id)
+        || item_text(item, "name").is_some_and(|name| name.eq_ignore_ascii_case(id))
+        || item_text(item, "identifier").is_some_and(|name| name.eq_ignore_ascii_case(id))
+}
+
+fn add_team_iteration(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body).filter(|value| value.is_object()) else {
+        return fail(StatusCode::BAD_REQUEST, "itération illisible");
+    };
+    let Some(raw_id) = payload.get("id") else {
+        return fail(StatusCode::BAD_REQUEST, "itération absente");
+    };
+    let Some(id) = raw_id.as_str() else {
+        return fail(StatusCode::BAD_REQUEST, "itération illisible");
+    };
+    if id.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "itération absente");
+    }
+    let nodes = classification_iterations(state, org, project);
+    let Some(node) = nodes.iter().find(|node| iteration_matches(node, id.trim())).cloned() else {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    };
+    if item_text(&node, "identifier").as_deref() == Some("iteration") {
+        return fail(StatusCode::BAD_REQUEST, "itération racine");
+    }
+    let selected = team_iterations(state, org, project);
+    let name = item_text(&node, "name").unwrap_or_default();
+    let identifier = item_text(&node, "identifier").unwrap_or_default();
+    if selected.iter().any(|item| {
+        item_text(item, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+            || item_text(item, "identifier").is_some_and(|current| !identifier.is_empty() && current.eq_ignore_ascii_case(&identifier))
+    }) {
+        return fail(StatusCode::BAD_REQUEST, "itération déjà retenue");
+    }
+    let mut attributes = node.get("attributes").cloned().filter(|value| value.is_object()).unwrap_or_else(|| json!({}));
+    let frame = match iteration_time_frame(&attributes) {
+        Ok(frame) => frame,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    if let Some(object) = attributes.as_object_mut() {
+        object.insert("timeFrame".into(), json!(frame));
+    }
+    let path = item_text(&node, "path").unwrap_or_else(|| format!("{project}\\{name}"));
+    let created = state.write(|db| {
+        let stored = db.project_mut(org, project)?;
+        let item = json!({
+            "name": name,
+            "path": path,
+            "identifier": identifier,
+            "attributes": attributes
+        });
+        Some(stored.put_bucket("work/teamsettings/iterations", item))
+    });
+    match created {
+        Some(item) => Json(dress_iteration(item)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+    }
+}
+
+fn remove_team_iteration(state: &AppState, org: &str, project: &str, id: &str) -> Response {
+    let selected = team_iterations(state, org, project);
+    let Some(current) = selected.into_iter().find(|item| iteration_matches(item, id)) else {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    };
+    let dressed = dress_iteration(current.clone());
+    let frame = dressed
+        .get("attributes")
+        .and_then(|value| value.get("timeFrame"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("current");
+    if frame == "current" {
+        return fail(StatusCode::BAD_REQUEST, "itération courante");
+    }
+    let stored_id = item_id(&current);
+    let removed = state.write(|db| {
+        db.project_mut(org, project)
+            .and_then(|stored| stored.buckets.get_mut("work/teamsettings/iterations"))
+            .is_some_and(|bucket| bucket.remove(&stored_id))
+    });
+    if removed {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        fail(StatusCode::NOT_FOUND, "itération introuvable")
+    }
+}
+
+fn iteration_time_frame(attributes: &Value) -> Result<&'static str, &'static str> {
+    let start = attributes.get("startDate").filter(|value| !value.is_null());
+    let finish = attributes.get("finishDate").filter(|value| !value.is_null());
+    match (start, finish) {
+        (None, None) => Ok("future"),
+        (Some(start), Some(finish)) => {
+            let start = normalize_lab_date(start)?;
+            let finish = normalize_lab_date(finish)?;
+            let now = "2026-10-29T00:00:00Z";
+            if start.as_str() > now {
+                Ok("future")
+            } else if finish.as_str() < now {
+                Ok("past")
+            } else {
+                Ok("current")
+            }
+        }
+        _ => Err("date illisible"),
+    }
+}
+
+fn normalize_lab_date(value: &Value) -> Result<String, &'static str> {
+    let text = value.as_str().ok_or("date illisible")?;
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err("date illisible");
+    }
+    if !bytes[..10].iter().all(|byte| byte.is_ascii_digit() || *byte == b'-') {
+        return Err("date illisible");
+    }
+    if text.len() == 10 {
+        return Ok(format!("{text}T00:00:00Z"));
+    }
+    if bytes.get(10) == Some(&b'T') {
+        return Ok(text.to_string());
+    }
+    Err("date illisible")
 }
 
 fn iteration_by_id(state: &AppState, org: &str, project: &str, id: &str) -> Option<Value> {

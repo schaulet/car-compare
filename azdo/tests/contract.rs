@@ -13644,3 +13644,251 @@ async fn removing_one_branch_keeps_the_sibling_and_the_default() {
     assert!(body.contains("refs/heads/ada"), "{body}");
     assert!(body.contains("refs/heads/main"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_team_iteration_keeps_the_sibling_and_the_current() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seeded["count"], 1);
+    assert_eq!(seeded["value"][0]["name"], "Sprint 1");
+    assert_eq!(seeded["value"][0]["attributes"]["timeFrame"], "current");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":3}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération illisible"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"iteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération racine"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"node-3"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération déjà retenue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"node-999"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("itération introuvable"), "{body}");
+
+    for (name, start, finish) in [
+        ("Pompe", "2026-11-09", "2026-11-20"),
+        ("Ada", "2026-12-01", "2026-12-12"),
+        ("Revue", "2026-10-26", "2026-11-06"),
+        ("Hiver", "2026-10-01", "2026-10-10"),
+        ("Brouillon", "2026-11-01", "pas-une-date"),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}","attributes":{{"startDate":"{start}","finishDate":"{finish}"}}}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let node: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let identifier = node["identifier"].as_str().unwrap().to_string();
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"id":"{identifier}"}}"#)),
+        )
+        .await;
+        if name == "Brouillon" {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.contains("date illisible"), "{body}");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let added: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(added["name"], name);
+            let frame = match name {
+                "Revue" => "current",
+                "Hiver" => "past",
+                _ => "future",
+            };
+            assert_eq!(added["attributes"]["timeFrame"], frame, "{body}");
+        }
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération déjà retenue"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/Revue?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération courante"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/SPRINT%201?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération courante"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/POMPE?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/POMPE?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("itération introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = kept["value"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap().to_string()).collect();
+    assert!(names.iter().any(|name| name == "Sprint 1"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Ada"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Revue"), "{names:?}");
+    assert!(names.iter().any(|name| name == "Hiver"), "{names:?}");
+    assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("pompe")), "{names:?}");
+    assert!(!names.iter().any(|name| name == "Brouillon"), "{names:?}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?$depth=2&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Pompe"), "{body}");
+}

@@ -485,8 +485,28 @@
             const activity = (item.activities && item.activities[0]) || {};
             return "<tr><td>" + esc(item.teamMember && item.teamMember.displayName) + "</td><td>" + esc(activity.name) + "</td><td>" + esc(activity.capacityPerDay) + "</td><td>" + esc((item.daysOff || []).length) + "</td></tr>";
           }).join("") + "</tbody></table>" : "<p class='sub'>Aucune capacité.</p>";
-          view.innerHTML = "<h1>Sprints</h1><p class='sub' id='sprint-name'>" + esc(sprint ? sprint.name : "Aucune itération") + " · " + esc(String(start).slice(0, 10)) + " → " + esc(String(finish).slice(0, 10)) + " · " + esc((days.daysOff || []).length) + " jour d'équipe off</p><h2>Capacité</h2><div class='command'><input id='cap-member' placeholder='Membre' value='" + esc(user) + "' /><select id='cap-activity'><option>Development</option><option>Testing</option><option>Design</option><option>Requirements</option></select><input id='cap-hours' type='number' min='0' step='0.5' value='6' /><button id='cap-save' type='button'>Enregistrer la capacité</button></div>" + people + "<h2>Éléments du sprint</h2><div class='command'><input id='sprint-title' placeholder='Tâche du sprint' /><button id='sprint-create' type='button'>Ajouter</button></div>" + rows(sprintItems);
+          const sprintRows = iterations.length ? "<table id='sprint-list'><thead><tr><th>Itération</th><th>Cadre</th><th></th></tr></thead><tbody>" + iterations.map((item) => {
+            const frame = item.attributes && item.attributes.timeFrame || "";
+            const action = frame === "current" ? "" : "<button type='button' class='sprint-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button>";
+            return "<tr><td>" + esc(item.name) + "</td><td class='sprint-frame'>" + esc(frame) + "</td><td>" + action + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='sprint-empty' class='sub'>Aucune itération.</p>";
+          view.innerHTML = "<h1>Sprints</h1><div class='command'><input id='iteration-name' placeholder='Pompe' /><button id='iteration-add' type='button'>Ajouter l'itération</button></div>" + sprintRows + "<p class='sub' id='sprint-name'>" + esc(sprint ? sprint.name : "Aucune itération") + " · " + esc(String(start).slice(0, 10)) + " → " + esc(String(finish).slice(0, 10)) + " · " + esc((days.daysOff || []).length) + " jour d'équipe off</p><h2>Capacité</h2><div class='command'><input id='cap-member' placeholder='Membre' value='" + esc(user) + "' /><select id='cap-activity'><option>Development</option><option>Testing</option><option>Design</option><option>Requirements</option></select><input id='cap-hours' type='number' min='0' step='0.5' value='6' /><button id='cap-save' type='button'>Enregistrer la capacité</button></div>" + people + "<h2>Éléments du sprint</h2><div class='command'><input id='sprint-title' placeholder='Tâche du sprint' /><button id='sprint-create' type='button'>Ajouter</button></div>" + rows(sprintItems);
           bindRows();
+          document.getElementById("iteration-add").onclick = async () => {
+            const name = document.getElementById("iteration-name").value || "Pompe";
+            const created = await api("POST", root + "/wit/classificationnodes/iterations?api-version=7.1", {
+              name: name,
+              attributes: { startDate: "2026-11-09", finishDate: "2026-11-20" },
+            });
+            await api("POST", root + "/work/teamsettings/iterations?api-version=7.1", { id: created.identifier });
+            location.reload();
+          };
+          document.querySelectorAll("button.sprint-remove").forEach((button) => {
+            button.onclick = async () => {
+              await api("DELETE", root + "/work/teamsettings/iterations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              location.reload();
+            };
+          });
           document.getElementById("cap-save").onclick = async () => {
             if (!sprint) return;
             const member = document.getElementById("cap-member").value || user;
