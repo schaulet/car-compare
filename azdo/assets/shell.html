@@ -843,7 +843,7 @@
                   diffBody = diffText(diff.changes);
                 }
                 const lines = (statuses.value || []).map((item) => "<li>" + esc(item.context && item.context.name) + " · " + esc(item.state) + " · " + esc(item.description || "") + "</li>").join("") || "<li>Aucun statut.</li>";
-                panel.innerHTML = "<h2>Statuts</h2><ul id='status-list'>" + lines + "</ul><div class='row'><select id='status-state'><option value='pending'>pending</option><option value='succeeded' selected>succeeded</option><option value='failed'>failed</option><option value='error'>error</option></select><input id='status-genre' placeholder='Genre' value='continuous-integration' /><input id='status-context' placeholder='Contexte' value='ci' /><input id='status-note' placeholder='Description' /><button id='status-add' type='button'>Publier le statut</button></div><h2>Diff</h2><pre id='diff-text'></pre>";
+                panel.innerHTML = "<h2>Statuts</h2><ul id='status-list'>" + lines + "</ul><div class='row'><select id='status-state'><option value='pending'>pending</option><option value='succeeded' selected>succeeded</option><option value='failed'>failed</option><option value='error'>error</option></select><input id='status-genre' placeholder='Genre' value='continuous-integration' /><input id='status-context' placeholder='Contexte' value='ci' /><input id='status-note' placeholder='Description' /><button id='status-add' type='button'>Publier le statut</button></div><div class='row'><input id='replay-ref' placeholder='refs/heads/cherry' value='refs/heads/cherry' /><button id='cherry-pick' type='button'>Cherry-pick</button><button id='revert-commit' type='button'>Revert</button></div><p id='replay-result' class='sub'></p><h2>Diff</h2><pre id='diff-text'></pre>";
                 document.getElementById("diff-text").textContent = diffBody;
                 document.getElementById("status-add").onclick = async () => {
                   await api("POST", repoPath + "/commits/" + encodeURIComponent(row.dataset.id) + "/statuses?api-version=7.1", {
@@ -857,6 +857,22 @@
                   });
                   location.reload();
                 };
+                async function replay(kind) {
+                  const raw = document.getElementById("replay-ref").value || "refs/heads/cherry";
+                  const refName = raw.startsWith("refs/") ? raw : "refs/heads/" + raw;
+                  try {
+                    await api("POST", repoPath + "/" + kind + "?api-version=7.1", {
+                      generatedRefName: refName,
+                      ontoRefName: "refs/heads/main",
+                      source: { commitList: [{ commitId: row.dataset.id }] },
+                    });
+                    location.reload();
+                  } catch (error) {
+                    document.getElementById("replay-result").textContent = error.message || String(error);
+                  }
+                }
+                document.getElementById("cherry-pick").onclick = () => replay("cherryPicks");
+                document.getElementById("revert-commit").onclick = () => replay("reverts");
               };
             });
             document.getElementById("push").onclick = async () => {

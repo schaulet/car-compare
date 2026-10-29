@@ -266,6 +266,25 @@ impl ProjectData {
                     }));
                     bucket
                 });
+            self.buckets
+                .entry(format!("git/repositories/{id}/commits/{commit}/blobs"))
+                .or_insert_with(|| {
+                    let mut bucket = Bucket::empty();
+                    bucket.put(json!({
+                        "id": "/",
+                        "path": "/",
+                        "isFolder": true,
+                        "gitObjectType": "tree"
+                    }));
+                    bucket.put(json!({
+                        "id": "/README.md",
+                        "path": "/README.md",
+                        "isFolder": false,
+                        "gitObjectType": "blob",
+                        "content": format!("# {name}\n")
+                    }));
+                    bucket
+                });
         }
     }
 

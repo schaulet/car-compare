@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -133,6 +135,8 @@ fn git_repositories(
         "annotatedtags" => annotated_tags(state, method, org, project, repo_id, tail_after(rest, "annotatedtags"), body),
         "commits" => commits(state, method, org, project, repo_id, tail_after(rest, "commits"), query, body),
         "pushes" => pushes(state, method, org, project, repo_id, tail_after(rest, "pushes"), body),
+        "cherrypicks" => git_replay(state, method, org, project, repo_id, tail_after(rest, "cherrypicks"), body, false),
+        "reverts" => git_replay(state, method, org, project, repo_id, tail_after(rest, "reverts"), body, true),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
         "items" => items(state, org, project, repo_id, query),
         "diffs" => diffs(state, org, project, repo_id, query),
@@ -512,6 +516,277 @@ fn pushes(state: &AppState, method: &Method, org: &str, project: &str, repo_id: 
         PushOutcome::Conflict => fail(StatusCode::CONFLICT, "la référence a changé"),
         PushOutcome::Missing => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
     }
+}
+
+fn git_replay(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    tail: &[String],
+    body: &[u8],
+    revert: bool,
+) -> Response {
+    if find_repo(state, org, project, repo_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
+    }
+    let kind = if revert { "revert" } else { "cherry" };
+    let resource = if revert { "reverts" } else { "cherryPicks" };
+    let key = format!("git/repositories/{repo_id}/{}", if revert { "reverts" } else { "cherrypicks" });
+    if let Some(operation_id) = tail.first() {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return match get_item(state, org, project, &key, operation_id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(
+                StatusCode::NOT_FOUND,
+                if revert { "revert introuvable" } else { "cherry-pick introuvable" },
+            ),
+        };
+    }
+    if method == Method::GET {
+        return Json(page(list(state, org, project, &key))).into_response();
+    }
+    if method != Method::POST {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let Some(generated) = text_of(&payload, "generatedRefName").filter(|name| name.starts_with("refs/")) else {
+        return fail(StatusCode::BAD_REQUEST, "référence absente");
+    };
+    let Some(onto) = text_of(&payload, "ontoRefName").filter(|name| name.starts_with("refs/")) else {
+        return fail(StatusCode::BAD_REQUEST, "branche cible absente");
+    };
+    let commit_ids = payload
+        .get("source")
+        .and_then(|source| source.get("commitList"))
+        .and_then(|value| value.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| text_of(row, "commitId").or_else(|| text_of(row, "id")))
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if commit_ids.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "commits absents");
+    }
+    let commits_key = format!("git/repositories/{repo_id}/commits");
+    for commit_id in &commit_ids {
+        if get_item(state, org, project, &commits_key, commit_id).is_none() {
+            return fail(StatusCode::BAD_REQUEST, "commit introuvable");
+        }
+    }
+    if get_item(state, org, project, &format!("git/repositories/{repo_id}/refs"), &generated).is_some() {
+        return fail(StatusCode::BAD_REQUEST, "référence existante");
+    }
+    if get_item(state, org, project, &format!("git/repositories/{repo_id}/refs"), &onto)
+        .and_then(|item| text_of(&item, "objectId"))
+        .is_none()
+    {
+        return fail(StatusCode::BAD_REQUEST, "branche cible introuvable");
+    }
+    let repository_name = repo_name(state, org, project, repo_id);
+    let outcome = state.write(|db| {
+        let stored = db.project_mut(org, project)?;
+        let refs_key = format!("git/repositories/{repo_id}/refs");
+        if stored.get_bucket(&refs_key, &generated).is_some() {
+            return Some(Err("référence existante"));
+        }
+        let Some(onto_now) = stored.get_bucket(&refs_key, &onto).and_then(|item| text_of(&item, "objectId")) else {
+            return Some(Err("branche cible introuvable"));
+        };
+        let mut parent = onto_now.clone();
+        let mut blobs = stored.list_bucket(&format!("{commits_key}/{onto_now}/blobs"));
+        let mut created = Vec::new();
+        for (index, commit_id) in commit_ids.iter().enumerate() {
+            let Some(source) = stored.get_bucket(&commits_key, commit_id) else {
+                return Some(Err("commit introuvable"));
+            };
+            let original = text_of(&source, "comment").unwrap_or_else(|| "Mise à jour".into());
+            let comment = if revert {
+                format!("Revert \"{original}\"")
+            } else {
+                original
+            };
+            let source_changes = stored.list_bucket(&format!("{commits_key}/{commit_id}/changes"));
+            let working = if revert {
+                source_changes.iter().map(invert_stored_change).collect::<Vec<_>>()
+            } else {
+                source_changes
+            };
+            let (next_blobs, recorded) = apply_onto_blobs(&blobs, &working);
+            let new_id = object_id(&format!("{kind}:{repo_id}:{index}:{comment}:{parent}"));
+            let item = json!({
+                "id": new_id,
+                "commitId": new_id,
+                "comment": comment,
+                "author": {"name": "azurz", "email": "azurz@lab", "date": "2026-10-29T00:00:00Z"},
+                "committer": {"name": "azurz", "email": "azurz@lab", "date": "2026-10-29T00:00:00Z"},
+                "parents": [parent],
+                "changeCounts": change_counts(&recorded),
+                "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{new_id}")
+            });
+            stored.put_bucket(&commits_key, item.clone());
+            for change in &recorded {
+                stored.put_bucket(&format!("{commits_key}/{new_id}/changes"), change.clone());
+            }
+            for blob in &next_blobs {
+                stored.put_bucket(&format!("{commits_key}/{new_id}/blobs"), blob.clone());
+            }
+            blobs = next_blobs;
+            parent = new_id;
+            created.push(item);
+        }
+        let tip = parent;
+        stored.put_bucket(
+            &refs_key,
+            json!({"id": generated, "name": generated, "objectId": tip, "newObjectId": tip, "success": true}),
+        );
+        let pushes_key = format!("git/repositories/{repo_id}/pushes");
+        let push_id = stored.list_bucket(&pushes_key).len() as i64 + 1;
+        let push = json!({
+            "id": push_id,
+            "pushId": push_id,
+            "date": "2026-10-29T00:00:00Z",
+            "commits": created,
+            "refUpdates": [{"name": generated, "oldObjectId": "0000000000000000000000000000000000000000", "newObjectId": tip}],
+            "repository": {"id": repo_id, "name": repository_name},
+            "pushedBy": {"displayName": "azurz", "uniqueName": "azurz"},
+            "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/pushes/{push_id}")
+        });
+        stored.put_bucket(&pushes_key, push.clone());
+        let op_id = stored.list_bucket(&key).len() as i64 + 1;
+        let id_name = if revert { "revertId" } else { "cherryPickId" };
+        let operation = json!({
+            "id": op_id,
+            id_name: op_id,
+            "parameters": {
+                "generatedRefName": generated,
+                "ontoRefName": onto,
+                "source": {"commitList": commit_ids.iter().map(|id| json!({"commitId": id})).collect::<Vec<_>>()}
+            },
+            "status": "completed",
+            "detailedStatus": {"status": "succeeded", "currentCommitId": tip, "progress": 1.0},
+            "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/{resource}/{op_id}")
+        });
+        stored.put_bucket(&key, operation.clone());
+        Some(Ok((operation, push, generated.clone())))
+    });
+    match outcome {
+        Some(Ok((operation, push, generated))) => {
+            advance_pull_iterations(state, org, project, repo_id, &[generated]);
+            deliver_work_item(state, org, project, "git.push", &push);
+            Json(operation).into_response()
+        }
+        Some(Err(message)) => fail(StatusCode::BAD_REQUEST, message),
+        None => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
+    }
+}
+
+fn invert_stored_change(change: &Value) -> Value {
+    let kind = text_of(change, "changeType").unwrap_or_else(|| "add".into()).to_ascii_lowercase();
+    let path = change
+        .get("item")
+        .and_then(|item| text_of(item, "path"))
+        .or_else(|| text_of(change, "id"))
+        .unwrap_or_else(|| "/fichier.txt".into());
+    let original = change.get("originalContent").and_then(|value| text_of(value, "content"));
+    let fresh = change.get("newContent").and_then(|value| text_of(value, "content"));
+    match kind.as_str() {
+        "delete" => json!({
+            "changeType": "add",
+            "item": {"path": path, "gitObjectType": "blob"},
+            "newContent": {"content": original.unwrap_or_default(), "contentType": "rawtext"}
+        }),
+        "edit" => json!({
+            "changeType": "edit",
+            "item": {"path": path, "gitObjectType": "blob"},
+            "newContent": {"content": original.clone().unwrap_or_default(), "contentType": "rawtext"},
+            "originalContent": fresh.as_ref().map(|text| json!({"content": text, "contentType": "rawtext"})).unwrap_or(Value::Null)
+        }),
+        _ => json!({
+            "changeType": "delete",
+            "item": {"path": path, "gitObjectType": "blob"},
+            "originalContent": fresh.as_ref().map(|text| json!({"content": text, "contentType": "rawtext"})).unwrap_or(Value::Null),
+            "newContent": Value::Null
+        }),
+    }
+}
+
+fn apply_onto_blobs(base: &[Value], changes: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let mut files: BTreeMap<String, Value> = BTreeMap::new();
+    for blob in base {
+        let path = text_of(blob, "path").or_else(|| text_of(blob, "id")).unwrap_or_default();
+        if !path.is_empty() {
+            files.insert(path, blob.clone());
+        }
+    }
+    if !files.contains_key("/") {
+        files.insert(
+            "/".into(),
+            json!({"id": "/", "path": "/", "isFolder": true, "gitObjectType": "tree"}),
+        );
+    }
+    let mut recorded = Vec::new();
+    for change in changes {
+        let path = change
+            .get("item")
+            .and_then(|item| text_of(item, "path"))
+            .or_else(|| text_of(change, "id"))
+            .unwrap_or_default();
+        if path.is_empty() {
+            continue;
+        }
+        let path = if path.starts_with('/') { path } else { format!("/{path}") };
+        let mut kind = text_of(change, "changeType").unwrap_or_else(|| "add".into()).to_ascii_lowercase();
+        let exists = files.get(&path).is_some_and(|item| item.get("isFolder").and_then(|value| value.as_bool()) != Some(true));
+        if kind == "add" && exists {
+            kind = "edit".into();
+        } else if kind == "edit" && !exists {
+            kind = "add".into();
+        }
+        let original = files.get(&path).and_then(|item| text_of(item, "content"));
+        let content = change
+            .get("newContent")
+            .and_then(|value| text_of(value, "content"))
+            .unwrap_or_default();
+        if kind == "delete" {
+            files.remove(&path);
+        } else {
+            let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect();
+            if parts.len() > 1 {
+                let mut prefix = String::new();
+                for part in &parts[..parts.len() - 1] {
+                    prefix.push('/');
+                    prefix.push_str(part);
+                    files.entry(prefix.clone()).or_insert_with(|| {
+                        json!({"id": prefix, "path": prefix, "isFolder": true, "gitObjectType": "tree"})
+                    });
+                }
+            }
+            files.insert(
+                path.clone(),
+                json!({
+                    "id": path,
+                    "path": path,
+                    "isFolder": false,
+                    "gitObjectType": "blob",
+                    "content": content
+                }),
+            );
+        }
+        recorded.push(json!({
+            "id": path,
+            "changeType": kind,
+            "item": {"path": path, "gitObjectType": "blob"},
+            "originalContent": original.as_ref().map(|text| json!({"content": text, "contentType": "rawtext"})).unwrap_or(Value::Null),
+            "newContent": if kind == "delete" { Value::Null } else { json!({"content": content, "contentType": "rawtext"}) }
+        }));
+    }
+    (files.into_values().collect(), recorded)
 }
 
 enum PushOutcome {
