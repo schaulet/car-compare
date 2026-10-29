@@ -7150,7 +7150,16 @@ fn pool_jobs(
         if agent_id.is_some() && agent.is_none() {
             return fail(StatusCode::NOT_FOUND, "agent introuvable");
         }
-        let next = org_list(state, org, &key).len() as i64 + 1;
+        let next = org_list(state, org, &key)
+            .into_iter()
+            .filter_map(|item| {
+                item.get("requestId")
+                    .and_then(|value| value.as_i64())
+                    .or_else(|| item.get("id").and_then(|value| value.as_i64()))
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
         let agent_name = agent.as_ref().and_then(|item| text_of(item, "name")).unwrap_or_default();
         let definition = payload.get("definition").cloned().unwrap_or(json!({"id": 1, "name": "CI"}));
         let item = json!({
@@ -7170,6 +7179,9 @@ fn pool_jobs(
         org_put(state, org, &key, item.clone());
         return Json(item).into_response();
     }
+    if method == Method::DELETE && rest.len() != 5 {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
     if rest.len() >= 5 {
         let request_id = &rest[4];
         let Some(current) = org_get(state, org, &key, request_id) else {
@@ -7177,6 +7189,17 @@ fn pool_jobs(
         };
         if method == Method::GET {
             return Json(current).into_response();
+        }
+        if method == Method::DELETE {
+            let stored_id = value_key(&current["id"]);
+            state.write(|db| {
+                if let Some(organization) = db.orgs.get_mut(org) {
+                    if let Some(bucket) = organization.buckets.get_mut(&key) {
+                        bucket.remove(&stored_id);
+                    }
+                }
+            });
+            return StatusCode::NO_CONTENT.into_response();
         }
         if method == Method::PATCH || method == Method::PUT {
             let payload = parse_json(body).unwrap_or(json!({}));

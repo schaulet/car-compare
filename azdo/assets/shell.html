@@ -2074,11 +2074,12 @@
               : "<button type='button' class='online' data-id='" + esc(item.id) + "'>En ligne</button>";
             return "<tr><td>" + esc(item.name) + "</td><td class='status'>" + esc(item.status) + "</td><td>" + esc(item.osDescription) + "</td><td>" + esc(item.version) + "</td><td>" + action + " <button type='button' class='agent-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td></tr>";
           }).join("") + "</tbody></table>" : "<p id='agent-empty' class='sub'>Aucun agent.</p>";
-          const work = jobs.length ? "<table id='jobs'><thead><tr><th>Demande</th><th>Agent</th><th>Définition</th><th>État</th><th>Résultat</th><th></th></tr></thead><tbody>" + jobs.map((item) => {
-            const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(item.requestId || item.id) + "'>Terminer</button>" : "";
-            return "<tr><td>" + esc(item.requestId || item.id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
-          }).join("") + "</tbody></table>" : "<p class='sub'>Aucune demande de travail.</p>";
-          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work;
+          const work = jobs.length ? "<table id='jobs'><thead><tr><th></th><th>Demande</th><th>Agent</th><th>Définition</th><th>État</th><th>Résultat</th><th></th></tr></thead><tbody>" + jobs.map((item) => {
+            const id = item.requestId || item.id;
+            const finish = item.status === "queued" ? "<button type='button' class='finish' data-id='" + esc(id) + "'>Terminer</button>" : "";
+            return "<tr><td><button type='button' class='job-remove' data-id='" + esc(id) + "'>Retirer</button></td><td>" + esc(id) + "</td><td>" + esc(item.reservedAgent && item.reservedAgent.name) + "</td><td>" + esc(item.definition && item.definition.name) + "</td><td>" + esc(item.status) + "</td><td>" + esc(item.result || "") + "</td><td>" + finish + "</td></tr>";
+          }).join("") + "</tbody></table>" : "<p id='job-empty' class='sub'>Aucune demande de travail.</p>";
+          view.innerHTML = "<h1>Agents</h1><p class='sub' id='pool-name'>" + esc(pool.name) + " · " + esc(pool.size) + "</p><div class='command'><input id='agent-name' placeholder='Pompe' /><input id='agent-os' placeholder='Système' value='Linux' /><button id='agent-add' type='button'>Enregistrer</button></div>" + table + "<p id='agent-error' class='error' hidden></p><h2>Demandes</h2>" + work + "<p id='job-error' class='sub' hidden></p>";
           document.getElementById("agent-add").onclick = async () => {
             try {
               await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/agents?api-version=7.1", {
@@ -2119,17 +2120,44 @@
           });
           document.querySelectorAll("button.assign").forEach((button) => {
             button.onclick = async () => {
-              await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1", {
-                agentId: Number(button.dataset.id),
-                planType: "Build",
-                definition: { id: 1, name: "CI" },
-              });
+              try {
+                await api("POST", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests?api-version=7.1", {
+                  agentId: Number(button.dataset.id),
+                  planType: "Build",
+                  definition: { id: 1, name: "CI" },
+                });
+              } catch (error) {
+                const note = document.getElementById("job-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
+              location.reload();
+            };
+          });
+          document.querySelectorAll("button.job-remove").forEach((button) => {
+            button.onclick = async () => {
+              try {
+                await api("DELETE", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              } catch (error) {
+                const note = document.getElementById("job-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
               location.reload();
             };
           });
           document.querySelectorAll("button.finish").forEach((button) => {
             button.onclick = async () => {
-              await api("PATCH", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { result: "succeeded" });
+              try {
+                await api("PATCH", "/" + org + "/_apis/distributedtask/pools/" + encodeURIComponent(poolId) + "/jobrequests/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1", { result: "succeeded" });
+              } catch (error) {
+                const note = document.getElementById("job-error");
+                note.hidden = false;
+                note.textContent = error.message;
+                return;
+              }
               location.reload();
             };
           });
