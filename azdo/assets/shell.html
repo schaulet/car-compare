@@ -160,6 +160,7 @@
       <a href="/__ORG__/__PROJECT__/_processes">Processus</a>
       <a href="/__ORG__/__PROJECT__/_workitemtypes">Types</a>
       <a href="/__ORG__/__PROJECT__/_states">États</a>
+      <a href="/__ORG__/__PROJECT__/_rules">Règles</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3674,6 +3675,68 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.type) + "/states/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_rules") {
+          const agile = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+          const processes = await api("GET", root + "/work/processes?api-version=7.1");
+          const inherited = (processes.value || []).filter((item) => item.customizationType === "Inherited");
+          let rows = [];
+          for (const process of inherited) {
+            const types = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes?api-version=7.1");
+            for (const type of (types.value || []).filter((item) => item.customizationType === "custom")) {
+              const rules = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes/" + encodeURIComponent(type.referenceName) + "/rules?api-version=7.1");
+              rows = rows.concat((rules.value || []).map((item) => Object.assign({ typeName: type.name }, item)));
+            }
+          }
+          function ruleWhen(item) {
+            const condition = (item.conditions || [])[0] || {};
+            if (condition.conditionType === "whenNot") return condition.field + " != " + condition.value;
+            if (condition.conditionType === "whenChanged") return condition.field + " changed";
+            if (condition.conditionType === "whenNotChanged") return condition.field + " unchanged";
+            return (condition.field || "") + " = " + (condition.value || "");
+          }
+          function ruleAction(item) {
+            const action = (item.actions || [])[0] || {};
+            return (action.actionType || "") + " " + (action.targetField || "");
+          }
+          const table = rows.length ? "<table id='rules'><thead><tr><th></th><th>Nom</th><th>Quand</th><th>Action</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='rule-remove' data-process='" + esc(item.processId) + "' data-type='" + esc(item.workItemType) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(ruleWhen(item)) + "</td><td>" + esc(ruleAction(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p id='rule-empty' class='sub'>Aucune règle.</p>";
+          view.innerHTML = "<h1>Règles</h1><div class='command'><input id='rule-name' placeholder='Pompe' /><button id='rule-add' type='button'>Ajouter</button></div>" + table + "<p id='rule-error' class='error' hidden></p>";
+          document.getElementById("rule-add").onclick = async () => {
+            const error = document.getElementById("rule-error");
+            error.hidden = true;
+            const name = document.getElementById("rule-name").value;
+            try {
+              const current = await api("GET", root + "/work/processes?api-version=7.1");
+              let processId = ((current.value || []).find((item) => item.customizationType === "Inherited") || {}).typeId || "";
+              if (!processId) {
+                processId = (await api("POST", root + "/work/processes?api-version=7.1", { name: "Hérité", parentProcessTypeId: agile })).typeId;
+              }
+              const types = await api("GET", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes?api-version=7.1");
+              let reference = ((types.value || []).find((item) => item.customizationType === "custom") || {}).referenceName || "";
+              if (!reference) {
+                reference = (await api("POST", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes?api-version=7.1", { name: "Ticket" })).referenceName;
+              }
+              await api("POST", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes/" + encodeURIComponent(reference) + "/rules?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.rule-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("rule-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.type) + "/rules/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

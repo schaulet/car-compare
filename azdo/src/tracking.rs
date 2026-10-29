@@ -1784,6 +1784,7 @@ fn dress_delivery_plan(org: &str, project: &str, mut item: Value) -> Value {
 const PROCESSES: &str = "work/processes";
 const WORK_ITEM_TYPES: &str = "work/processes/workitemtypes";
 const WORK_ITEM_STATES: &str = "work/processes/states";
+const WORK_ITEM_RULES: &str = "work/processes/rules";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1893,6 +1894,7 @@ pub fn work_processes(
                 return false;
             };
             drop_work_item_states(stored, &stored_id, None);
+            drop_work_item_rules(stored, &stored_id, None);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -2142,6 +2144,9 @@ fn work_item_types(
     if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("states")) {
         return work_item_states(state, method, org, project, process_key.trim(), type_tail, body);
     }
+    if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("rules")) {
+        return work_item_rules(state, method, org, project, process_key.trim(), type_tail, body);
+    }
     if type_tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -2198,6 +2203,7 @@ fn work_item_types(
                 return false;
             };
             drop_work_item_states(stored, &process_id, Some(reference.as_str()));
+            drop_work_item_rules(stored, &process_id, Some(reference.as_str()));
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -2704,6 +2710,288 @@ fn dress_state(org: &str, project: &str, mut item: Value) -> Value {
         );
     }
     item
+}
+
+fn work_item_rules(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    process_key: &str,
+    type_tail: &[String],
+    body: &[u8],
+) -> Response {
+    let rule_tail = &type_tail[2..];
+    if rule_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "règle introuvable")
+        };
+    }
+    let Some((owner, process_id, reference, system_type)) = resolve_state_type(state, org, project, process_key, type_tail[0].trim()) else {
+        return if system_process(process_key).is_none() && locate_process(state, org, project, process_key).is_none() {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    };
+    if rule_tail.is_empty() {
+        if method == Method::GET {
+            return Json(page(list_rules(state, org, &owner, &process_id, &reference)
+                .into_iter()
+                .map(|item| dress_rule(org, &owner, item))
+                .collect()))
+            .into_response();
+        }
+        if method == Method::POST {
+            let parsed = match rule_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_type {
+                return fail(StatusCode::BAD_REQUEST, "type système");
+            }
+            return match rule_create(state, org, &owner, &process_id, &reference, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&rule_tail[0]);
+    if system_type {
+        return if method == Method::DELETE || method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "règle introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    if method == Method::GET {
+        return match locate_rule(state, org, &owner, &process_id, &reference, key.trim()) {
+            Some(found) => Json(dress_rule(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "règle introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_rule(state, org, &owner, &process_id, &reference, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "règle introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_RULES))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "règle introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn list_rules(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(WORK_ITEM_RULES))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                item_text(item, "processId").is_some_and(|stored| stored == process_id)
+                    && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+            })
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_rule(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, key: &str) -> Option<Value> {
+    list_rules(state, org, project, process_id, reference).into_iter().find(|item| {
+        item_id(item) == key || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_rule_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_RULES) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("rule-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn rule_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    reference: &str,
+    parsed: (String, Value, Value, bool),
+) -> Result<Value, &'static str> {
+    let (name, conditions, actions, disabled) = parsed;
+    let id = format!("rule-{}", next_rule_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "conditions": conditions,
+        "actions": actions,
+        "isDisabled": disabled,
+        "customizationType": "custom",
+        "processId": process_id,
+        "workItemType": reference
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("règle introuvable");
+        };
+        let existing = stored.list_bucket(WORK_ITEM_RULES);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                && item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))
+        }) {
+            return Err("règle existante");
+        }
+        stored.put_bucket(WORK_ITEM_RULES, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_rule(org, project, item))
+}
+
+fn rule_payload(body: &[u8]) -> Result<(String, Value, Value, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("règle illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string) else {
+        return Err("nom absent");
+    };
+    let conditions = rule_conditions(object.get("conditions"))?;
+    let actions = rule_actions(object.get("actions"))?;
+    let disabled = match object.get("isDisabled") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("désactivation absente"),
+    };
+    Ok((name, conditions, actions, disabled))
+}
+
+fn rule_conditions(value: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(value) = value else {
+        return Ok(json!([{ "conditionType": "when", "field": "System.State", "value": "Active" }]));
+    };
+    let Some(items) = value.as_array() else {
+        return Err("condition absente");
+    };
+    if items.is_empty() {
+        return Err("condition absente");
+    }
+    let mut rows = Vec::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err("condition absente");
+        };
+        let Some(kind) = object.get("conditionType").and_then(|value| value.as_str()) else {
+            return Err("condition absente");
+        };
+        if !matches!(kind, "when" | "whenNot" | "whenChanged" | "whenNotChanged") {
+            return Err("condition absente");
+        }
+        let Some(field) = object.get("field").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err("condition absente");
+        };
+        let Some(text) = object.get("value").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err("condition absente");
+        };
+        rows.push(json!({ "conditionType": kind, "field": field, "value": text }));
+    }
+    Ok(Value::Array(rows))
+}
+
+fn rule_actions(value: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(value) = value else {
+        return Ok(json!([{ "actionType": "makeRequired", "targetField": "System.Title" }]));
+    };
+    let Some(items) = value.as_array() else {
+        return Err("action absente");
+    };
+    if items.is_empty() {
+        return Err("action absente");
+    }
+    let mut rows = Vec::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err("action absente");
+        };
+        let Some(kind) = object.get("actionType").and_then(|value| value.as_str()) else {
+            return Err("action absente");
+        };
+        if !matches!(kind, "makeRequired" | "makeReadOnly" | "setValue" | "copyValue") {
+            return Err("action absente");
+        }
+        let Some(field) = object.get("targetField").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err("action absente");
+        };
+        let mut row = json!({ "actionType": kind, "targetField": field });
+        if matches!(kind, "setValue" | "copyValue") {
+            let Some(text) = object.get("value").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("action absente");
+            };
+            row.as_object_mut().unwrap().insert("value".into(), json!(text));
+        }
+        rows.push(row);
+    }
+    Ok(Value::Array(rows))
+}
+
+fn dress_rule(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "workItemType").unwrap_or_default();
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/rules/{id}")),
+        );
+    }
+    item
+}
+
+fn drop_work_item_rules(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_RULES) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            item_text(item, "processId").is_some_and(|process| process == process_id)
+                && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
 }
 
 fn drop_work_item_states(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>) {
