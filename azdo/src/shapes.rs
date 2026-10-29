@@ -899,12 +899,23 @@ fn pull_requests(
         if method == Method::PATCH || method == Method::PUT {
             let id = rest.last().cloned().unwrap_or_default();
             let payload = parse_json(body).unwrap_or(json!({}));
+            if let Some(strategy) = payload
+                .get("completionOptions")
+                .and_then(|options| text_of(options, "mergeStrategy"))
+            {
+                if !strategy.eq_ignore_ascii_case("squash") && !strategy.eq_ignore_ascii_case("noFastForward") {
+                    return fail(StatusCode::BAD_REQUEST, "stratégie de fusion inconnue");
+                }
+            }
             let previous = get_item(state, org, project, key, &id).and_then(|item| text_of(&item, "status"));
             return match patch_item(state, org, project, key, &id, &payload) {
                 Some(item) => {
                     let completed = text_of(&item, "status").as_deref() == Some("completed");
-                    let item = if completed {
-                        finish_pull(state, org, project, &id).unwrap_or(item)
+                    let item = if completed && previous.as_deref() != Some("completed") {
+                        let prepared = squash_requested(&item).then(|| prepare_squash(state, org, project, &item));
+                        finish_pull(state, org, project, &id, prepared).unwrap_or(item)
+                    } else if completed {
+                        finish_pull(state, org, project, &id, None).unwrap_or(item)
                     } else {
                         item
                     };
@@ -978,7 +989,13 @@ fn pull_tips(state: &AppState, org: &str, project: &str, pull: &Value) -> PullTi
             .find(|item| text_of(item, "name").as_deref() == Some(name))
             .and_then(|item| text_of(item, "objectId"))
     };
-    tips_from_commits(state, org, project, &repo_id, object_of(&source_name), object_of(&target_name))
+    let source_id = object_of(&source_name).or_else(|| {
+        text_of(&pull["lastMergeSourceCommit"], "commitId").filter(|id| !id.is_empty())
+    });
+    let target_id = object_of(&target_name).or_else(|| {
+        text_of(&pull["lastMergeTargetCommit"], "commitId").filter(|id| !id.is_empty())
+    });
+    tips_from_commits(state, org, project, &repo_id, source_id, target_id)
 }
 
 fn tips_from_commits(
@@ -1417,7 +1434,70 @@ fn reviewers(state: &AppState, method: &Method, org: &str, project: &str, pull_i
     }
 }
 
-fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str) -> Option<Value> {
+struct SquashPrep {
+    changes: Vec<Value>,
+    message: String,
+    delete_source: bool,
+}
+
+fn squash_requested(pull: &Value) -> bool {
+    let options = &pull["completionOptions"];
+    text_of(options, "mergeStrategy").is_some_and(|strategy| strategy.eq_ignore_ascii_case("squash"))
+        || options.get("squashMerge").and_then(|value| value.as_bool()) == Some(true)
+}
+
+fn blob_content(state: &AppState, org: &str, project: &str, repo_id: &str, commit_id: Option<&str>, path: &str) -> Option<String> {
+    let commit_id = commit_id?;
+    get_item(
+        state,
+        org,
+        project,
+        &format!("git/repositories/{repo_id}/commits/{commit_id}/blobs"),
+        path,
+    )
+    .and_then(|item| text_of(&item, "content"))
+}
+
+fn prepare_squash(state: &AppState, org: &str, project: &str, pull: &Value) -> SquashPrep {
+    let repo_id = text_of(&pull["repository"], "id").unwrap_or_default();
+    let tips = pull_tips(state, org, project, pull);
+    let nets = net_change_entries(state, org, project, &repo_id, &tips.ahead);
+    let changes = nets
+        .into_iter()
+        .map(|entry| {
+            let path = entry
+                .get("item")
+                .and_then(|item| text_of(item, "path"))
+                .unwrap_or_default();
+            let kind = text_of(&entry, "changeType").unwrap_or_else(|| "add".into());
+            let source_content = blob_content(state, org, project, &repo_id, tips.source_id.as_deref(), &path);
+            let target_content = blob_content(state, org, project, &repo_id, tips.target_id.as_deref(), &path);
+            json!({
+                "id": path,
+                "changeType": kind,
+                "item": {"path": path, "gitObjectType": "blob"},
+                "originalContent": target_content.as_ref().map(|text| json!({"content": text, "contentType": "rawtext"})).unwrap_or(Value::Null),
+                "newContent": if kind.eq_ignore_ascii_case("delete") {
+                    Value::Null
+                } else {
+                    json!({"content": source_content.unwrap_or_default(), "contentType": "rawtext"})
+                }
+            })
+        })
+        .collect();
+    let message = text_of(&pull["completionOptions"], "mergeCommitMessage")
+        .filter(|text| !text.is_empty())
+        .or_else(|| text_of(pull, "title"))
+        .unwrap_or_else(|| "Squash".into());
+    let delete_source = pull["completionOptions"].get("deleteSourceBranch").and_then(|value| value.as_bool()) == Some(true);
+    SquashPrep {
+        changes,
+        message,
+        delete_source,
+    }
+}
+
+fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str, prepared: Option<SquashPrep>) -> Option<Value> {
     state.write(|db| {
         let stored = db.project_mut(org, project)?;
         let mut pull = stored.get_bucket("git/pullrequests", pull_id)?;
@@ -1434,19 +1514,43 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str) -> Opt
         let refs_key = format!("git/repositories/{repo_id}/refs");
         let commits_key = format!("git/repositories/{repo_id}/commits");
         let parent = stored.get_bucket(&refs_key, &target).and_then(|item| text_of(&item, "objectId"));
-        let commit_id = object_id(&format!("merge:{pull_id}:{}", parent.clone().unwrap_or_default()));
-        let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+        let source_id = stored.get_bucket(&refs_key, &source).and_then(|item| text_of(&item, "objectId"));
+        let squash = prepared.is_some();
+        let delete_source = prepared.as_ref().is_some_and(|prep| prep.delete_source);
+        let (commit_id, comment, parents, changes) = if let Some(prep) = prepared {
+            let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+            let commit_id = object_id(&format!(
+                "squash:{pull_id}:{}:{}:{}",
+                source_id.clone().unwrap_or_default(),
+                parent.clone().unwrap_or_default(),
+                prep.message
+            ));
+            (commit_id, prep.message, parents, prep.changes)
+        } else {
+            let commit_id = object_id(&format!("merge:{pull_id}:{}", parent.clone().unwrap_or_default()));
+            let parents = parent.clone().map(|id| vec![json!(id)]).unwrap_or_default();
+            (commit_id, format!("Fusion de {source} dans {target}"), parents, Vec::new())
+        };
         stored.put_bucket(
             &commits_key,
             json!({
                 "id": commit_id,
                 "commitId": commit_id,
-                "comment": format!("Fusion de {source} dans {target}"),
+                "comment": comment,
                 "author": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
                 "committer": {"name": "azurz", "date": "2026-10-29T00:00:00Z"},
-                "parents": parents
+                "parents": parents,
+                "changeCounts": change_counts(&changes),
+                "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/commits/{commit_id}")
             }),
         );
+        for change in &changes {
+            stored.put_bucket(&format!("{commits_key}/{commit_id}/changes"), change.clone());
+        }
+        let snapshot = stored.list_bucket(&format!("git/repositories/{repo_id}/items"));
+        for blob in snapshot {
+            stored.put_bucket(&format!("{commits_key}/{commit_id}/blobs"), blob);
+        }
         stored.put_bucket(
             &refs_key,
             json!({
@@ -1457,12 +1561,18 @@ fn finish_pull(state: &AppState, org: &str, project: &str, pull_id: &str) -> Opt
                 "success": true
             }),
         );
+        if delete_source {
+            if let Some(bucket) = stored.buckets.get_mut(&refs_key) {
+                bucket.remove(&source);
+            }
+        }
         pull["status"] = json!("completed");
         pull["mergeStatus"] = json!("succeeded");
         pull["closedDate"] = json!("2026-10-29T00:00:00Z");
         pull["closedBy"] = json!({"displayName": "azurz", "uniqueName": "azurz"});
         pull["lastMergeCommit"] = json!({"commitId": commit_id});
-        pull["lastMergeSourceCommit"] = json!({"commitId": parent.unwrap_or_default()});
+        pull["lastMergeSourceCommit"] = json!({"commitId": if squash { source_id.unwrap_or_default() } else { parent.clone().unwrap_or_default() }});
+        pull["lastMergeTargetCommit"] = json!({"commitId": parent.unwrap_or_default()});
         Some(stored.put_bucket("git/pullrequests", pull))
     })
 }

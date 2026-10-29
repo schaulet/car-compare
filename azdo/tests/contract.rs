@@ -4746,3 +4746,265 @@ async fn pull_request_lifecycle_delivers_service_hooks() {
     assert!(body.contains("Revue sonde bis"), "{body}");
     assert!(body.contains("git.pullrequest.merged"), "{body}");
 }
+
+#[tokio::test]
+async fn squash_merge_records_the_net_diff_and_can_delete_the_source() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heads: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let main = heads["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/heads/squash-src","oldObjectId":"0000000000000000000000000000000000000000","newObjectId":"{main}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/squash-src","oldObjectId":"{main}"}}],"commits":[{{"comment":"S01 Pompe","changes":[{{"changeType":"add","item":{{"path":"/src/squash-pompe.txt"}},"newContent":{{"content":"debit","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let first = push["commits"][0]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pushes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"refUpdates":[{{"name":"refs/heads/squash-src","oldObjectId":"{first}"}}],"commits":[{{"comment":"S02 Pompe","changes":[{{"changeType":"edit","item":{{"path":"/src/squash-pompe.txt"}},"newContent":{{"content":"debit-2","contentType":"rawtext"}}}}]}}]}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let push: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let source_tip = push["commits"][0]["commitId"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue squash","sourceRefName":"refs/heads/squash-src","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pull: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pull_id = pull["pullRequestId"].as_i64().unwrap();
+    let (status, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"completed","completionOptions":{"mergeStrategy":"rebase"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still["status"], "active");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"completed","completionOptions":{"mergeStrategy":"squash","mergeCommitMessage":"Squash pompe","deleteSourceBranch":true}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(done["status"], "completed");
+    assert_eq!(done["completionOptions"]["mergeStrategy"], "squash");
+    assert_eq!(done["completionOptions"]["deleteSourceBranch"], true);
+    assert_eq!(done["lastMergeSourceCommit"]["commitId"], source_tip);
+    assert_eq!(done["lastMergeTargetCommit"]["commitId"], main);
+    let merge = done["lastMergeCommit"]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{merge}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let commit: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(commit["comment"], "Squash pompe");
+    assert_eq!(commit["parents"].as_array().unwrap().len(), 1);
+    assert_eq!(commit["parents"][0], main);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{merge}/changes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let changes: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = changes["changes"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{body}");
+    assert_eq!(entries[0]["item"]["path"], "/src/squash-pompe.txt");
+    assert_eq!(entries[0]["changeType"], "add");
+    assert_eq!(entries[0]["newContent"]["content"], "debit-2");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let refs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = refs["value"].as_array().unwrap().iter().filter_map(|item| item["name"].as_str()).collect();
+    assert!(!names.contains(&"refs/heads/squash-src"), "{body}");
+    let main_ref = refs["value"].as_array().unwrap().iter().find(|item| item["name"] == "refs/heads/main").unwrap();
+    assert_eq!(main_ref["objectId"], merge);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{pull_id}/commits?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("S02 Pompe"), "{body}");
+    assert!(body.contains("S01 Pompe"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/heads/fusion-src","oldObjectId":"0000000000000000000000000000000000000000","newObjectId":"{merge}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"title":"Revue fusion","sourceRefName":"refs/heads/fusion-src","targetRefName":"refs/heads/main"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_id = other["pullRequestId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/pullrequests/{other_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"status":"completed","completionOptions":{"mergeStrategy":"noFastForward","deleteSourceBranch":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fused: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let fused_id = fused["lastMergeCommit"]["commitId"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/commits/{fused_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Fusion de refs/heads/fusion-src dans refs/heads/main"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("refs/heads/fusion-src"), "{body}");
+}
