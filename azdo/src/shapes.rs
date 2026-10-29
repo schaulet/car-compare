@@ -34,6 +34,7 @@ pub fn dispatch(
         ("pipelines", "pipelines") => pipelines(state, method, org, project, rest, body),
         ("pipelines", "runs") => pipeline_runs(state, method, org, project, rest),
         ("pipelines", "checks") => check_configurations(state, method, org, project, rest, query, body),
+        ("pipelines", "approvals") => pipeline_approvals(state, method, org, project, rest, query, body),
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
@@ -2280,21 +2281,82 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return Json(item).into_response();
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("runs") && method == Method::POST {
+        let payload = parse_json(body).unwrap_or(json!({}));
+        let requested = payload
+            .get("resources")
+            .and_then(|value| value.get("environments"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut targets = Vec::new();
+        for entry in &requested {
+            let Some(environment) = resolve_environment(state, org, project, entry) else {
+                return fail(StatusCode::BAD_REQUEST, "environnement introuvable");
+            };
+            targets.push(environment);
+        }
         let pipeline_id = rest[2].parse::<i64>().unwrap_or(1);
         let name = get_item(state, org, project, key, &pipeline_id.to_string())
             .and_then(|item| text_of(&item, "name"))
             .unwrap_or_else(|| "CI".into());
         let runs_key = "pipelines/runs";
         let next = list(state, org, project, runs_key).len() as i64 + 1;
+        let resources = json!({
+            "environments": targets.iter().map(|environment| json!({
+                "id": value_key(&environment["id"]),
+                "name": text_of(environment, "name").unwrap_or_default()
+            })).collect::<Vec<_>>()
+        });
         let item = json!({
             "id": next,
             "name": format!("{name}-{next}"),
             "state": "inProgress",
-            "pipeline": {"id": pipeline_id, "name": name, "folder": "\\", "revision": 1},
+            "pipeline": {"id": pipeline_id, "name": name.clone(), "folder": "\\", "revision": 1},
+            "resources": resources,
             "createdDate": "2026-10-29T00:00:00Z",
             "url": format!("/{org}/{project}/_apis/pipelines/runs/{next}")
         });
+        let checks = approval_checks(state, org, project, &targets);
         put_item(state, org, project, runs_key, item.clone());
+        let mut approval_id = list(state, org, project, "pipelines/approvals")
+            .into_iter()
+            .filter_map(|row| row.get("id").and_then(|value| value.as_i64()))
+            .max()
+            .unwrap_or(0);
+        for (environment, check) in checks {
+            approval_id += 1;
+            let settings = check.get("settings").cloned().unwrap_or(json!({}));
+            let approvers = settings.get("approvers").cloned().unwrap_or(json!([]));
+            let min_required = settings.get("minRequiredApprovers").cloned().unwrap_or(json!(1));
+            let instructions = text_of(&settings, "instructions").unwrap_or_default();
+            put_item(
+                state,
+                org,
+                project,
+                "pipelines/approvals",
+                json!({
+                    "id": approval_id,
+                    "status": "pending",
+                    "createdOn": "2026-10-29T00:00:00Z",
+                    "lastModifiedOn": "2026-10-29T00:00:00Z",
+                    "minRequiredApprovers": min_required,
+                    "instructions": instructions,
+                    "comment": "",
+                    "approvers": approvers,
+                    "pipeline": {
+                        "owner": {"id": pipeline_id, "name": name},
+                        "id": next.to_string(),
+                        "name": format!("{name}-{next}")
+                    },
+                    "resource": {
+                        "type": "environment",
+                        "id": value_key(&environment["id"]),
+                        "name": text_of(&environment, "name").unwrap_or_default()
+                    },
+                    "url": format!("/{org}/{project}/_apis/pipelines/approvals/{approval_id}")
+                }),
+            );
+        }
         return Json(item).into_response();
     }
     if method == Method::GET {
@@ -2480,6 +2542,148 @@ fn known_check_resource(kind: &str) -> bool {
 fn branch_control(settings: &Value) -> bool {
     text_of(settings, "displayName").is_some_and(|name| name.eq_ignore_ascii_case("Branch control"))
         || settings.get("inputs").and_then(|inputs| inputs.get("allowedBranches")).is_some()
+}
+
+fn pipeline_approvals(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let key = "pipelines/approvals";
+    if rest.len() == 2 && method == Method::GET {
+        let wanted = query_param(query, "state").map(|value| pct_decode(value).to_ascii_lowercase());
+        let value: Vec<Value> = list(state, org, project, key)
+            .into_iter()
+            .filter(|item| wanted.as_ref().is_none_or(|state_name| text_of(item, "status").is_some_and(|status| status.eq_ignore_ascii_case(state_name))))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 2 && method == Method::PATCH {
+        let Some(rows) = parse_json(body).and_then(|value| value.as_array().cloned()) else {
+            return fail(StatusCode::BAD_REQUEST, "approbation absente");
+        };
+        if rows.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "approbation absente");
+        }
+        let mut updates = Vec::new();
+        for row in &rows {
+            let approval_id = row.get("approvalId").map(value_key).filter(|id| !id.is_empty()).unwrap_or_default();
+            if approval_id.is_empty() {
+                return fail(StatusCode::BAD_REQUEST, "approbation absente");
+            }
+            let Some(status_name) = text_of(row, "status") else {
+                return fail(StatusCode::BAD_REQUEST, "statut d'approbation inconnu");
+            };
+            if !matches!(status_name.to_ascii_lowercase().as_str(), "approved" | "rejected") {
+                return fail(StatusCode::BAD_REQUEST, "statut d'approbation inconnu");
+            }
+            let Some(current) = get_item(state, org, project, key, &approval_id) else {
+                return fail(StatusCode::NOT_FOUND, "approbation introuvable");
+            };
+            if text_of(&current, "status").as_deref() != Some("pending") {
+                return fail(StatusCode::BAD_REQUEST, "approbation déjà traitée");
+            }
+            updates.push((approval_id, status_name.to_ascii_lowercase(), text_of(row, "comment").unwrap_or_default(), current));
+        }
+        let mut saved = Vec::new();
+        for (_approval_id, status_name, comment, mut current) in updates {
+            current["status"] = json!(status_name);
+            current["comment"] = json!(comment);
+            current["lastModifiedOn"] = json!("2026-10-29T00:00:03Z");
+            put_item(state, org, project, key, current.clone());
+            let run_id = value_key(&current["pipeline"]["id"]);
+            settle_pipeline_run(state, org, project, &run_id);
+            saved.push(current);
+        }
+        return Json(json!(saved)).into_response();
+    }
+    if method == Method::GET {
+        let id = rest.get(2).map(String::as_str).unwrap_or("");
+        return match get_item(state, org, project, key, id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "approbation introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn resolve_environment(state: &AppState, org: &str, project: &str, entry: &Value) -> Option<Value> {
+    let id = value_key(&entry["id"]);
+    if !id.is_empty() {
+        return get_item(state, org, project, "distributedtask/environments", &id);
+    }
+    let name = text_of(entry, "name").unwrap_or_default();
+    if name.is_empty() {
+        return None;
+    }
+    get_item(state, org, project, "distributedtask/environments", &name)
+}
+
+fn approval_checks(state: &AppState, org: &str, project: &str, environments: &[Value]) -> Vec<(Value, Value)> {
+    let checks = list(state, org, project, "pipelines/checks/configurations");
+    let mut found = Vec::new();
+    for environment in environments {
+        let env_id = value_key(&environment["id"]);
+        for check in &checks {
+            if check.get("isDisabled").and_then(|value| value.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            if text_of(&check["type"], "name").as_deref() != Some("Approval") {
+                continue;
+            }
+            let resource = &check["resource"];
+            let same_kind = text_of(resource, "type").is_some_and(|kind| kind.eq_ignore_ascii_case("environment"));
+            if same_kind && value_key(&resource["id"]) == env_id {
+                found.push((environment.clone(), check.clone()));
+            }
+        }
+    }
+    found
+}
+
+enum ApprovalOutcome {
+    Waiting,
+    Rejected,
+    Clear,
+}
+
+fn approval_outcome(state: &AppState, org: &str, project: &str, run_id: &str) -> ApprovalOutcome {
+    let rows: Vec<Value> = list(state, org, project, "pipelines/approvals")
+        .into_iter()
+        .filter(|item| value_key(&item["pipeline"]["id"]) == run_id)
+        .collect();
+    if rows.is_empty() {
+        return ApprovalOutcome::Clear;
+    }
+    if rows.iter().any(|item| text_of(item, "status").as_deref() == Some("rejected")) {
+        return ApprovalOutcome::Rejected;
+    }
+    if rows.iter().any(|item| text_of(item, "status").as_deref() == Some("pending")) {
+        return ApprovalOutcome::Waiting;
+    }
+    ApprovalOutcome::Clear
+}
+
+fn settle_pipeline_run(state: &AppState, org: &str, project: &str, run_id: &str) {
+    let Some(mut run) = get_item(state, org, project, "pipelines/runs", run_id) else {
+        return;
+    };
+    if text_of(&run, "state").as_deref() != Some("inProgress") {
+        return;
+    }
+    let result = match approval_outcome(state, org, project, run_id) {
+        ApprovalOutcome::Waiting => return,
+        ApprovalOutcome::Rejected => "failed",
+        ApprovalOutcome::Clear => "succeeded",
+    };
+    run["state"] = json!("completed");
+    run["result"] = json!(result);
+    run["finishedDate"] = json!("2026-10-29T00:00:03Z");
+    put_item(state, org, project, "pipelines/runs", run);
 }
 
 fn pipeline_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
@@ -4316,8 +4520,18 @@ fn promote_build(state: &AppState, org: &str, project: &str, mut item: Value) ->
 
 fn promote_pipeline(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {
     if text_of(&item, "state").as_deref() == Some("inProgress") {
-        item["state"] = json!("completed");
-        item["result"] = json!("succeeded");
+        let run_id = value_key(&item["id"]);
+        match approval_outcome(state, org, project, &run_id) {
+            ApprovalOutcome::Waiting => return item,
+            ApprovalOutcome::Rejected => {
+                item["state"] = json!("completed");
+                item["result"] = json!("failed");
+            }
+            ApprovalOutcome::Clear => {
+                item["state"] = json!("completed");
+                item["result"] = json!("succeeded");
+            }
+        }
         item["finishedDate"] = json!("2026-10-29T00:00:02Z");
         put_item(state, org, project, "pipelines/runs", item.clone());
     }

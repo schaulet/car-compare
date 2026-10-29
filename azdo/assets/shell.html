@@ -1080,7 +1080,14 @@
               const detail = approver || branches || "";
               return "<li>" + esc(item.type && item.type.name) + (detail ? " · " + esc(detail) : "") + " <button type='button' class='check-remove' data-id='" + esc(item.id) + "'>Retirer</button></li>";
             }).join("") + "</ul>" : "<p id='env-check-empty' class='sub'>Aucun contrôle.</p>";
-            checks = "<section id='env-panel' class='panel'><h2>Contrôles · " + esc(current.name) + "</h2><div class='command'><select id='check-type'><option value='approval'>Approbation</option><option value='branch'>Contrôle de branche</option><option value='lock'>Verrou exclusif</option></select><input id='check-detail' placeholder='Approbateur ou branches' /><button id='check-add' type='button'>Ajouter</button></div>" + list + "</section>";
+            const approvalsPage = await api("GET", root + "/pipelines/approvals?api-version=7.1-preview.1");
+            const approvals = (approvalsPage.value || []).filter((item) => String(item.resource && item.resource.id) === String(current.id));
+            const approvalList = approvals.length ? "<ul id='env-approvals'>" + approvals.map((item) => {
+              const who = item.approvers && item.approvers[0] && (item.approvers[0].displayName || item.approvers[0].id);
+              const actions = item.status === "pending" ? " <button type='button' class='approve' data-id='" + esc(item.id) + "'>Approuver</button> <button type='button' class='reject' data-id='" + esc(item.id) + "'>Rejeter</button>" : "";
+              return "<li data-status='" + esc(item.status) + "'>" + esc(item.pipeline && item.pipeline.name) + " · " + esc(who || "") + " · " + esc(item.status) + actions + "</li>";
+            }).join("") + "</ul>" : "<p id='env-approval-empty' class='sub'>Aucune approbation.</p>";
+            checks = "<section id='env-panel' class='panel'><h2>Contrôles · " + esc(current.name) + "</h2><div class='command'><select id='check-type'><option value='approval'>Approbation</option><option value='branch'>Contrôle de branche</option><option value='lock'>Verrou exclusif</option></select><input id='check-detail' placeholder='Approbateur ou branches' /><button id='check-add' type='button'>Ajouter</button></div>" + list + "</section><section id='approval-panel' class='panel'><h2>Approbations · " + esc(current.name) + "</h2><div class='command'><button id='deploy' type='button'>Déployer</button></div>" + approvalList + "</section>";
           }
           view.innerHTML = "<h1>Environnements</h1><div class='command'><input id='env-name' placeholder='Nom' /><input id='env-desc' placeholder='Description' /><button id='create' type='button'>Créer</button></div>" + table + checks;
           document.getElementById("create").onclick = async () => {
@@ -1118,6 +1125,28 @@
             button.onclick = async (event) => {
               event.stopPropagation();
               await api("DELETE", root + "/pipelines/checks/configurations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1-preview.1");
+              location.reload();
+            };
+          });
+          const deploy = document.getElementById("deploy");
+          if (deploy && current) {
+            deploy.onclick = async () => {
+              const pipelines = await api("GET", root + "/pipelines/pipelines?api-version=7.1");
+              let pipelineId = pipelines.value && pipelines.value[0] && pipelines.value[0].id;
+              if (!pipelineId) {
+                const created = await api("POST", root + "/pipelines/pipelines?api-version=7.1", { name: "CI" });
+                pipelineId = created.id;
+              }
+              await api("POST", root + "/pipelines/pipelines/" + encodeURIComponent(pipelineId) + "/runs?api-version=7.1", {
+                resources: { environments: [{ id: String(current.id), name: current.name }] },
+              });
+              location.reload();
+            };
+          }
+          document.querySelectorAll("button.approve, button.reject").forEach((button) => {
+            button.onclick = async () => {
+              const status = button.classList.contains("approve") ? "approved" : "rejected";
+              await api("PATCH", root + "/pipelines/approvals?api-version=7.1-preview.1", [{ approvalId: button.dataset.id, status: status, comment: "ok" }]);
               location.reload();
             };
           });
