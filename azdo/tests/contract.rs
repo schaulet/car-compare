@@ -19228,3 +19228,425 @@ async fn removing_one_build_tag_keeps_the_sibling_and_the_other_build() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body.trim(), "\"pompe\"");
 }
+
+#[tokio::test]
+async fn removing_one_build_lease_keeps_the_sibling_and_the_other_build() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let leases = "/azurz/AzurzDemo/_apis/build/retention/leases?api-version=7.1";
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"runId":1,"definitionId":1,"daysValid":30}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","reason":"manual"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pompe = first["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","reason":"manual"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ada = second["id"].as_i64().unwrap();
+    assert_ne!(pompe, ada);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/build/builds?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"definition":{"id":1},"sourceBranch":"refs/heads/main","reason":"manual"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_run = atelier["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(&app, "POST", leases, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"runId":1,"definitionId":1,"daysValid":30}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("conservation absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", leases, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("conservation absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"definitionId":1,"daysValid":30}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("conservation absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{pompe},"definitionId":1,"daysValid":-1}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("durée absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"[{"runId":9,"definitionId":1,"daysValid":30}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{pompe},"definitionId":9,"daysValid":30}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("définition introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/build/definitions?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let definition: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_definition = definition["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{pompe},"definitionId":{other_definition},"daysValid":30}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("définition différente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/retention/leases?ids=&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("conservation absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/retention?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some("[]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/retention/leases/1/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{pompe},"definitionId":1,"ownerId":"  ","protectPipeline":true}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let protected: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(protected[0]["ownerId"], "azurz");
+    assert_eq!(protected[0]["protectPipeline"], true);
+    assert!(protected[0]["validUntil"].is_null());
+    let protected_id = protected[0]["leaseId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases?ids={protected_id}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"runId":{pompe},"definitionId":1,"ownerId":"pompe","daysValid":30}},{{"runId":{pompe},"definitionId":1,"ownerId":"ada","daysValid":30}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created.as_array().unwrap().len(), 2);
+    assert_eq!(created[0]["ownerId"], "pompe");
+    assert_eq!(created[0]["runId"], pompe);
+    assert_eq!(created[0]["validUntil"], "2026-11-28T00:00:00Z");
+    assert_eq!(created[1]["ownerId"], "ada");
+    let pompe_lease = created[0]["leaseId"].as_i64().unwrap();
+    let ada_lease = created[1]["leaseId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        leases,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{ada},"definitionId":1,"ownerId":"pompe","daysValid":30}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let other_lease = other[0]["leaseId"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/Atelier/_apis/build/retention/leases?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(r#"[{{"runId":{atelier_run},"definitionId":1,"ownerId":"pompe","daysValid":30}}]"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_lease: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let atelier_lease_id = atelier_lease[0]["leaseId"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/build/retention/leases?ids=99&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("conservation introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases?runId={pompe}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(still.as_array().unwrap().len(), 2);
+
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases?ids={pompe_lease}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases?runId={pompe}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept.as_array().unwrap().len(), 1);
+    assert_eq!(kept[0]["leaseId"], ada_lease);
+    assert_eq!(kept[0]["ownerId"], "ada");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases/{other_lease}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sibling: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sibling["runId"], ada);
+    assert_eq!(sibling["ownerId"], "pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/builds/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_build: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe_build["result"], "succeeded");
+    assert_eq!(pompe_build["definition"]["name"], "CI");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/build/retention/leases?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier_kept.as_array().unwrap().len(), 1);
+    assert_eq!(atelier_kept[0]["leaseId"], atelier_lease_id);
+    assert_eq!(atelier_kept[0]["runId"], atelier_run);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/build/retention/leases?ownerId=pompe&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pompe_only: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pompe_only.as_array().unwrap().len(), 1);
+    assert_eq!(pompe_only[0]["runId"], ada);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases?ids={pompe_lease}&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("conservation introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/build/retention/leases/{ada_lease}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ada_kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ada_kept["ownerId"], "ada");
+    assert_eq!(ada_kept["runId"], pompe);
+}

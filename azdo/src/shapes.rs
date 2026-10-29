@@ -33,6 +33,7 @@ pub fn dispatch(
         ("build", "definitions") => definitions(state, method, org, project, rest, body),
         ("build", "builds") => builds(state, method, org, project, rest, query, body),
         ("build", "tags") => project_build_tags(state, method, org, project, rest),
+        ("build", "retention") => build_retention(state, method, org, project, rest, query, body),
         ("distributedtask", "queues") | ("distributedtask", "pools") => {
             task_agents(state, method, org, Some(project), rest, query, body)
         }
@@ -7664,6 +7665,249 @@ fn tag_names(build: &Value) -> Vec<String> {
         .and_then(|value| value.as_array())
         .map(|rows| rows.iter().filter_map(|row| row.as_str().map(str::to_string)).collect())
         .unwrap_or_default()
+}
+
+fn build_retention(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    if rest.get(2).is_none_or(|value| !value.eq_ignore_ascii_case("leases")) {
+        return fail(StatusCode::NOT_FOUND, "conservation introuvable");
+    }
+    if rest.len() == 3 {
+        if method == &Method::GET {
+            let mut leases = list(state, org, project, "build/retention/leases")
+                .into_iter()
+                .filter(|item| lease_matches(item, query))
+                .collect::<Vec<_>>();
+            leases.sort_by_key(|item| item.get("leaseId").and_then(json_i64).unwrap_or(0));
+            return Json(leases).into_response();
+        }
+        if method == &Method::POST {
+            return add_retention_leases(state, org, project, body);
+        }
+        if method == &Method::DELETE {
+            let Some(ids) = lease_ids_from_query(query) else {
+                return fail(StatusCode::BAD_REQUEST, "conservation absente");
+            };
+            return delete_retention_leases(state, org, project, &ids);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() == 4 {
+        let id = pct_decode(&rest[3]).trim().to_string();
+        if id.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "conservation absente");
+        }
+        if method == &Method::GET {
+            return match get_item(state, org, project, "build/retention/leases", &id) {
+                Some(item) => Json(item).into_response(),
+                None => fail(StatusCode::NOT_FOUND, "conservation introuvable"),
+            };
+        }
+        if method == &Method::DELETE {
+            return delete_retention_leases(state, org, project, &[id]);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == &Method::DELETE {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    fail(StatusCode::NOT_FOUND, "conservation introuvable")
+}
+
+fn add_retention_leases(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+    let Some(payload) = parse_json(body) else {
+        return fail(StatusCode::BAD_REQUEST, "JSON illisible");
+    };
+    let Some(rows) = payload.as_array() else {
+        return fail(StatusCode::BAD_REQUEST, "conservation absente");
+    };
+    if rows.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "conservation absente");
+    }
+    let mut drafts = Vec::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return fail(StatusCode::BAD_REQUEST, "conservation absente");
+        };
+        let Some(run_id) = object.get("runId").and_then(json_i64) else {
+            return fail(StatusCode::BAD_REQUEST, "conservation absente");
+        };
+        let Some(definition_id) = object.get("definitionId").and_then(json_i64) else {
+            return fail(StatusCode::BAD_REQUEST, "conservation absente");
+        };
+        let protect = object.get("protectPipeline").and_then(|value| value.as_bool()).unwrap_or(false);
+        let days = match object.get("daysValid").and_then(json_i64) {
+            Some(days) if days < 0 => return fail(StatusCode::BAD_REQUEST, "durée absente"),
+            Some(days) => days,
+            None if protect => 0,
+            None => return fail(StatusCode::BAD_REQUEST, "durée absente"),
+        };
+        let owner = object
+            .get("ownerId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("azurz")
+            .to_string();
+        let Some(build) = get_item(state, org, project, "build/builds", &run_id.to_string()) else {
+            return fail(StatusCode::NOT_FOUND, "build introuvable");
+        };
+        if get_item(state, org, project, "build/definitions", &definition_id.to_string()).is_none() {
+            return fail(StatusCode::NOT_FOUND, "définition introuvable");
+        }
+        let build_definition = build.get("definition").and_then(|value| value.get("id")).and_then(json_i64);
+        if build_definition != Some(definition_id) {
+            return fail(StatusCode::BAD_REQUEST, "définition différente");
+        }
+        drafts.push((run_id, definition_id, owner, days, protect));
+    }
+    let created = state.write(|db| {
+        db.ensure_project(org, project);
+        let stored = db.project_mut(org, project)?;
+        let bucket = stored
+            .buckets
+            .entry("build/retention/leases".into())
+            .or_insert_with(Bucket::empty);
+        let mut next = bucket
+            .items
+            .values()
+            .filter_map(|item| item.get("leaseId").and_then(json_i64))
+            .max()
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        for (run_id, definition_id, owner, days, protect) in drafts {
+            next += 1;
+            let valid_until = if protect {
+                Value::Null
+            } else {
+                json!(lab_offset_date(days))
+            };
+            let item = json!({
+                "id": next,
+                "leaseId": next,
+                "definitionId": definition_id,
+                "runId": run_id,
+                "ownerId": owner,
+                "daysValid": days,
+                "protectPipeline": protect,
+                "createdOn": "2026-10-29T00:00:00Z",
+                "validUntil": valid_until
+            });
+            bucket.put(item.clone());
+            out.push(item);
+        }
+        Some(out)
+    });
+    match created {
+        Some(items) => Json(items).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "projet inconnu"),
+    }
+}
+
+fn delete_retention_leases(state: &AppState, org: &str, project: &str, ids: &[String]) -> Response {
+    let mut unique = Vec::new();
+    for id in ids {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "conservation absente");
+        }
+        if unique.iter().any(|existing: &String| existing == &id) {
+            continue;
+        }
+        unique.push(id);
+    }
+    if unique.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "conservation absente");
+    }
+    if unique
+        .iter()
+        .any(|id| get_item(state, org, project, "build/retention/leases", id).is_none())
+    {
+        return fail(StatusCode::NOT_FOUND, "conservation introuvable");
+    }
+    for id in &unique {
+        delete_item(state, org, project, "build/retention/leases", id);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn lease_ids_from_query(query: &str) -> Option<Vec<String>> {
+    let raw = query_param(query, "ids")?;
+    let decoded = pct_decode(raw);
+    Some(
+        decoded
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect(),
+    )
+}
+
+fn lease_matches(item: &Value, query: &str) -> bool {
+    numeric_query(query, "runId", item.get("runId").and_then(json_i64))
+        && numeric_query(query, "definitionId", item.get("definitionId").and_then(json_i64))
+        && owner_query(query, text_of(item, "ownerId").unwrap_or_default())
+}
+
+fn numeric_query(query: &str, key: &str, actual: Option<i64>) -> bool {
+    let Some(raw) = query_param(query, key) else {
+        return true;
+    };
+    let decoded = pct_decode(raw);
+    let trimmed = decoded.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.parse::<i64>().ok() == actual
+}
+
+fn owner_query(query: &str, actual: String) -> bool {
+    let Some(raw) = query_param(query, "ownerId") else {
+        return true;
+    };
+    let decoded = pct_decode(raw);
+    let trimmed = decoded.trim();
+    trimmed.is_empty() || trimmed == actual
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+}
+
+fn lab_offset_date(days: i64) -> String {
+    let mut year = 2026i32;
+    let mut month = 10u32;
+    let mut day = 29i64 + days;
+    loop {
+        let length = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            _ => {
+                if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                    29
+                } else {
+                    28
+                }
+            }
+        };
+        if day <= i64::from(length) {
+            break;
+        }
+        day -= i64::from(length);
+        month += 1;
+        if month > 12 {
+            month = 1;
+            year += 1;
+        }
+    }
+    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
 }
 
 fn promote_pipeline(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {
