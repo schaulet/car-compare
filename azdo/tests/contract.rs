@@ -26652,3 +26652,327 @@ async fn removing_one_membership_keeps_the_sibling_the_field_and_the_other_proje
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body.contains("appartenance introuvable"), "{body}");
 }
+
+#[tokio::test]
+async fn removing_one_audit_stream_keeps_the_sibling_the_membership_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let list = "/azurz/AzurzDemo/_apis/audit/streams?api-version=7.1";
+
+    async fn create(
+        app: &axum::Router,
+        auth: &str,
+        project: &str,
+        name: &str,
+        consumer: Option<&str>,
+        status_name: Option<&str>,
+        days: Option<i64>,
+    ) -> String {
+        let path = format!("/azurz/{project}/_apis/audit/streams?api-version=7.1");
+        let consumer_json = match consumer {
+            Some(consumer) => format!(r#","consumerType":"{consumer}""#),
+            None => String::new(),
+        };
+        let status_json = match status_name {
+            Some(status_name) => format!(r#","status":"{status_name}""#),
+            None => String::new(),
+        };
+        let days_json = match days {
+            Some(days) => format!(r#","daysToBackfill":{days}"#),
+            None => String::new(),
+        };
+        let body = format!(r#"{{"displayName":"{name}"{consumer_json}{status_json}{days_json}}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("stream-"), "{created}");
+        assert_eq!(created["displayName"], name);
+        assert_eq!(created["consumerType"], consumer.unwrap_or("AzureMonitorLogs"));
+        assert_eq!(created["status"], status_name.unwrap_or("enabled"));
+        assert_eq!(created["daysToBackfill"], days.unwrap_or(0));
+        assert_eq!(created["project"], project);
+        assert!(
+            created["url"].as_str().unwrap().ends_with(&format!("/{project}/_apis/audit/streams/{}", created["id"].as_str().unwrap())),
+            "{created}"
+        );
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let empty: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    let (status, body, _) = call(&app, "DELETE", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("flux d'audit illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"displayName":" "}"#, r#"{"displayName":1}"#] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [
+        r#"{"displayName":"Pompe","consumerType":1}"#,
+        r#"{"displayName":"Pompe","consumerType":null}"#,
+        r#"{"displayName":"Pompe","consumerType":"splunk"}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("consommateur absent"), "{body}");
+    }
+    for payload in [
+        r#"{"displayName":"Pompe","status":1}"#,
+        r#"{"displayName":"Pompe","status":null}"#,
+        r#"{"displayName":"Pompe","status":"Enabled"}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("état absent"), "{body}");
+    }
+    for payload in [
+        r#"{"displayName":"Pompe","daysToBackfill":null}"#,
+        r#"{"displayName":"Pompe","daysToBackfill":1.5}"#,
+        r#"{"displayName":"Pompe","daysToBackfill":-1}"#,
+        r#"{"displayName":"Pompe","daysToBackfill":29}"#,
+        r#"{"displayName":"Pompe","daysToBackfill":"0"}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", list, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("historique absent"), "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/audit/streams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["project"], "AzurzDemo");
+    assert_eq!(sonde["consumerType"], "AzureMonitorLogs");
+    assert_eq!(sonde["status"], "enabled");
+    assert_eq!(sonde["daysToBackfill"], 0);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/_apis/audit/streams/{}?api-version=7.1", sonde["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/graph/memberships?project=AzurzDemo&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"member":"Pompe","container":"Ligne"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let membership: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let membership_id = membership["id"].as_str().unwrap().to_string();
+    assert_eq!(membership["member"], "Pompe");
+    assert_eq!(membership["container"], "Ligne");
+
+    let pompe = create(&app, &auth, "AzurzDemo", "Pompe", None, None, None).await;
+    let relais = create(&app, &auth, "AzurzDemo", "Relais", Some("Splunk"), Some("disabled"), Some(7)).await;
+    let atelier = create(&app, &auth, "Atelier", "Atelier", Some("AzureEventHub"), Some("backfilling"), Some(28)).await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        list,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("flux d'audit existant"), "{body}");
+    let same = create(&app, &auth, "Atelier", "Pompe", None, None, None).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/audit/streams/{same}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux d'audit introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/Atelier/_apis/audit/streams/{same}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let pompe_row = listed["value"].as_array().unwrap().iter().find(|item| item["displayName"] == "Pompe").unwrap();
+    assert_eq!(pompe_row["id"], pompe);
+    assert_eq!(pompe_row["consumerType"], "AzureMonitorLogs");
+    assert_eq!(pompe_row["status"], "enabled");
+    assert_eq!(pompe_row["daysToBackfill"], 0);
+    let relais_row = listed["value"].as_array().unwrap().iter().find(|item| item["displayName"] == "Relais").unwrap();
+    assert_eq!(relais_row["id"], relais);
+    assert_eq!(relais_row["consumerType"], "Splunk");
+    assert_eq!(relais_row["status"], "disabled");
+    assert_eq!(relais_row["daysToBackfill"], 7);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/_apis/audit/streams?project=AzurzDemo&api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let filtered: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(filtered["count"], 2, "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/_apis/audit/streams?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let all: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(all["count"], 3, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/audit/streams/Relais?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let by_name: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_name["id"], relais);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/audit/streams/{pompe}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"displayName":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/audit/streams/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/audit/streams/{pompe}/extra?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux d'audit introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/audit/streams/{pompe}?api-version=7.1");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert!(kept["value"].as_array().unwrap().iter().all(|item| item["displayName"] != "Pompe"), "{body}");
+    let sibling = &kept["value"][0];
+    assert_eq!(sibling["id"], relais);
+    assert_eq!(sibling["displayName"], "Relais");
+    assert_eq!(sibling["consumerType"], "Splunk");
+    assert_eq!(sibling["status"], "disabled");
+    assert_eq!(sibling["daysToBackfill"], 7);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/audit/streams/{atelier}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["id"], atelier);
+    assert_eq!(kept_other["displayName"], "Atelier");
+    assert_eq!(kept_other["consumerType"], "AzureEventHub");
+    assert_eq!(kept_other["status"], "backfilling");
+    assert_eq!(kept_other["daysToBackfill"], 28);
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/_apis/graph/memberships/{membership_id}?project=AzurzDemo&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_membership: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_membership["id"], membership_id);
+    assert_eq!(kept_membership["member"], "Pompe");
+    assert_eq!(kept_membership["container"], "Ligne");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("flux d'audit introuvable"), "{body}");
+}
