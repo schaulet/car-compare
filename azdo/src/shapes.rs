@@ -1570,6 +1570,280 @@ fn pull_child(rest: &[String]) -> Option<(String, String, &[String])> {
     Some((rest[index].to_ascii_lowercase(), id, &rest[index + 1..]))
 }
 
+fn pull_threads(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    pull_id: &str,
+    tail: &[String],
+    body: &[u8],
+) -> Response {
+    let key = format!("git/pullrequests/{pull_id}/threads");
+    let pull_exists = get_item(state, org, project, "git/pullrequests", pull_id).is_some();
+    if !pull_exists {
+        return fail(StatusCode::NOT_FOUND, "demande de tirage introuvable");
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = list(state, org, project, &key).into_iter().map(visible_thread).collect();
+            return Json(page(value)).into_response();
+        }
+        if method != Method::POST {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let payload = match thread_object(body) {
+            Ok(payload) => payload,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let status = match thread_status_of(&payload, true) {
+            Ok(status) => status,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let comments = match thread_comments_from(&payload) {
+            Ok(comments) => comments,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let next = list(state, org, project, &key).len() as i64 + 1;
+        let thread = json!({
+            "id": next,
+            "publishedDate": "2026-10-29T00:00:00Z",
+            "lastUpdatedDate": "2026-10-29T00:00:00Z",
+            "status": status,
+            "comments": comments
+        });
+        put_item(state, org, project, &key, thread.clone());
+        let shown = visible_thread(thread);
+        deliver_work_item(state, org, project, "git.pullrequest.commented", &shown);
+        return Json(shown).into_response();
+    }
+    let thread_id = &tail[0];
+    let stored = get_item(state, org, project, &key, thread_id);
+    if tail.len() == 1 {
+        if stored.is_none() {
+            return fail(StatusCode::NOT_FOUND, "fil introuvable");
+        }
+        if method == Method::GET {
+            return Json(visible_thread(stored.unwrap())).into_response();
+        }
+        if method != Method::PATCH {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        let payload = match thread_object(body) {
+            Ok(payload) => payload,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let status = match thread_status_of(&payload, false) {
+            Ok(status) => status,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let mut thread = stored.unwrap();
+        if let Some(object) = thread.as_object_mut() {
+            object.insert("status".into(), json!(status));
+            object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+        }
+        put_item(state, org, project, &key, thread.clone());
+        let shown = visible_thread(thread);
+        deliver_work_item(state, org, project, "git.pullrequest.commented", &shown);
+        return Json(shown).into_response();
+    }
+    if tail.len() < 2 || !tail[1].eq_ignore_ascii_case("comments") {
+        return fail(StatusCode::NOT_FOUND, "fil introuvable");
+    }
+    let Some(mut thread) = stored else {
+        return fail(StatusCode::NOT_FOUND, "fil introuvable");
+    };
+    let comment_id = if tail.len() >= 3 {
+        match tail[2].parse::<i64>() {
+            Ok(value) => Some(value),
+            Err(_) => return fail(StatusCode::NOT_FOUND, "commentaire introuvable"),
+        }
+    } else {
+        None
+    };
+    let notes = thread.get("comments").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    if method == Method::GET && comment_id.is_none() {
+        let visible = notes.into_iter().filter(|note| !comment_deleted(note)).collect::<Vec<_>>();
+        return Json(page(visible)).into_response();
+    }
+    if method == Method::POST && comment_id.is_none() {
+        let content = match comment_content(body) {
+            Ok(content) => content,
+            Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+        };
+        let next = notes.iter().filter_map(|note| note.get("id").and_then(|value| value.as_i64())).max().unwrap_or(0) + 1;
+        let note = new_thread_comment(next, &content);
+        let mut comments = notes;
+        comments.push(note.clone());
+        if let Some(object) = thread.as_object_mut() {
+            object.insert("comments".into(), json!(comments));
+            object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+        }
+        put_item(state, org, project, &key, thread);
+        deliver_work_item(state, org, project, "git.pullrequest.commented", &note);
+        return Json(note).into_response();
+    }
+    let Some(comment_id) = comment_id else {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    };
+    let position = notes.iter().position(|note| note.get("id").and_then(|value| value.as_i64()) == Some(comment_id) && !comment_deleted(note));
+    if position.is_none() {
+        return fail(StatusCode::NOT_FOUND, "commentaire introuvable");
+    }
+    let position = position.unwrap();
+    if method == Method::GET {
+        return Json(notes[position].clone()).into_response();
+    }
+    if method == Method::DELETE {
+        let mut comments = notes;
+        let mut note = comments[position].clone();
+        if let Some(object) = note.as_object_mut() {
+            object.insert("isDeleted".into(), json!(true));
+            object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+        }
+        comments[position] = note.clone();
+        if let Some(object) = thread.as_object_mut() {
+            object.insert("comments".into(), json!(comments));
+            object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+        }
+        put_item(state, org, project, &key, thread);
+        return Json(note).into_response();
+    }
+    if method != Method::PATCH {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let content = match comment_content(body) {
+        Ok(content) => content,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let mut comments = notes;
+    let mut note = comments[position].clone();
+    let version = note.get("version").and_then(|value| value.as_i64()).unwrap_or(1) + 1;
+    if let Some(object) = note.as_object_mut() {
+        object.insert("content".into(), json!(content));
+        object.insert("version".into(), json!(version));
+        object.insert("modifiedBy".into(), json!({"displayName": "azurz", "uniqueName": "azurz"}));
+        object.insert("modifiedDate".into(), json!("2026-10-29T00:00:00Z"));
+        object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+        object.insert("lastContentUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+    }
+    comments[position] = note.clone();
+    if let Some(object) = thread.as_object_mut() {
+        object.insert("comments".into(), json!(comments));
+        object.insert("lastUpdatedDate".into(), json!("2026-10-29T00:00:00Z"));
+    }
+    put_item(state, org, project, &key, thread);
+    deliver_work_item(state, org, project, "git.pullrequest.commented", &note);
+    Json(note).into_response()
+}
+
+fn thread_object(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
+    if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(Map::new());
+    }
+    match parse_json(body) {
+        Some(Value::Object(map)) => Ok(map),
+        _ => Err("fil illisible"),
+    }
+}
+
+fn thread_status_of(payload: &Map<String, Value>, default_active: bool) -> Result<&'static str, &'static str> {
+    let Some(value) = payload.get("status") else {
+        return if default_active { Ok("active") } else { Err("statut de fil absent") };
+    };
+    let Some(text) = value.as_str() else {
+        return Err("statut de fil absent");
+    };
+    if text.trim().is_empty() {
+        return Err("statut de fil absent");
+    }
+    thread_status(text).ok_or("statut de fil inconnu")
+}
+
+fn thread_status(value: &str) -> Option<&'static str> {
+    [
+        ("active", "active"),
+        ("fixed", "fixed"),
+        ("wontfix", "wontFix"),
+        ("closed", "closed"),
+        ("bydesign", "byDesign"),
+        ("pending", "pending"),
+    ]
+    .into_iter()
+    .find(|(name, _)| value.eq_ignore_ascii_case(name))
+    .map(|(_, canonical)| canonical)
+}
+
+fn thread_comments_from(payload: &Map<String, Value>) -> Result<Vec<Value>, &'static str> {
+    let Some(raw) = payload.get("comments") else {
+        let content = payload.get("content").and_then(|value| value.as_str()).unwrap_or("");
+        return Ok(vec![new_thread_comment(1, content)]);
+    };
+    let Some(list) = raw.as_array() else {
+        return Err("commentaire illisible");
+    };
+    if list.is_empty() {
+        return Err("commentaire absent");
+    }
+    let mut notes = Vec::new();
+    for (index, item) in list.iter().enumerate() {
+        let Some(text) = item.get("content").and_then(|value| value.as_str()) else {
+            return Err("commentaire illisible");
+        };
+        if text.trim().is_empty() {
+            return Err("commentaire absent");
+        }
+        notes.push(new_thread_comment(index as i64 + 1, text));
+    }
+    Ok(notes)
+}
+
+fn comment_content(body: &[u8]) -> Result<String, &'static str> {
+    let Some(object) = parse_json(body).and_then(|value| value.as_object().cloned()) else {
+        return Err("commentaire illisible");
+    };
+    let Some(text) = object.get("content").and_then(|value| value.as_str()) else {
+        return Err("commentaire illisible");
+    };
+    if text.trim().is_empty() {
+        return Err("commentaire absent");
+    }
+    Ok(text.to_string())
+}
+
+fn new_thread_comment(id: i64, content: &str) -> Value {
+    json!({
+        "id": id,
+        "parentCommentId": 0,
+        "content": content,
+        "commentType": "text",
+        "version": 1,
+        "author": {"displayName": "azurz", "uniqueName": "azurz"},
+        "publishedDate": "2026-10-29T00:00:00Z",
+        "lastUpdatedDate": "2026-10-29T00:00:00Z",
+        "lastContentUpdatedDate": "2026-10-29T00:00:00Z"
+    })
+}
+
+fn comment_deleted(note: &Value) -> bool {
+    note.get("isDeleted").and_then(|value| value.as_bool()) == Some(true)
+}
+
+fn visible_thread(mut thread: Value) -> Value {
+    if let Some(object) = thread.as_object_mut() {
+        let visible = object
+            .get("comments")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|note| !comment_deleted(note))
+            .collect::<Vec<_>>();
+        object.insert("comments".into(), json!(visible));
+    }
+    thread
+}
+
 fn pull_child_resource(
     state: &AppState,
     method: &Method,
@@ -1596,6 +1870,9 @@ fn pull_child_resource(
     if kind == "labels" {
         return pull_labels(state, method, org, project, pull_id, tail, body);
     }
+    if kind == "threads" {
+        return pull_threads(state, method, org, project, pull_id, tail, body);
+    }
     if method == Method::GET {
         return Json(page(list(state, org, project, &key))).into_response();
     }
@@ -1604,41 +1881,14 @@ fn pull_child_resource(
     }
     let payload = parse_json(body).unwrap_or(json!({}));
     let next = list(state, org, project, &key).len() as i64 + 1;
-    let item = if kind == "threads" {
-        let comments = payload
-            .get("comments")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_else(|| vec![json!({"content": text_of(&payload, "content").unwrap_or_default()})]);
-        let comments: Vec<Value> = comments
-            .into_iter()
-            .enumerate()
-            .map(|(index, mut comment)| {
-                if let Some(object) = comment.as_object_mut() {
-                    object.entry("id").or_insert(json!(index as i64 + 1));
-                    object.entry("commentType").or_insert(json!("text"));
-                    object.entry("author").or_insert(json!({"displayName": "azurz", "uniqueName": "azurz"}));
-                }
-                comment
-            })
-            .collect();
-        json!({
-            "id": next,
-            "publishedDate": "2026-10-29T00:00:00Z",
-            "lastUpdatedDate": "2026-10-29T00:00:00Z",
-            "status": payload.get("status").cloned().unwrap_or(json!("active")),
-            "comments": comments
-        })
-    } else {
-        json!({
-            "id": next,
-            "state": payload.get("state").cloned().unwrap_or(json!("succeeded")),
-            "description": text_of(&payload, "description").unwrap_or_default(),
-            "context": payload.get("context").cloned().unwrap_or(json!({"name": "azurz", "genre": "continuous-integration"})),
-            "creationDate": "2026-10-29T00:00:00Z",
-            "updatedDate": "2026-10-29T00:00:00Z"
-        })
-    };
+    let item = json!({
+        "id": next,
+        "state": payload.get("state").cloned().unwrap_or(json!("succeeded")),
+        "description": text_of(&payload, "description").unwrap_or_default(),
+        "context": payload.get("context").cloned().unwrap_or(json!({"name": "azurz", "genre": "continuous-integration"})),
+        "creationDate": "2026-10-29T00:00:00Z",
+        "updatedDate": "2026-10-29T00:00:00Z"
+    });
     put_item(state, org, project, &key, item.clone());
     Json(item).into_response()
 }

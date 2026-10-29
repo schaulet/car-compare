@@ -88,6 +88,8 @@
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
     .row[hidden] { display: none; }
     .error { color: #a4262c; }
+    li.thread { margin: 0 0 12px; }
+    .thread-status { display: inline-block; margin-right: 8px; color: var(--muted); font-size: 12px; }
     li.note { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
     li.note .note-text { flex: 1; min-width: 8em; }
     @media (max-width: 900px) {
@@ -777,7 +779,13 @@
               const threadsPath = root + "/git/repositories/" + encodeURIComponent(repoId) + "/pullrequests/" + row.dataset.id;
               const reviewers = await api("GET", threadsPath + "/reviewers?api-version=7.1");
               const people = (Array.isArray(reviewers) ? reviewers : reviewers.value || []).map((person) => "<li>" + esc(person.displayName) + " · " + esc(person.vote) + "</li>").join("") || "<li>Aucun relecteur.</li>";
-              const notes = (threads.value || []).flatMap((thread) => thread.comments || []).map((note) => "<li>" + esc(note.content) + "</li>").join("") || "<li>Aucun commentaire.</li>";
+              const threadItems = threads.value || [];
+              const notes = threadItems.map((thread) => {
+                const comments = (thread.comments || []).filter((note) => !note.isDeleted).map((note) => "<li class='note' data-thread='" + thread.id + "' data-id='" + note.id + "'><span class='note-text'>" + esc(note.content) + "</span><button class='note-edit' type='button'>Modifier</button></li>").join("");
+                const resolve = thread.status === "fixed" ? "Rouvrir" : "Résoudre";
+                const next = thread.status === "fixed" ? "active" : "fixed";
+                return "<li class='thread' data-id='" + thread.id + "' data-next='" + next + "'><span class='thread-status'>" + esc(thread.status) + "</span><ul>" + comments + "</ul><button class='thread-resolve' type='button'>" + resolve + "</button></li>";
+              }).join("") || "<li>Aucun commentaire.</li>";
               const commits = await api("GET", threadsPath + "/commits?api-version=7.1");
               const commitLines = (commits.value || []).map((item) => "<li><code>" + esc(String(item.commitId || item.id).slice(0, 12)) + "</code> " + esc(item.comment || "") + "</li>").join("") || "<li>Aucun commit.</li>";
               const pull = await api("GET", threadsPath + "?api-version=7.1");
@@ -808,7 +816,7 @@
               const work = details.length ? details.map((item) => "<li>" + esc(item.id) + " · " + esc(item.title) + " <button type='button' class='unlink' data-id='" + esc(item.id) + "' data-index='" + item.index + "'>Retirer</button></li>").join("") : "<li>Aucun élément de travail.</li>";
               const labels = await api("GET", threadsPath + "/labels?api-version=7.1");
               const labelLines = (labels.value || []).map((item) => "<li><span class='pill'>" + esc(item.name) + "</span> <button type='button' class='label-remove' data-id='" + esc(item.id) + "'>Retirer</button></li>").join("") || "<li id='pr-label-empty'>Aucune étiquette.</li>";
-              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Itérations</h2><ul id='pr-iterations'>" + iterationLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul>" + autoLine + mergeLine + mergeFiles + "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><label><input id='reviewer-required' type='checkbox' /> Obligatoire</label><button id='reviewer-add' type='button'>Ajouter</button><select id='pr-strategy'><option value='noFastForward'>Fusion</option><option value='squash'>Squash</option><option value='rebase'>Rebase</option><option value='rebaseMerge'>Semi-linéaire</option></select><label><input id='pr-delete-source' type='checkbox' /> Supprimer la source</label><button id='pr-auto' type='button'>Complétion automatique</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Étiquettes</h2><ul id='pr-labels'>" + labelLines + "</ul><div class='row'><input id='label-name' placeholder='Étiquette' /><button id='label-add' type='button'>Ajouter</button></div><h2>Discussion</h2><ul>" + notes + "</ul><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
+              panel.innerHTML = "<h2>Commits</h2><ul id='pr-commits'>" + commitLines + "</ul><h2>Itérations</h2><ul id='pr-iterations'>" + iterationLines + "</ul><h2>Fichiers</h2><ul id='pr-files'>" + fileLines + "</ul>" + autoLine + mergeLine + mergeFiles + "<h2>Relecteurs</h2><ul>" + people + "</ul><div class='row'><input id='reviewer-name' placeholder='Relecteur' /><select id='reviewer-vote'><option value='10'>Approuver</option><option value='0'>Aucun vote</option><option value='-10'>Attendre</option></select><label><input id='reviewer-required' type='checkbox' /> Obligatoire</label><button id='reviewer-add' type='button'>Ajouter</button><select id='pr-strategy'><option value='noFastForward'>Fusion</option><option value='squash'>Squash</option><option value='rebase'>Rebase</option><option value='rebaseMerge'>Semi-linéaire</option></select><label><input id='pr-delete-source' type='checkbox' /> Supprimer la source</label><button id='pr-auto' type='button'>Complétion automatique</button><button id='pr-complete' type='button'>Terminer</button></div><h2>Étiquettes</h2><ul id='pr-labels'>" + labelLines + "</ul><div class='row'><input id='label-name' placeholder='Étiquette' /><button id='label-add' type='button'>Ajouter</button></div><h2>Discussion</h2><ul id='pr-notes'>" + notes + "</ul><div id='thread-editor' class='row' hidden><input id='thread-edit' placeholder='Commentaire révisé' style='flex:1' /><button id='thread-save' type='button'>Enregistrer</button></div><div class='row'><input id='thread-note' placeholder='Commentaire' style='flex:1' /><button id='thread-add' type='button'>Ajouter</button></div><p id='pr-error' class='error' hidden></p><h2>Éléments de travail</h2><ul id='pr-work'>" + work + "</ul><div class='row'><input id='pr-work-id' placeholder='ID élément' /><button id='pr-link' type='button'>Lier</button></div>";
               panel.querySelector("#reviewer-add").onclick = async () => {
                 await api("POST", threadsPath + "/reviewers?api-version=7.1", {
                   displayName: panel.querySelector("#reviewer-name").value || "azurz",
@@ -842,8 +850,52 @@
                 row.cells[2].textContent = done.status;
                 row.click();
               };
+              panel.querySelectorAll(".thread-resolve").forEach((button) => {
+                button.onclick = async () => {
+                  const item = button.closest(".thread");
+                  try {
+                    await api("PATCH", threadsPath + "/threads/" + item.dataset.id + "?api-version=7.1", { status: item.dataset.next });
+                  } catch (error) {
+                    const note = panel.querySelector("#pr-error");
+                    note.hidden = false;
+                    note.textContent = error.message;
+                    return;
+                  }
+                  row.click();
+                };
+              });
+              let editingThread = "";
+              let editingComment = "";
+              panel.querySelectorAll(".note-edit").forEach((button) => {
+                button.onclick = () => {
+                  const note = button.closest(".note");
+                  editingThread = note.dataset.thread;
+                  editingComment = note.dataset.id;
+                  panel.querySelector("#thread-editor").hidden = false;
+                  panel.querySelector("#thread-edit").value = note.querySelector(".note-text").textContent;
+                };
+              });
+              panel.querySelector("#thread-save").onclick = async () => {
+                if (!editingComment) return;
+                try {
+                  await api("PATCH", threadsPath + "/threads/" + editingThread + "/comments/" + editingComment + "?api-version=7.1", { content: panel.querySelector("#thread-edit").value });
+                } catch (error) {
+                  const note = panel.querySelector("#pr-error");
+                  note.hidden = false;
+                  note.textContent = error.message;
+                  return;
+                }
+                row.click();
+              };
               panel.querySelector("#thread-add").onclick = async () => {
-                await api("POST", threadsPath + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
+                try {
+                  await api("POST", threadsPath + "/threads?api-version=7.1", { comments: [{ content: panel.querySelector("#thread-note").value }], status: "active" });
+                } catch (error) {
+                  const note = panel.querySelector("#pr-error");
+                  note.hidden = false;
+                  note.textContent = error.message;
+                  return;
+                }
                 row.click();
               };
               panel.querySelector("#label-add").onclick = async () => {
@@ -1645,10 +1697,13 @@
             if (commit) return commit;
             if (resource.buildNumber) return resource.buildNumber + " " + (resource.result || "");
             if (resource.text) return resource.text;
+            const discussion = resource.comments && resource.comments[0] && resource.comments[0].content;
+            if (discussion) return discussion;
+            if (resource.content) return resource.content;
             return "";
           }
           const received = (inbox.value || []).length ? "<table id='inbox'><thead><tr><th>Événement</th><th>Détail</th></tr></thead><tbody>" + inbox.value.map((item) => "<tr><td>" + esc(item.eventType) + "</td><td>" + esc(hookLabel(item)) + "</td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune notification reçue.</p>";
-          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
+          view.innerHTML = "<h1>Abonnements</h1><div class='command'><select id='hook-event'><option value='workitem.created'>workitem.created</option><option value='workitem.updated'>workitem.updated</option><option value='workitem.deleted'>workitem.deleted</option><option value='workitem.restored'>workitem.restored</option><option value='workitem.commented'>workitem.commented</option><option value='git.push'>git.push</option><option value='git.pullrequest.created'>git.pullrequest.created</option><option value='git.pullrequest.updated'>git.pullrequest.updated</option><option value='git.pullrequest.merged'>git.pullrequest.merged</option><option value='git.pullrequest.commented'>git.pullrequest.commented</option><option value='build.complete'>build.complete</option></select><input id='hook-url' value='/_hooks/inbox' /><button id='hook-add' type='button'>Créer</button></div>" + rows + "<h2>Déclencher</h2><div class='command'><input id='hook-title' placeholder='Titre ou message' /><button id='hook-fire' type='button'>Déclencher</button></div><h2>Réceptions</h2>" + received;
           document.getElementById("hook-add").onclick = async () => {
             await api("POST", "/" + org + "/_apis/hooks/subscriptions?api-version=7.1", {
               publisherId: "tfs",
@@ -1673,7 +1728,7 @@
                 refUpdates: [{ name: "refs/heads/main", oldObjectId: main ? main.objectId : "" }],
                 commits: [{ comment: title, changes: [{ changeType: "add", item: { path: "/hooks/" + Date.now() + ".txt" }, newContent: { content: title, contentType: "rawtext" } }] }],
               });
-            } else if (event === "git.pullrequest.created" || event === "git.pullrequest.updated" || event === "git.pullrequest.merged") {
+            } else if (event === "git.pullrequest.created" || event === "git.pullrequest.updated" || event === "git.pullrequest.merged" || event === "git.pullrequest.commented") {
               const repos = await collection("git/repositories");
               const repo = repos[0];
               if (!repo) return;
@@ -1688,6 +1743,9 @@
               }
               if (event === "git.pullrequest.merged") {
                 await api("PATCH", pullPath + "?api-version=7.1", { status: "completed" });
+              }
+              if (event === "git.pullrequest.commented") {
+                await api("POST", pullPath + "/threads?api-version=7.1", { comments: [{ content: title }], status: "active" });
               }
             } else if (event === "workitem.commented") {
               const created = await api("POST", root + "/wit/workitems/$Task?api-version=7.1", [{ op: "add", path: "/fields/System.Title", value: title }], "application/json-patch+json");
