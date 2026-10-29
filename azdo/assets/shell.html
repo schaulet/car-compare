@@ -157,6 +157,7 @@
       <a href="/__ORG__/__PROJECT__/_audit">Audit</a>
       <a href="/__ORG__/__PROJECT__/_extensions">Extensions</a>
       <a href="/__ORG__/__PROJECT__/_groupentitlements">Droits de groupe</a>
+      <a href="/__ORG__/__PROJECT__/_processes">Processus</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3533,6 +3534,46 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/memberentitlementmanagement/groupentitlements/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_processes") {
+          const parents = {
+            "adcc42ab-9882-485e-a3ed-7678f01f66bc": "Agile",
+            "6b724908-ef14-45cf-84f8-768b5384da45": "Scrum",
+            "27450541-8e31-4150-9947-dc59f998fc01": "CMMI",
+            "b8a3a935-7e91-48b8-a94c-606d37c3e9f2": "Basic"
+          };
+          const page = await api("GET", root + "/work/processes?api-version=7.1");
+          const rows = (page.value || []).filter((item) => item.customizationType === "Inherited");
+          const systems = (page.value || []).filter((item) => item.customizationType === "System");
+          const table = rows.length ? "<table id='processes'><thead><tr><th></th><th>Nom</th><th>Parent</th><th>Type</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='proc-remove' data-id='" + esc(item.typeId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(parents[item.parentProcessTypeId] || item.parentProcessTypeId) + "</td><td>" + esc(item.customizationType) + "</td></tr>").join("") + "</tbody></table>" : "<p id='proc-empty' class='sub'>Aucun processus hérité.</p>";
+          const catalog = "<h2>Système</h2><table id='system-processes'><thead><tr><th>Nom</th><th>Type</th></tr></thead><tbody>" + systems.map((item) => "<tr><td>" + esc(item.name) + "</td><td>Système</td></tr>").join("") + "</tbody></table>";
+          view.innerHTML = "<h1>Processus</h1><div class='command'><input id='proc-name' placeholder='Pompe' /><button id='proc-add' type='button'>Ajouter</button></div>" + table + catalog + "<p id='proc-error' class='error' hidden></p>";
+          document.getElementById("proc-add").onclick = async () => {
+            const error = document.getElementById("proc-error");
+            error.hidden = true;
+            const name = document.getElementById("proc-name").value;
+            try {
+              await api("POST", root + "/work/processes?api-version=7.1", { name: name, parentProcessTypeId: "adcc42ab-9882-485e-a3ed-7678f01f66bc" });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.proc-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("proc-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

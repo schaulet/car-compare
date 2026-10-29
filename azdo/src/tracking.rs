@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 
-use crate::http::{fail, parse_json};
+use crate::http::{fail, parse_json, pct_decode};
 use crate::AppState;
 
 pub fn dispatch(
@@ -21,7 +21,13 @@ pub fn dispatch(
         ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
         ("work", "plans") => delivery_plans(state, method, org, project, rest, body),
-        ("work", "processes") => picklists(state, method, org, project, rest, body),
+        ("work", "processes") => {
+            if rest.iter().any(|part| part.eq_ignore_ascii_case("lists")) {
+                picklists(state, method, org, project, rest, body)
+            } else {
+                work_processes(state, method, org, Some(project), rest, body)
+            }
+        }
         ("work", "teamsettings") => team_settings(state, method, org, project, team, rest, body),
         ("dashboard", "dashboards") => dashboards(state, method, org, project, team, rest, body),
         ("serviceendpoint", "types") if rest.len() == 2 => endpoint_types(method),
@@ -1775,7 +1781,311 @@ fn dress_delivery_plan(org: &str, project: &str, mut item: Value) -> Value {
     item
 }
 
+const PROCESSES: &str = "work/processes";
 const PICKLISTS: &str = "work/processes/lists";
+const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
+const CMMI: &str = "27450541-8e31-4150-9947-dc59f998fc01";
+const BASIC: &str = "b8a3a935-7e91-48b8-a94c-606d37c3e9f2";
+
+struct SystemProcess {
+    type_id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    is_default: bool,
+}
+
+const SYSTEM_PROCESSES: &[SystemProcess] = &[
+    SystemProcess {
+        type_id: AGILE,
+        name: "Agile",
+        description: "This template is flexible and will work great for most teams using Agile planning methods, including those practicing Scrum.",
+        is_default: true,
+    },
+    SystemProcess {
+        type_id: SCRUM,
+        name: "Scrum",
+        description: "This template is for teams who follow the Scrum framework.",
+        is_default: false,
+    },
+    SystemProcess {
+        type_id: CMMI,
+        name: "CMMI",
+        description: "This template is for more formal projects requiring a framework for process improvement and an auditable record of decisions.",
+        is_default: false,
+    },
+    SystemProcess {
+        type_id: BASIC,
+        name: "Basic",
+        description: "This template is flexible for any process and great for teams getting started with Azure DevOps.",
+        is_default: false,
+    },
+];
+
+pub fn work_processes(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(tail) = process_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        };
+    };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = match project {
+                Some(project) => project_processes(state, org, project),
+                None => org_processes(state, org),
+            };
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let project = project.map(str::to_string).unwrap_or_else(|| state.names().1);
+            return match process_create(state, org, &project, body) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let id = pct_decode(&tail[0]);
+    if let Some(system) = system_process(id.trim()) {
+        if method == Method::GET {
+            let owner = project.unwrap_or("");
+            return Json(dress_system(org, owner, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "processus système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::GET {
+        return match locate_process(state, org, project, id.trim()) {
+            Some((owner, found)) => Json(dress_process(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "processus introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some((owner, found)) = locate_process(state, org, project, id.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "processus introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(PROCESSES))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn process_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().rposition(|part| part.eq_ignore_ascii_case("processes"))?;
+    Some(&rest[index + 1..])
+}
+
+fn system_process(id: &str) -> Option<&'static SystemProcess> {
+    SYSTEM_PROCESSES.iter().find(|process| process.type_id.eq_ignore_ascii_case(id) || process.name.eq_ignore_ascii_case(id))
+}
+
+fn dress_system(org: &str, project: &str, process: &SystemProcess) -> Value {
+    let mut item = json!({
+        "id": process.type_id,
+        "typeId": process.type_id,
+        "name": process.name,
+        "description": process.description,
+        "parentProcessTypeId": "00000000-0000-0000-0000-000000000000",
+        "referenceName": Value::Null,
+        "isEnabled": true,
+        "isDefault": process.is_default,
+        "customizationType": "System",
+        "url": format!("/{org}/_apis/work/processes/{}", process.type_id)
+    });
+    if !project.is_empty() {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("project".into(), json!(project));
+        }
+    }
+    item
+}
+
+fn project_processes(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut rows: Vec<Value> = SYSTEM_PROCESSES.iter().map(|process| dress_system(org, project, process)).collect();
+    let mut custom = list_processes(state, org, project);
+    custom.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows.extend(custom.into_iter().map(|item| dress_process(org, project, item)));
+    rows
+}
+
+fn org_processes(state: &AppState, org: &str) -> Vec<Value> {
+    let mut rows: Vec<Value> = SYSTEM_PROCESSES.iter().map(|process| dress_system(org, "", process)).collect();
+    let mut custom = all_processes(state, org);
+    custom.sort_by(|left, right| item_id(&left.1).cmp(&item_id(&right.1)));
+    rows.extend(custom.into_iter().map(|(project, item)| dress_process(org, &project, item)));
+    rows
+}
+
+fn list_processes(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(PROCESSES)).unwrap_or_default())
+}
+
+fn all_processes(state: &AppState, org: &str) -> Vec<(String, Value)> {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (name, project) in &organization.projects {
+            if let Some(bucket) = project.buckets.get(PROCESSES) {
+                for item in bucket.items.values() {
+                    rows.push((name.clone(), item.clone()));
+                }
+            }
+        }
+        rows
+    })
+}
+
+fn locate_process(state: &AppState, org: &str, project: Option<&str>, id: &str) -> Option<(String, Value)> {
+    state.read(|db| {
+        let organization = db.orgs.get(org)?;
+        for (name, stored) in &organization.projects {
+            if let Some(project) = project {
+                if !name.eq_ignore_ascii_case(project) && stored.id != project {
+                    continue;
+                }
+            }
+            if let Some(item) = stored.buckets.get(PROCESSES).and_then(|bucket| {
+                bucket.items.values().find(|item| {
+                    item_id(item) == id
+                        || item_text(item, "typeId").is_some_and(|stored| stored.eq_ignore_ascii_case(id))
+                        || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(id))
+                        || item_text(item, "referenceName").is_some_and(|stored| stored.eq_ignore_ascii_case(id))
+                })
+            }) {
+                return Some((name.clone(), item.clone()));
+            }
+        }
+        None
+    })
+}
+
+fn next_process_id(state: &AppState, org: &str) -> i64 {
+    all_processes(state, org)
+        .iter()
+        .filter_map(|(_, item)| item_id(item).strip_prefix("proc-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn process_create(state: &AppState, org: &str, project: &str, body: &[u8]) -> Result<Value, &'static str> {
+    let (name, description, parent, reference) = process_payload(body)?;
+    let id = format!("proc-{}", next_process_id(state, org));
+    let item = json!({
+        "id": id,
+        "typeId": id,
+        "name": name,
+        "description": description,
+        "parentProcessTypeId": parent,
+        "referenceName": reference,
+        "isEnabled": true,
+        "isDefault": false,
+        "customizationType": "Inherited"
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("processus introuvable");
+        };
+        let existing = stored.list_bucket(PROCESSES);
+        if existing.iter().any(|stored| item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name)))
+            || system_process(&name).is_some()
+        {
+            return Err("processus existant");
+        }
+        if existing.iter().any(|stored| item_text(stored, "referenceName").is_some_and(|current| current.eq_ignore_ascii_case(&reference))) {
+            return Err("référence existante");
+        }
+        stored.put_bucket(PROCESSES, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_process(org, project, item))
+}
+
+fn process_payload(body: &[u8]) -> Result<(String, String, String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("processus illisible");
+    };
+    let Some(name) = object.get("name").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string) else {
+        return Err("nom absent");
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => return Err("description absente"),
+    };
+    let Some(parent) = object.get("parentProcessTypeId").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err("parent absent");
+    };
+    let Some(parent_process) = SYSTEM_PROCESSES.iter().find(|process| process.type_id.eq_ignore_ascii_case(parent)) else {
+        return Err("parent inconnu");
+    };
+    let reference = match object.get("referenceName") {
+        None => process_reference(&name).ok_or("référence absente")?,
+        Some(Value::String(value)) if process_reference_token(value.trim()) => value.trim().to_string(),
+        Some(_) => return Err("référence absente"),
+    };
+    Ok((name, description, parent_process.type_id.to_string(), reference))
+}
+
+fn process_reference(name: &str) -> Option<String> {
+    let slug: String = name.chars().filter(|char| char.is_ascii_alphanumeric()).collect();
+    if process_reference_token(&format!("Inherited.{slug}")) {
+        Some(format!("Inherited.{slug}"))
+    } else {
+        None
+    }
+}
+
+fn process_reference_token(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let token = |part: &str| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some(char) if char.is_ascii_alphabetic()) && chars.all(|char| char.is_ascii_alphanumeric())
+    };
+    parts.next().is_some_and(token) && parts.all(token) && value.contains('.')
+}
+
+fn dress_process(org: &str, project: &str, mut item: Value) -> Value {
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/work/processes/{id}")));
+    }
+    item
+}
 
 pub fn picklists(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let Some(tail) = lists_tail(rest) else {

@@ -91,9 +91,13 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
                 .map(pct_decode)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            match project {
-                Some(project) => crate::tracking::picklists(state, method, org, &project, rest, body),
-                None => crate::tracking::picklists_org(state, method, org, rest, body),
+            if rest.iter().any(|part| part.eq_ignore_ascii_case("lists")) {
+                match project {
+                    Some(project) => crate::tracking::picklists(state, method, org, &project, rest, body),
+                    None => crate::tracking::picklists_org(state, method, org, rest, body),
+                }
+            } else {
+                crate::tracking::work_processes(state, method, org, project.as_deref(), rest, body)
             }
         }
         ("wit", "fields") => {
