@@ -156,6 +156,7 @@
       <a href="/__ORG__/__PROJECT__/_memberships">Appartenances</a>
       <a href="/__ORG__/__PROJECT__/_audit">Audit</a>
       <a href="/__ORG__/__PROJECT__/_extensions">Extensions</a>
+      <a href="/__ORG__/__PROJECT__/_groupentitlements">Droits de groupe</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3500,6 +3501,38 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/extensionmanagement/installedextensions/" + button.dataset.id.split("/").map(encodeURIComponent).join("/") + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_groupentitlements") {
+          const page = await api("GET", root + "/memberentitlementmanagement/groupentitlements?api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='gentitlements'><thead><tr><th></th><th>Nom</th><th>Licence</th><th>Groupe</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='gent-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.group.displayName) + "'>Retirer</button></td><td>" + esc(item.group.displayName) + "</td><td>" + esc(item.licenseRule.licenseDisplayName) + "</td><td>" + esc((item.projectEntitlements[0] || {}).group.displayName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='gent-empty' class='sub'>Aucun droit de groupe.</p>";
+          view.innerHTML = "<h1>Droits de groupe</h1><div class='command'><input id='gent-name' placeholder='Pompe' /><button id='gent-add' type='button'>Ajouter</button></div>" + table + "<p id='gent-error' class='error' hidden></p>";
+          document.getElementById("gent-add").onclick = async () => {
+            const error = document.getElementById("gent-error");
+            error.hidden = true;
+            const name = document.getElementById("gent-name").value;
+            try {
+              await api("POST", root + "/memberentitlementmanagement/groupentitlements?api-version=7.1", { group: { displayName: name } });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.gent-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("gent-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/memberentitlementmanagement/groupentitlements/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

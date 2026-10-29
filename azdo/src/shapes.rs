@@ -61,6 +61,7 @@ pub fn dispatch(
         ("policy", "evaluations") => policy_evaluations(state, method, org, project, query, body),
         ("audit", "streams") => audit_streams(state, method, org, Some(project), rest, body),
         ("extensionmanagement", "installedextensions") => installed_extensions(state, method, org, Some(project), rest, body),
+        ("memberentitlementmanagement", "groupentitlements") => group_entitlements(state, method, org, Some(project), rest, body),
         _ => return None,
     };
     Some(response)
@@ -115,6 +116,13 @@ pub fn org_dispatch(state: &AppState, method: &Method, org: &str, rest: &[String
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
             installed_extensions(state, method, org, project.as_deref(), rest, body)
+        }
+        ("memberentitlementmanagement", "groupentitlements") => {
+            let project = query_param(query, "project")
+                .map(pct_decode)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            group_entitlements(state, method, org, project.as_deref(), rest, body)
         }
         _ => return None,
     };
@@ -8929,6 +8937,272 @@ fn dress_extension(org: &str, project: &str, mut item: Value) -> Value {
         object.insert(
             "url".into(),
             json!(format!("/{org}/{project}/_apis/extensionmanagement/installedextensions/{publisher}/{extension_id}")),
+        );
+    }
+    item
+}
+
+const GROUP_ENTITLEMENTS: &str = "memberentitlementmanagement/groupentitlements";
+
+pub fn group_entitlements(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let Some(tail) = group_entitlement_tail(rest) else {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "droit de groupe introuvable")
+        };
+    };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "droit de groupe introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = match project {
+                Some(project) => project_group_entitlements(state, org, project),
+                None => org_group_entitlements(state, org),
+            };
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let project = project.map(str::to_string).unwrap_or_else(|| state.names().1);
+            return match group_entitlement_create(state, org, &project, body) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let id = pct_decode(&tail[0]);
+    if method == Method::GET {
+        return match locate_group_entitlement(state, org, project, id.trim()) {
+            Some((owner, found)) => Json(dress_group_entitlement(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "droit de groupe introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some((owner, found)) = locate_group_entitlement(state, org, project, id.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "droit de groupe introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(GROUP_ENTITLEMENTS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "droit de groupe introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn group_entitlement_tail(rest: &[String]) -> Option<&[String]> {
+    let index = rest.iter().position(|part| part.eq_ignore_ascii_case("groupentitlements"))?;
+    Some(&rest[index + 1..])
+}
+
+fn project_group_entitlements(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut rows = list_group_entitlements(state, org, project);
+    rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+    rows.into_iter().map(|item| dress_group_entitlement(org, project, item)).collect()
+}
+
+fn org_group_entitlements(state: &AppState, org: &str) -> Vec<Value> {
+    let mut rows = all_group_entitlements(state, org);
+    rows.sort_by(|left, right| value_key(&left.1["id"]).cmp(&value_key(&right.1["id"])));
+    rows.into_iter().map(|(project, item)| dress_group_entitlement(org, &project, item)).collect()
+}
+
+fn list_group_entitlements(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(GROUP_ENTITLEMENTS))
+            .unwrap_or_default()
+    })
+}
+
+fn all_group_entitlements(state: &AppState, org: &str) -> Vec<(String, Value)> {
+    state.read(|db| {
+        let Some(organization) = db.orgs.get(org) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (name, project) in &organization.projects {
+            if let Some(bucket) = project.buckets.get(GROUP_ENTITLEMENTS) {
+                for item in bucket.items.values() {
+                    rows.push((name.clone(), item.clone()));
+                }
+            }
+        }
+        rows
+    })
+}
+
+fn locate_group_entitlement(state: &AppState, org: &str, project: Option<&str>, id: &str) -> Option<(String, Value)> {
+    state.read(|db| {
+        let organization = db.orgs.get(org)?;
+        for (name, stored) in &organization.projects {
+            if let Some(project) = project {
+                if !name.eq_ignore_ascii_case(project) && stored.id != project {
+                    continue;
+                }
+            }
+            if let Some(item) = stored.buckets.get(GROUP_ENTITLEMENTS).and_then(|bucket| {
+                bucket.items.values().find(|item| {
+                    value_key(&item["id"]) == id
+                        || item
+                            .get("group")
+                            .and_then(|group| group.get("displayName"))
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case(id))
+                })
+            }) {
+                return Some((name.clone(), item.clone()));
+            }
+        }
+        None
+    })
+}
+
+fn next_group_entitlement_id(state: &AppState, org: &str) -> i64 {
+    all_group_entitlements(state, org)
+        .iter()
+        .filter_map(|(_, item)| value_key(&item["id"]).strip_prefix("gent-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn group_entitlement_create(state: &AppState, org: &str, project: &str, body: &[u8]) -> Result<Value, &'static str> {
+    let (name, license, license_name, entitlements) = group_entitlement_payload(project, body)?;
+    let id = format!("gent-{}", next_group_entitlement_id(state, org));
+    let item = json!({
+        "id": id,
+        "group": {
+            "displayName": name,
+            "origin": "vsts",
+            "originId": id,
+            "subjectKind": "group"
+        },
+        "licenseRule": {
+            "licensingSource": "account",
+            "accountLicenseType": license,
+            "licenseDisplayName": license_name
+        },
+        "projectEntitlements": entitlements,
+        "status": "applied"
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("droit de groupe introuvable");
+        };
+        let existing: Vec<Value> = stored
+            .buckets
+            .get(GROUP_ENTITLEMENTS)
+            .map(|bucket| bucket.items.values().cloned().collect())
+            .unwrap_or_default();
+        if existing.iter().any(|stored| {
+            stored
+                .get("group")
+                .and_then(|group| group.get("displayName"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|current| current.eq_ignore_ascii_case(&name))
+        }) {
+            return Err("droit de groupe existant");
+        }
+        let bucket = stored.buckets.entry(GROUP_ENTITLEMENTS.to_string()).or_insert_with(Bucket::empty);
+        bucket.put(item.clone());
+        Ok(())
+    })?;
+    Ok(dress_group_entitlement(org, project, item))
+}
+
+fn group_entitlement_payload(project: &str, body: &[u8]) -> Result<(String, &'static str, &'static str, Vec<Value>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("droit de groupe illisible");
+    };
+    let Some(group) = object.get("group").and_then(|value| value.as_object()) else {
+        return Err("nom absent");
+    };
+    let Some(name) = group
+        .get("displayName")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Err("nom absent");
+    };
+    if let Some(origin) = group.get("origin") {
+        if origin.as_str() != Some("vsts") {
+            return Err("origine absente");
+        }
+    }
+    if let Some(kind) = group.get("subjectKind") {
+        if kind.as_str() != Some("group") {
+            return Err("sujet absent");
+        }
+    }
+    let (license, license_name) = match object.get("licenseRule") {
+        None => ("express", "Basic"),
+        Some(rule) => {
+            let Some(rule) = rule.as_object() else {
+                return Err("licence absente");
+            };
+            if let Some(source) = rule.get("licensingSource") {
+                if source.as_str() != Some("account") {
+                    return Err("licence absente");
+                }
+            }
+            let Some(raw) = rule.get("accountLicenseType").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err("licence absente");
+            };
+            let Some(pair) = canonical_license(raw) else {
+                return Err("licence inconnue");
+            };
+            pair
+        }
+    };
+    let entitlements = match object.get("projectEntitlements") {
+        None => vec![json!({
+            "projectRef": {"id": project, "name": project},
+            "group": {"groupType": "projectContributor", "displayName": "Contributeurs"}
+        })],
+        Some(value) => {
+            let rows = read_project_entitlements(value)?;
+            if rows.is_empty() {
+                return Err("projet absent");
+            }
+            rows
+        }
+    };
+    Ok((name, license, license_name, entitlements))
+}
+
+fn dress_group_entitlement(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/memberentitlementmanagement/groupentitlements/{id}")),
         );
     }
     item
