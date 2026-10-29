@@ -118,6 +118,7 @@
       <a href="/__ORG__/__PROJECT__/_git/commits">Commits</a>
       <a href="/__ORG__/__PROJECT__/_git/pushes">Poussées</a>
       <a href="/__ORG__/__PROJECT__/_git/branches">Branches</a>
+      <a href="/__ORG__/__PROJECT__/_git/tags">Étiquettes</a>
       <a href="/__ORG__/__PROJECT__/_git/pulls">Demandes de tirage</a>
       <a href="/__ORG__/__PROJECT__/_policies">Stratégies</a>
       <a href="/__ORG__/__PROJECT__/_tfvc">TFVC</a>
@@ -775,7 +776,7 @@
           };
           return;
         }
-        if (hub === "/_git/commits" || hub === "/_git/pushes" || hub === "/_git/branches") {
+        if (hub === "/_git/commits" || hub === "/_git/pushes" || hub === "/_git/branches" || hub === "/_git/tags") {
           const repos = await collection("git/repositories");
           const repo = repos[0];
           const repoPath = repo ? root + "/git/repositories/" + encodeURIComponent(repo.id) : "";
@@ -852,13 +853,50 @@
             };
             return;
           }
+          if (hub === "/_git/tags") {
+            const heads = repo ? (await api("GET", repoPath + "/refs?filter=heads&api-version=7.1")).value || [] : [];
+            const tags = repo ? (await api("GET", repoPath + "/refs?filter=tags&api-version=7.1")).value || [] : [];
+            const main = heads.find((item) => item.name === "refs/heads/main") || heads[0];
+            const rows = [];
+            for (const item of tags) {
+              let message = "";
+              if (item.peeledObjectId && item.peeledObjectId !== item.objectId) {
+                const tag = await api("GET", repoPath + "/annotatedtags/" + encodeURIComponent(item.objectId) + "?api-version=7.1");
+                message = tag.message || "";
+              }
+              rows.push({ name: item.name, commit: item.peeledObjectId || item.objectId, message: message, objectId: item.objectId });
+            }
+            const table = rows.length ? "<table id='tag-table'><thead><tr><th>Étiquette</th><th>Commit</th><th>Message</th><th></th></tr></thead><tbody>" + rows.map((item) => "<tr><td>" + esc(String(item.name).replace(/^refs\/tags\//, "")) + "</td><td><code>" + esc(String(item.commit || "").slice(0, 12)) + "</code></td><td>" + esc(item.message) + "</td><td><button type='button' class='tag-delete' data-ref='" + esc(item.name) + "' data-object='" + esc(item.objectId) + "'>Supprimer</button></td></tr>").join("") + "</tbody></table>" : "<p class='sub' id='tag-empty'>Aucune étiquette.</p>";
+            view.innerHTML = "<h1>Étiquettes</h1><div class='command'><input id='tag-name' placeholder='v1.0.0' /><input id='tag-message' placeholder='Message' /><input id='tag-commit' placeholder='Commit' value='" + esc(main ? main.objectId : "") + "' /><button id='tag-add' type='button'>Créer</button></div>" + table;
+            document.getElementById("tag-add").onclick = async () => {
+              if (!repo) return;
+              await api("POST", repoPath + "/annotatedtags?api-version=7.1", {
+                name: document.getElementById("tag-name").value || "v1.0.0",
+                message: document.getElementById("tag-message").value || "",
+                taggedObject: { objectId: document.getElementById("tag-commit").value },
+              });
+              location.reload();
+            };
+            document.querySelectorAll("button.tag-delete").forEach((button) => {
+              button.onclick = async () => {
+                await api("POST", repoPath + "/refs?api-version=7.1", [{
+                  name: button.dataset.ref,
+                  oldObjectId: button.dataset.object,
+                  newObjectId: "0000000000000000000000000000000000000000",
+                }]);
+                location.reload();
+              };
+            });
+            return;
+          }
           if (hub === "/_git/branches") {
             const refs = repo ? await collection("git/repositories/" + encodeURIComponent(repo.id) + "/refs") : [];
-            const table = refs.length ? "<table><thead><tr><th>Branche</th><th>Commit</th></tr></thead><tbody>" + refs.map((item) => "<tr><td>" + esc(item.name) + "</td><td><code>" + esc(String(item.objectId || "").slice(0, 8)) + "</code></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune branche.</p>";
+            const heads = refs.filter((item) => String(item.name || "").startsWith("refs/heads/"));
+            const table = heads.length ? "<table><thead><tr><th>Branche</th><th>Commit</th></tr></thead><tbody>" + heads.map((item) => "<tr><td>" + esc(item.name) + "</td><td><code>" + esc(String(item.objectId || "").slice(0, 8)) + "</code></td></tr>").join("") + "</tbody></table>" : "<p class='sub'>Aucune branche.</p>";
             view.innerHTML = "<h1>Branches</h1><div class='command'><input id='branch-name' placeholder='feature' /><button id='create' type='button'>Créer</button></div>" + table;
             document.getElementById("create").onclick = async () => {
               if (!repo) return;
-              const main = refs.find((item) => item.name === "refs/heads/main") || refs[0];
+              const main = heads.find((item) => item.name === "refs/heads/main") || heads[0];
               const name = document.getElementById("branch-name").value || "feature";
               const refName = name.startsWith("refs/") ? name : "refs/heads/" + name;
               await api("POST", repoPath + "/refs?api-version=7.1", [{ name: refName, oldObjectId: "0000000000000000000000000000000000000000", newObjectId: main ? main.objectId : "" }]);

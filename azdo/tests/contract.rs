@@ -3435,3 +3435,226 @@ async fn classification_nodes_keep_children_when_a_parent_is_renamed() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn annotated_tag_points_at_a_commit_and_can_be_deleted() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/git/repositories?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repos: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let repo_id = repos["value"][0]["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=heads&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let heads: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(body.contains("refs/heads/main"), "{body}");
+    assert!(!body.contains("refs/tags/"), "{body}");
+    let commit_id = heads["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/heads/main")
+        .unwrap()["objectId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"name":"v1.0.0","message":"Première version","taggedObject":{{"objectId":"{commit_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tag: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(tag["name"], "v1.0.0");
+    assert_eq!(tag["message"], "Première version");
+    assert_eq!(tag["taggedObject"]["objectId"], commit_id);
+    assert_eq!(tag["taggedObject"]["objectType"], "commit");
+    assert_eq!(tag["taggedBy"]["name"], "azurz");
+    let tag_id = tag["objectId"].as_str().unwrap();
+    assert_eq!(tag_id.len(), 40);
+    assert_ne!(tag_id, commit_id);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags/{tag_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let read: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(read["message"], "Première version");
+    assert_eq!(read["taggedObject"]["objectId"], commit_id);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=tags&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tags: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!body.contains("refs/heads/"), "{body}");
+    let tag_ref = tags["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/tags/v1.0.0")
+        .unwrap();
+    assert_eq!(tag_ref["objectId"], tag_id);
+    assert_eq!(tag_ref["peeledObjectId"], commit_id);
+
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"{{"name":"v1.0.0","taggedObject":{{"objectId":"{commit_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"v9","taggedObject":{"objectId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":" ","message":"vide"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/tags/v0.9","oldObjectId":"0000000000000000000000000000000000000000","newObjectId":"{commit_id}"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=tags&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let light = listed["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "refs/tags/v0.9")
+        .unwrap();
+    assert_eq!(light["objectId"], commit_id);
+    assert!(light.get("peeledObjectId").is_none() || light["peeledObjectId"].is_null());
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&format!(
+            r#"[{{"name":"refs/tags/v1.0.0","oldObjectId":"{tag_id}","newObjectId":"0000000000000000000000000000000000000000"}}]"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let deleted: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(deleted["value"][0]["success"], true);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/refs?filter=tags&api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("refs/tags/v1.0.0"), "{body}");
+    assert!(body.contains("refs/tags/v0.9"), "{body}");
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags/{tag_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/git/repositories/{repo_id}/annotatedtags/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

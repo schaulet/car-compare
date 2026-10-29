@@ -20,9 +20,9 @@ pub fn dispatch(
     let resource = rest.get(1)?.to_ascii_lowercase();
     let response = match (area.as_str(), resource.as_str()) {
         ("git", "repositories") => git_repositories(state, method, org, project, rest, query, body),
-        ("git", "refs") => git_alias(state, method, org, project, "refs", body),
-        ("git", "commits") => git_alias(state, method, org, project, "commits", body),
-        ("git", "pushes") => git_alias(state, method, org, project, "pushes", body),
+        ("git", "refs") => git_alias(state, method, org, project, "refs", query, body),
+        ("git", "commits") => git_alias(state, method, org, project, "commits", query, body),
+        ("git", "pushes") => git_alias(state, method, org, project, "pushes", query, body),
         ("git", "pullrequests") => pull_requests(state, method, org, project, None, rest, body),
         ("build", "definitions") => definitions(state, method, org, project, body),
         ("build", "builds") => builds(state, method, org, project, rest, body),
@@ -129,7 +129,8 @@ fn git_repositories(
     }
     let sub = rest.get(3).map(|value| value.to_ascii_lowercase()).unwrap_or_default();
     match sub.as_str() {
-        "refs" => refs(state, method, org, project, repo_id, body),
+        "refs" => refs(state, method, org, project, repo_id, query, body),
+        "annotatedtags" => annotated_tags(state, method, org, project, repo_id, tail_after(rest, "annotatedtags"), body),
         "commits" => commits(state, method, org, project, repo_id, tail_after(rest, "commits"), query, body),
         "pushes" => pushes(state, method, org, project, repo_id, tail_after(rest, "pushes"), body),
         "pullrequests" => pull_requests(state, method, org, project, Some(repo_id), rest, body),
@@ -139,22 +140,48 @@ fn git_repositories(
     }
 }
 
-fn git_alias(state: &AppState, method: &Method, org: &str, project: &str, kind: &str, body: &[u8]) -> Response {
+fn git_alias(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    kind: &str,
+    query: &str,
+    body: &[u8],
+) -> Response {
     let Some(repo_id) = default_repo_id(state, org, project) else {
         return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
     };
     match kind {
-        "refs" => refs(state, method, org, project, &repo_id, body),
+        "refs" => refs(state, method, org, project, &repo_id, query, body),
         "commits" => commits(state, method, org, project, &repo_id, &[], "", body),
         "pushes" => pushes(state, method, org, project, &repo_id, &[], body),
         _ => fail(StatusCode::NOT_FOUND, "ressource git introuvable"),
     }
 }
 
-fn refs(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &str, body: &[u8]) -> Response {
+fn refs(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    query: &str,
+    body: &[u8],
+) -> Response {
     let key = format!("git/repositories/{repo_id}/refs");
     if method == Method::GET {
-        return Json(page(list(state, org, project, &key))).into_response();
+        let mut value = list(state, org, project, &key);
+        if let Some(filter) = query_param(query, "filter") {
+            let decoded = pct_decode(filter);
+            let prefix = if decoded.starts_with("refs/") {
+                decoded
+            } else {
+                format!("refs/{decoded}")
+            };
+            value.retain(|item| text_of(item, "name").unwrap_or_default().starts_with(&prefix));
+        }
+        return Json(page(value)).into_response();
     }
     if method != Method::POST {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
@@ -164,21 +191,53 @@ fn refs(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &s
     let created = state.write(|db| {
         db.ensure_project(org, project);
         let stored = db.project_mut(org, project)?;
-        let bucket = stored.buckets.entry(key.clone()).or_insert_with(Bucket::empty);
         let mut rows = Vec::new();
         for update in updates {
             let name = text_of(&update, "name").unwrap_or_else(|| "refs/heads/main".into());
+            let old_object = update
+                .get("oldObjectId")
+                .cloned()
+                .unwrap_or(json!("0000000000000000000000000000000000000000"));
+            if text_of(&update, "newObjectId").as_deref().is_some_and(is_zero_object_id) {
+                let removed = stored
+                    .buckets
+                    .get_mut(&key)
+                    .is_some_and(|bucket| bucket.remove(&name));
+                if let Some(short) = name.strip_prefix("refs/tags/") {
+                    let tags_key = format!("git/repositories/{repo_id}/annotatedtags");
+                    if let Some(tags) = stored.buckets.get_mut(&tags_key) {
+                        let ids: Vec<String> = tags
+                            .items
+                            .iter()
+                            .filter_map(|(id, item)| {
+                                (item.get("name").and_then(|value| value.as_str()) == Some(short)).then(|| id.clone())
+                            })
+                            .collect();
+                        for id in ids {
+                            tags.remove(&id);
+                        }
+                    }
+                }
+                rows.push(json!({
+                    "name": name,
+                    "oldObjectId": old_object,
+                    "newObjectId": "0000000000000000000000000000000000000000",
+                    "success": removed,
+                    "updateStatus": if removed { "succeeded" } else { "invalidRefName" }
+                }));
+                continue;
+            }
             let object = text_of(&update, "newObjectId")
-                .filter(|value| !value.is_empty() && !value.chars().all(|ch| ch == '0'))
+                .filter(|value| !value.is_empty() && !is_zero_object_id(value))
                 .unwrap_or_else(|| object_id(&format!("{repo_id}:{name}")));
             let item = json!({
                 "id": name,
                 "name": name,
                 "objectId": object,
-                "oldObjectId": update.get("oldObjectId").cloned().unwrap_or(json!("0000000000000000000000000000000000000000")),
+                "oldObjectId": old_object,
                 "success": true
             });
-            bucket.put(item.clone());
+            stored.buckets.entry(key.clone()).or_insert_with(Bucket::empty).put(item.clone());
             rows.push(item);
         }
         Some(rows)
@@ -186,6 +245,99 @@ fn refs(state: &AppState, method: &Method, org: &str, project: &str, repo_id: &s
     match created {
         Some(value) => Json(page(value)).into_response(),
         None => fail(StatusCode::NOT_FOUND, "dépôt introuvable"),
+    }
+}
+
+fn annotated_tags(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    tail: &[String],
+    body: &[u8],
+) -> Response {
+    if find_repo(state, org, project, repo_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "dépôt introuvable");
+    }
+    let key = format!("git/repositories/{repo_id}/annotatedtags");
+    if let Some(object_id) = tail.first() {
+        if method != Method::GET {
+            return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+        }
+        return match get_item(state, org, project, &key, object_id) {
+            Some(item) => Json(item).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "étiquette introuvable"),
+        };
+    }
+    if method != Method::POST {
+        return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+    }
+    let payload = parse_json(body).unwrap_or(json!({}));
+    let Some(name) = text_of(&payload, "name").as_deref().and_then(tag_short_name) else {
+        return fail(StatusCode::BAD_REQUEST, "nom d'étiquette absent");
+    };
+    let commit = payload
+        .get("taggedObject")
+        .and_then(|value| text_of(value, "objectId"))
+        .unwrap_or_default();
+    if get_item(state, org, project, &format!("git/repositories/{repo_id}/commits"), &commit).is_none() {
+        return fail(StatusCode::BAD_REQUEST, "commit introuvable");
+    }
+    let ref_name = format!("refs/tags/{name}");
+    if list(state, org, project, &format!("git/repositories/{repo_id}/refs"))
+        .iter()
+        .any(|item| text_of(item, "name").as_deref() == Some(ref_name.as_str()))
+    {
+        return fail(StatusCode::BAD_REQUEST, "étiquette existante");
+    }
+    let tag_id = object_id(&format!("{repo_id}:tag:{name}:{commit}"));
+    let message = text_of(&payload, "message").unwrap_or_default();
+    let item = json!({
+        "id": tag_id,
+        "name": name,
+        "objectId": tag_id,
+        "message": message,
+        "taggedObject": {"objectId": commit, "objectType": "commit"},
+        "taggedBy": {"name": "azurz", "email": "azurz@azurz.lab", "date": "2026-10-29T00:00:00Z"},
+        "url": format!("/{org}/{project}/_apis/git/repositories/{repo_id}/annotatedtags/{tag_id}")
+    });
+    put_item(state, org, project, &key, item.clone());
+    put_item(
+        state,
+        org,
+        project,
+        &format!("git/repositories/{repo_id}/refs"),
+        json!({
+            "id": ref_name,
+            "name": ref_name,
+            "objectId": tag_id,
+            "peeledObjectId": commit,
+            "success": true
+        }),
+    );
+    Json(item).into_response()
+}
+
+fn is_zero_object_id(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|ch| ch == '0')
+}
+
+fn tag_short_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let name = trimmed.strip_prefix("refs/tags/").unwrap_or(trimmed);
+    if name.is_empty()
+        || name.chars().any(|ch| ch.is_whitespace() || matches!(ch, '~' | '^' | ':' | '\\' | '?' | '*' | '['))
+        || name.contains("..")
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.ends_with('.')
+        || name.contains("//")
+        || name.contains("@{")
+    {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
