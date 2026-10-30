@@ -192,6 +192,7 @@
       <a href="/__ORG__/__PROJECT__/_testfields">Champs de test</a>
       <a href="/__ORG__/__PROJECT__/_resultfields">Champs de résultat</a>
       <a href="/__ORG__/__PROJECT__/_resultitems">Éléments de résultat</a>
+      <a href="/__ORG__/__PROJECT__/_testcases">Cas de test</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5262,6 +5263,38 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/testresults/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/workitems/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_testcases") {
+          const page = await api("GET", root + "/test/testcases?api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='testcases'><thead><tr><th></th><th>Nom</th><th>Élément</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='testcase-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.workItemId) + "</td></tr>").join("") + "</tbody></table>" : "<p id='testcase-empty' class='sub'>Aucun cas de test.</p>";
+          view.innerHTML = "<h1>Cas de test</h1><div class='command'><input id='testcase-name' placeholder='Pompe' /><button id='testcase-add' type='button'>Ajouter</button></div>" + table + "<p id='testcase-error' class='error' hidden></p>";
+          document.getElementById("testcase-add").onclick = async () => {
+            const error = document.getElementById("testcase-error");
+            error.hidden = true;
+            const name = document.getElementById("testcase-name").value;
+            try {
+              await api("POST", root + "/test/testcases?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.testcase-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("testcase-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/testcases/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

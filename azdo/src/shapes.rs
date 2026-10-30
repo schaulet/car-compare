@@ -57,6 +57,7 @@ pub fn dispatch(
         ("testplan", "variables") => test_variables(state, method, org, project, rest, body),
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
+        ("test", "testcases") => test_cases(state, method, org, project, rest, body),
         ("testresults", "codecoverage") => test_code_coverage(state, method, org, project, rest, query, body),
         ("testresults", "testfailuretype") => test_failure_types(state, method, org, project, rest, body),
         ("testresults", "results") => test_result_metadata(state, method, org, project, rest, body),
@@ -9104,6 +9105,206 @@ fn coverage_summary(state: &AppState, org: &str, project: &str, build_id: &str, 
         "status": "completed",
         "project": project
     })
+}
+
+const TEST_CASES: &str = "test/testcases";
+
+fn test_cases(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() > 2 { &rest[2..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "cas de test introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = alive_test_cases(state, org, project)
+                .into_iter()
+                .map(|item| dress_test_case(org, project, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let name = match test_case_name(body) {
+                Ok(name) => name,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match test_case_create(state, org, project, name) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    match locate_test_case(state, org, project, key) {
+        TestCaseHit::Alive(found) => {
+            if method == Method::GET {
+                return Json(dress_test_case(org, project, found)).into_response();
+            }
+            if method == Method::DELETE {
+                let stored_id = value_key(&found["id"]);
+                let work_id = found.get("workItemId").and_then(|value| value.as_i64()).unwrap_or(0);
+                return if delete_test_case(state, org, project, &stored_id, work_id) {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    fail(StatusCode::NOT_FOUND, "cas de test introuvable")
+                };
+            }
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        }
+        TestCaseHit::Orphan => fail(StatusCode::NOT_FOUND, "élément introuvable"),
+        TestCaseHit::Missing => fail(StatusCode::NOT_FOUND, "cas de test introuvable"),
+    }
+}
+
+enum TestCaseHit {
+    Alive(Value),
+    Orphan,
+    Missing,
+}
+
+fn test_case_name(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("cas de test illisible");
+    };
+    required_metadata_text(object.get("name"), "nom absent")
+}
+
+fn test_case_create(state: &AppState, org: &str, project: &str, name: String) -> Result<Value, &'static str> {
+    if list(state, org, project, TEST_CASES)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("cas de test existant");
+    }
+    let created = state.write(|db| {
+        db.ensure_project(org, project);
+        let stored = db.project_mut(org, project)?;
+        let mut fields = Map::new();
+        fields.insert("System.Title".into(), json!(name.clone()));
+        Some(stored.create_work_item(project, "Test Case", fields))
+    });
+    let Some(work_item) = created else {
+        return Err("cas de test illisible");
+    };
+    let work_id = work_item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+    let number = next_test_case_id(state, org);
+    let item = json!({
+        "id": format!("tc-{number}"),
+        "testCaseId": work_id,
+        "workItemId": work_id,
+        "name": name
+    });
+    put_item(state, org, project, TEST_CASES, item.clone());
+    deliver_work_item(state, org, project, "workitem.created", &work_item);
+    Ok(dress_test_case(org, project, item))
+}
+
+fn next_test_case_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(TEST_CASES) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("tc-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn alive_test_cases(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut rows = list(state, org, project, TEST_CASES);
+    rows.retain(|item| {
+        item.get("workItemId")
+            .and_then(|value| value.as_i64())
+            .is_some_and(|id| work_item_alive(state, org, project, id))
+    });
+    rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+    rows
+}
+
+fn locate_test_case(state: &AppState, org: &str, project: &str, key: &str) -> TestCaseHit {
+    let Some(found) = list(state, org, project, TEST_CASES).into_iter().find(|item| {
+        value_key(&item["id"]) == key
+            || value_key(&item["workItemId"]) == key
+            || value_key(&item["testCaseId"]) == key
+            || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    }) else {
+        return TestCaseHit::Missing;
+    };
+    match found.get("workItemId").and_then(|value| value.as_i64()) {
+        Some(id) if work_item_alive(state, org, project, id) => TestCaseHit::Alive(found),
+        Some(_) => TestCaseHit::Orphan,
+        None => TestCaseHit::Missing,
+    }
+}
+
+fn delete_test_case(state: &AppState, org: &str, project: &str, stored_id: &str, work_id: i64) -> bool {
+    let removed = state.write(|db| {
+        let Some(stored) = db.project_mut(org, project) else {
+            return false;
+        };
+        let removed = stored
+            .buckets
+            .get_mut(TEST_CASES)
+            .is_some_and(|bucket| bucket.remove(stored_id));
+        if !removed {
+            return false;
+        }
+        let _ = stored.delete_work_item(project, work_id, true);
+        let work_key = work_id.to_string();
+        let keys: Vec<String> = stored.buckets.keys().cloned().collect();
+        for key in keys {
+            let suite_cases = key.contains("/suites/") && key.ends_with("/testcases");
+            let suite_points = key.contains("/suites/") && key.ends_with("/points");
+            if suite_cases {
+                if let Some(bucket) = stored.buckets.get_mut(&key) {
+                    bucket.remove(&work_key);
+                }
+            }
+            if suite_points {
+                let Some(bucket) = stored.buckets.get_mut(&key) else {
+                    continue;
+                };
+                let gone: Vec<String> = bucket
+                    .items
+                    .iter()
+                    .filter(|(_, item)| item.get("testCase").is_some_and(|case| value_key(&case["id"]) == work_key))
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                for id in gone {
+                    bucket.remove(&id);
+                }
+            }
+        }
+        true
+    });
+    removed
+}
+
+fn dress_test_case(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/test/testcases/{id}")));
+    }
+    item
 }
 
 fn test_result_work_items(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
