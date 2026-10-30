@@ -6124,42 +6124,7 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return result_logs(state, method, org, project, run_id, rest, body);
     }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("results") {
-        if get_item(state, org, project, key, run_id).is_none() {
-            return fail(StatusCode::NOT_FOUND, "exécution introuvable");
-        }
-        let results_key = format!("test/runs/{run_id}/results");
-        if method == Method::GET {
-            return Json(page(list(state, org, project, &results_key))).into_response();
-        }
-        if method == Method::POST {
-            let payload = parse_json(body).unwrap_or(json!([]));
-            let rows = payload.as_array().cloned().unwrap_or_else(|| vec![payload]);
-            let mut stored_rows = Vec::new();
-            for (index, row) in rows.into_iter().enumerate() {
-                let id = list(state, org, project, &results_key).len() as i64 + 1 + index as i64;
-                let mut item = row;
-                if let Some(object) = item.as_object_mut() {
-                    object.entry("id").or_insert(json!(id));
-                    object.entry("outcome").or_insert(json!("Passed"));
-                    object.entry("state").or_insert(json!("Completed"));
-                    object.entry("testRun").or_insert(json!({"id": run_id}));
-                }
-                put_item(state, org, project, &results_key, item.clone());
-                stored_rows.push(item);
-            }
-            record_point_outcomes(state, org, project, &stored_rows);
-            let passed = list(state, org, project, &results_key)
-                .iter()
-                .filter(|item| text_of(item, "outcome").as_deref() == Some("Passed"))
-                .count();
-            if let Some(mut run) = get_item(state, org, project, key, run_id) {
-                run["totalTests"] = json!(list(state, org, project, &results_key).len());
-                run["passedTests"] = json!(passed);
-                run["state"] = json!("Completed");
-                put_item(state, org, project, key, run);
-            }
-            return Json(page(stored_rows)).into_response();
-        }
+        return test_results(state, method, org, project, run_id, rest, body);
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, run_id) {
@@ -6193,6 +6158,337 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn test_results(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "résultat introuvable")
+        };
+    }
+    let Some(run) = get_item(state, org, project, "test/runs", run_id) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_run.clone());
+    let results_key = format!("test/runs/{stored_run}/results");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &results_key);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_test_result(org, project, &stored_run, &run_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (rows, single) = match test_result_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match test_result_create(state, org, project, &stored_run, &run_name, &results_key, rows, single) {
+                Ok(response) => response,
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let wanted = pct_decode(&tail[0]);
+    let Some(found) = locate_test_result(state, org, project, &results_key, wanted.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "résultat introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_test_result(org, project, &stored_run, &run_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        if !delete_item(state, org, project, &results_key, &stored_id) {
+            return fail(StatusCode::NOT_FOUND, "résultat introuvable");
+        }
+        let prefix = format!("test/runs/{stored_run}/results/{stored_id}/");
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                let gone: Vec<String> = stored.buckets.keys().filter(|bucket_key| bucket_key.starts_with(&prefix)).cloned().collect();
+                for bucket_key in gone {
+                    stored.buckets.remove(&bucket_key);
+                }
+            }
+        });
+        refresh_run_result_totals(state, org, project, &stored_run, &results_key);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn test_result_payload(body: &[u8]) -> Result<(Vec<Value>, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    if let Some(rows) = payload.as_array() {
+        if rows.is_empty() {
+            return Err("résultat absent");
+        }
+        let mut parsed = Vec::new();
+        for row in rows {
+            parsed.push(normalize_result_row(row)?);
+        }
+        return Ok((parsed, false));
+    }
+    if payload.is_object() {
+        return Ok((vec![normalize_result_row(&payload)?], true));
+    }
+    Err("résultat illisible")
+}
+
+fn normalize_result_row(value: &Value) -> Result<Value, &'static str> {
+    let Some(object) = value.as_object() else {
+        return Err("résultat illisible");
+    };
+    let title = match object.get("testCaseTitle") {
+        None => None,
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("titre absent");
+            }
+            Some(text.to_string())
+        }
+        Some(_) => return Err("titre absent"),
+    };
+    let mut case_name = None;
+    let mut case_id = false;
+    match object.get("testCase") {
+        None => {}
+        Some(Value::Object(case)) => {
+            match case.get("name") {
+                None => {}
+                Some(Value::String(text)) => {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        return Err("titre absent");
+                    }
+                    case_name = Some(text.to_string());
+                }
+                Some(_) => return Err("titre absent"),
+            }
+            match case.get("id") {
+                None => {}
+                Some(Value::Number(number)) if number.as_i64().is_some() => case_id = true,
+                Some(_) => return Err("cas absent"),
+            }
+        }
+        Some(_) => return Err("cas absent"),
+    }
+    let mut point_id = false;
+    match object.get("testPoint") {
+        None => {}
+        Some(Value::Object(point)) => match point.get("id") {
+            Some(Value::Number(number)) if number.as_i64().is_some() => point_id = true,
+            _ => return Err("point absent"),
+        },
+        Some(_) => return Err("point absent"),
+    }
+    let title = title.or(case_name);
+    if title.is_none() && !point_id && !case_id {
+        return Err("titre absent");
+    }
+    let comment = match object.get("comment") {
+        None => String::new(),
+        Some(Value::String(text)) => text.trim().to_string(),
+        Some(_) => return Err("commentaire absent"),
+    };
+    let outcome = match object.get("outcome") {
+        None => "Passed",
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("issue absente");
+            }
+            canonical_outcome(text).ok_or("issue inconnue")?
+        }
+        Some(_) => return Err("issue absente"),
+    };
+    let state_name = match object.get("state") {
+        None => "Completed",
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("état absent");
+            }
+            canonical_result_state(text).ok_or("état inconnu")?
+        }
+        Some(_) => return Err("état absent"),
+    };
+    let mut item = value.clone();
+    if let Some(stored) = item.as_object_mut() {
+        if let Some(title) = title {
+            stored.insert("testCaseTitle".into(), json!(title.clone()));
+            stored.insert("name".into(), json!(title));
+        }
+        stored.insert("comment".into(), json!(comment));
+        stored.insert("outcome".into(), json!(outcome));
+        stored.insert("state".into(), json!(state_name));
+    }
+    Ok(item)
+}
+
+fn canonical_outcome(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "unspecified" => Some("Unspecified"),
+        "none" => Some("None"),
+        "passed" => Some("Passed"),
+        "failed" => Some("Failed"),
+        "inconclusive" => Some("Inconclusive"),
+        "timeout" => Some("Timeout"),
+        "aborted" => Some("Aborted"),
+        "blocked" => Some("Blocked"),
+        "notexecuted" => Some("NotExecuted"),
+        "warning" => Some("Warning"),
+        "error" => Some("Error"),
+        "notapplicable" => Some("NotApplicable"),
+        "paused" => Some("Paused"),
+        "inprogress" => Some("InProgress"),
+        "notimpacted" => Some("NotImpacted"),
+        _ => None,
+    }
+}
+
+fn canonical_result_state(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "unspecified" => Some("Unspecified"),
+        "pending" => Some("Pending"),
+        "queued" => Some("Queued"),
+        "inprogress" => Some("InProgress"),
+        "paused" => Some("Paused"),
+        "completed" => Some("Completed"),
+        "notexecuted" => Some("NotExecuted"),
+        "aborted" => Some("Aborted"),
+        _ => None,
+    }
+}
+
+fn locate_test_result(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "testCaseTitle").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_test_result_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if result_bucket(key) {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("rs-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn result_bucket(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("test")
+        && parts.next() == Some("runs")
+        && parts.next().is_some()
+        && parts.next() == Some("results")
+        && parts.next().is_none()
+}
+
+fn test_result_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    bucket: &str,
+    rows: Vec<Value>,
+    single: bool,
+) -> Result<Response, &'static str> {
+    let existing = list(state, org, project, bucket);
+    let mut seen = Vec::new();
+    for row in &rows {
+        let Some(title) = text_of(row, "testCaseTitle") else {
+            continue;
+        };
+        if seen.iter().any(|stored: &String| stored.eq_ignore_ascii_case(&title))
+            || existing.iter().any(|item| text_of(item, "testCaseTitle").is_some_and(|stored| stored.eq_ignore_ascii_case(&title)))
+        {
+            return Err("résultat existant");
+        }
+        seen.push(title);
+    }
+    let base = next_test_result_id(state, org);
+    let mut stored_rows = Vec::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        let mut item = row;
+        if let Some(object) = item.as_object_mut() {
+            object.insert("id".into(), json!(format!("rs-{}", base + index as i64)));
+            object.insert("testRun".into(), json!({"id": run_id}));
+        }
+        put_item(state, org, project, bucket, item.clone());
+        stored_rows.push(item);
+    }
+    record_point_outcomes(state, org, project, &stored_rows);
+    refresh_run_result_totals(state, org, project, run_id, bucket);
+    let dressed: Vec<Value> = stored_rows
+        .into_iter()
+        .map(|item| dress_test_result(org, project, run_id, run_name, item))
+        .collect();
+    if single {
+        Ok(Json(dressed.into_iter().next().unwrap_or(json!({}))).into_response())
+    } else {
+        Ok(Json(page(dressed)).into_response())
+    }
+}
+
+fn refresh_run_result_totals(state: &AppState, org: &str, project: &str, run_id: &str, bucket: &str) {
+    let rows = list(state, org, project, bucket);
+    let passed = rows.iter().filter(|item| text_of(item, "outcome").as_deref() == Some("Passed")).count();
+    if let Some(mut run) = get_item(state, org, project, "test/runs", run_id) {
+        run["totalTests"] = json!(rows.len());
+        run["passedTests"] = json!(passed);
+        run["state"] = json!("Completed");
+        put_item(state, org, project, "test/runs", run);
+    }
+}
+
+fn dress_test_result(org: &str, project: &str, run_id: &str, run_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("runName".into(), json!(run_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/test/runs/{run_id}/results/{id}")),
+        );
+    }
+    item
 }
 
 fn run_attachments(
