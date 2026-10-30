@@ -178,6 +178,7 @@
       <a href="/__ORG__/__PROJECT__/_resultactions">Actions de résultat</a>
       <a href="/__ORG__/__PROJECT__/_iterfiles">Pièces d'itération</a>
       <a href="/__ORG__/__PROJECT__/_iterparams">Paramètres d'itération</a>
+      <a href="/__ORG__/__PROJECT__/_actionfiles">Pièces d'action</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4597,6 +4598,74 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/parameterresults/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_actionfiles") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              for (const iteration of iterations.value || []) {
+                const actions = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults?api-version=7.1");
+                for (const action of actions.value || []) {
+                  const files = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults/" + encodeURIComponent(action.id) + "/attachments?api-version=7.1");
+                  rows = rows.concat(files.value || []);
+                }
+              }
+            }
+          }
+          const table = rows.length ? "<table id='action-files'><thead><tr><th></th><th>Nom</th><th>Action</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='action-file-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-iteration='" + esc(item.iterationId) + "' data-action='" + esc(item.actionId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.actionName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='action-file-empty' class='sub'>Aucune pièce d'action.</p>";
+          view.innerHTML = "<h1>Pièces d'action</h1><div class='command'><input id='action-file-name' placeholder='Pompe' /><button id='action-file-add' type='button'>Ajouter</button></div>" + table + "<p id='action-file-error' class='error' hidden></p>";
+          document.getElementById("action-file-add").onclick = async () => {
+            const error = document.getElementById("action-file-error");
+            error.hidden = true;
+            const name = document.getElementById("action-file-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              let iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              if (!(iterations.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1", { name: "Pompe" });
+                iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              }
+              const iteration = (iterations.value || [])[0];
+              let actions = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults?api-version=7.1");
+              if (!(actions.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults?api-version=7.1", { name: "Pompe" });
+                actions = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults?api-version=7.1");
+              }
+              const action = (actions.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/actionresults/" + encodeURIComponent(action.id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.action-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("action-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/actionresults/" + encodeURIComponent(button.dataset.action) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
