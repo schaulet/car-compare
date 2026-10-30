@@ -59,6 +59,7 @@ pub fn dispatch(
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("testresults", "codecoverage") => test_code_coverage(state, method, org, project, rest, query, body),
         ("testresults", "testfailuretype") => test_failure_types(state, method, org, project, rest, body),
+        ("testresults", "results") => test_result_metadata(state, method, org, project, rest, body),
         ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
         ("testresults", "runs") => {
             if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("tags")) {
@@ -8510,6 +8511,185 @@ fn dress_sub_result_attachment(
                 "/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/subresults/{sub_id}/attachments/{id}"
             )),
         );
+    }
+    item
+}
+
+const RESULT_METADATA: &str = "testresults/resultmetadata";
+
+fn test_result_metadata(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    if rest.get(2).is_none_or(|part| !part.eq_ignore_ascii_case("resultmetadata")) {
+        return fail(StatusCode::NOT_FOUND, "métadonnée introuvable");
+    }
+    let tail = if rest.len() > 3 { &rest[3..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "métadonnée introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, RESULT_METADATA);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_result_metadata(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let rows = match metadata_payload(body) {
+                Ok(rows) => rows,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let mut created = Vec::new();
+            for row in rows {
+                match metadata_create(state, org, project, row) {
+                    Ok(item) => created.push(item),
+                    Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+                }
+            }
+            return if created.len() == 1 {
+                Json(created.remove(0)).into_response()
+            } else {
+                Json(created).into_response()
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    let Some(found) = locate_result_metadata(state, org, project, key) else {
+        return fail(StatusCode::NOT_FOUND, "métadonnée introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_result_metadata(org, project, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, RESULT_METADATA, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "métadonnée introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+struct MetadataRow {
+    title: String,
+    branch: String,
+    flaky: bool,
+}
+
+fn metadata_payload(body: &[u8]) -> Result<Vec<MetadataRow>, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("métadonnée illisible");
+    };
+    if object.contains_key("flakyIdentifiers") || object.contains_key("branchName") {
+        let title = required_metadata_text(object.get("testCaseTitle").or_else(|| object.get("name")), "nom absent")?;
+        let Some(identifiers) = object.get("flakyIdentifiers").and_then(Value::as_array) else {
+            return Err("identifiant illisible");
+        };
+        if identifiers.is_empty() {
+            return Err("identifiant absent");
+        }
+        let mut rows = Vec::new();
+        for identifier in identifiers {
+            let Some(identifier) = identifier.as_object() else {
+                return Err("identifiant illisible");
+            };
+            let branch = required_metadata_text(identifier.get("branchName"), "branche absente")?;
+            let flaky = match identifier.get("isFlaky") {
+                None => true,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => return Err("flaky absent"),
+            };
+            if rows.iter().any(|row: &MetadataRow| row.title.eq_ignore_ascii_case(&title) && row.branch.eq_ignore_ascii_case(&branch)) {
+                return Err("métadonnée existante");
+            }
+            rows.push(MetadataRow { title: title.clone(), branch, flaky });
+        }
+        return Ok(rows);
+    }
+    let title = required_metadata_text(object.get("name").or_else(|| object.get("testCaseTitle")), "nom absent")?;
+    Ok(vec![MetadataRow { title, branch: "refs/heads/main".into(), flaky: true }])
+}
+
+fn required_metadata_text(value: Option<&Value>, missing: &'static str) -> Result<String, &'static str> {
+    let Some(value) = value else {
+        return Err(missing);
+    };
+    let Some(text) = value.as_str() else {
+        return Err(missing);
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(missing);
+    }
+    Ok(text.to_string())
+}
+
+fn metadata_create(state: &AppState, org: &str, project: &str, row: MetadataRow) -> Result<Value, &'static str> {
+    if list(state, org, project, RESULT_METADATA).iter().any(|item| {
+        text_of(item, "testCaseTitle").is_some_and(|stored| stored.eq_ignore_ascii_case(&row.title))
+            && text_of(item, "branchName").is_some_and(|stored| stored.eq_ignore_ascii_case(&row.branch))
+    }) {
+        return Err("métadonnée existante");
+    }
+    let number = next_metadata_id(state, org);
+    let item = json!({
+        "id": format!("md-{number}"),
+        "testCaseReferenceId": number,
+        "name": row.title,
+        "testCaseTitle": row.title,
+        "branchName": row.branch,
+        "isFlaky": row.flaky,
+        "priority": 0
+    });
+    put_item(state, org, project, RESULT_METADATA, item.clone());
+    Ok(dress_result_metadata(org, project, item))
+}
+
+fn next_metadata_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(RESULT_METADATA) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("md-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn locate_result_metadata(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    list(state, org, project, RESULT_METADATA).into_iter().find(|item| {
+        value_key(&item["id"]) == key
+            || value_key(&item["testCaseReferenceId"]) == key
+            || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn dress_result_metadata(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    let branch = text_of(&item, "branchName").unwrap_or_default();
+    let flaky = item.get("isFlaky").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("flakyIdentifiers".into(), json!([{ "branchName": branch, "isFlaky": flaky }]));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/testresults/results/resultmetadata/{id}")));
     }
     item
 }
