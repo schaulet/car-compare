@@ -3770,6 +3770,166 @@ fn dress_definition_revision(org: &str, project: &str, definition_id: &str, defi
     item
 }
 
+fn definition_metrics(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    definition_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "métrique introuvable")
+        };
+    }
+    let Some(definition) = get_item(state, org, project, "build/definitions", definition_id) else {
+        return fail(StatusCode::NOT_FOUND, "définition introuvable");
+    };
+    let stored_id = value_key(&definition["id"]);
+    let definition_name = text_of(&definition, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_id.clone());
+    let bucket = format!("build/definitions/{stored_id}/metrics");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_definition_metric(org, project, &stored_id, &definition_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match definition_metric_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match definition_metric_create(state, org, project, &stored_id, &definition_name, &bucket, &parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let wanted = pct_decode(&tail[0]);
+    let Some(found) = locate_definition_metric(state, org, project, &bucket, wanted.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "métrique introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_definition_metric(org, project, &stored_id, &definition_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_metric = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_metric) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "métrique introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn definition_metric_payload(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("métrique illisible");
+    };
+    match object.get("name") {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("nom absent");
+            }
+            Ok(text.to_string())
+        }
+        _ => Err("nom absent"),
+    }
+}
+
+fn locate_definition_metric(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_definition_metric_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if definition_metric_bucket(key) {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("dm-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn definition_metric_bucket(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("build")
+        && parts.next() == Some("definitions")
+        && parts.next().is_some()
+        && parts.next() == Some("metrics")
+        && parts.next().is_none()
+}
+
+fn definition_metric_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    definition_id: &str,
+    definition_name: &str,
+    bucket: &str,
+    name: &str,
+) -> Result<Value, &'static str> {
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(name)))
+    {
+        return Err("métrique existante");
+    }
+    let item = json!({
+        "id": format!("dm-{}", next_definition_metric_id(state, org)),
+        "name": name,
+        "definitionId": definition_id
+    });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_definition_metric(org, project, definition_id, definition_name, item))
+}
+
+fn dress_definition_metric(org: &str, project: &str, definition_id: &str, definition_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("definitionId".into(), json!(definition_id));
+        object.insert("definitionName".into(), json!(definition_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/build/definitions/{definition_id}/metrics/{id}")),
+        );
+    }
+    item
+}
+
 fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "build/definitions";
     if rest.len() == 2 && method == Method::GET {
@@ -3826,6 +3986,9 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
     }
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("revisions")) {
         return definition_revisions(state, method, org, project, &id, rest, body);
+    }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("metrics")) {
+        return definition_metrics(state, method, org, project, &id, rest, body);
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, &id) {
@@ -3896,6 +4059,7 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
                 stored.buckets.remove(&format!("build/definitions/{stored_id}/properties"));
                 stored.buckets.remove(&format!("build/definitions/{stored_id}/tags"));
                 stored.buckets.remove(&format!("build/definitions/{stored_id}/revisions"));
+                stored.buckets.remove(&format!("build/definitions/{stored_id}/metrics"));
             }
         });
         return StatusCode::NO_CONTENT.into_response();
