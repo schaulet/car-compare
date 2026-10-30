@@ -57,6 +57,7 @@ pub fn dispatch(
         ("testplan", "variables") => test_variables(state, method, org, project, rest, body),
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
+        ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
         ("release", "folders") => release_folders(state, method, org, project, rest, body),
@@ -8482,6 +8483,410 @@ fn dress_sub_result_attachment(
             json!(format!(
                 "/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/subresults/{sub_id}/attachments/{id}"
             )),
+        );
+    }
+    item
+}
+
+const TEST_METHOD_LINKS: &str = "testresults/testmethods/workitems";
+
+fn test_method_links(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    if rest.get(2).is_none_or(|part| !part.eq_ignore_ascii_case("workitems")) {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "lien introuvable")
+        };
+    }
+    let tail = if rest.len() > 3 { &rest[3..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "lien introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let value = alive_test_method_links(state, org, project)
+                .into_iter()
+                .map(|item| dress_test_method_link(org, project, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            if let Some(test_name) = query_text(query, "testName") {
+                return query_test_method_links(state, org, project, &test_name);
+            }
+            let draft = match test_method_link_payload(body) {
+                Ok(draft) => draft,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match test_method_link_create(state, org, project, draft) {
+                Ok(item) => Json(item).into_response(),
+                Err("élément introuvable") => fail(StatusCode::NOT_FOUND, "élément introuvable"),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        if method == Method::DELETE {
+            let Some(test_name) = query_text(query, "testName") else {
+                return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+            };
+            let Some(work_item_id) = query_text(query, "workItemId") else {
+                return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+            };
+            return delete_test_method_link_query(state, org, project, &test_name, &work_item_id);
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    if method == Method::GET {
+        return match locate_test_method_link(state, org, project, key) {
+            LinkHit::Alive(found) => Json(dress_test_method_link(org, project, found)).into_response(),
+            LinkHit::Orphan => fail(StatusCode::NOT_FOUND, "élément introuvable"),
+            LinkHit::Missing => fail(StatusCode::NOT_FOUND, "lien introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        return match locate_test_method_link(state, org, project, key) {
+            LinkHit::Alive(found) => {
+                let stored_id = value_key(&found["id"]);
+                if delete_item(state, org, project, TEST_METHOD_LINKS, &stored_id) {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    fail(StatusCode::NOT_FOUND, "lien introuvable")
+                }
+            }
+            LinkHit::Orphan => fail(StatusCode::NOT_FOUND, "élément introuvable"),
+            LinkHit::Missing => fail(StatusCode::NOT_FOUND, "lien introuvable"),
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+enum LinkHit {
+    Alive(Value),
+    Orphan,
+    Missing,
+}
+
+fn query_text(query: &str, key: &str) -> Option<String> {
+    query_param(query, key)
+        .map(pct_decode)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn locate_test_method_link(state: &AppState, org: &str, project: &str, key: &str) -> LinkHit {
+    let Some(found) = list(state, org, project, TEST_METHOD_LINKS).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    }) else {
+        return LinkHit::Missing;
+    };
+    let work_item_id = text_of(&found, "workItemId").and_then(|value| value.parse::<i64>().ok());
+    match work_item_id {
+        Some(id) if work_item_alive(state, org, project, id) => LinkHit::Alive(found),
+        Some(_) => LinkHit::Orphan,
+        None => LinkHit::Missing,
+    }
+}
+
+fn alive_test_method_links(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    let mut rows = list(state, org, project, TEST_METHOD_LINKS);
+    rows.retain(|item| {
+        text_of(item, "workItemId")
+            .and_then(|value| value.parse::<i64>().ok())
+            .is_some_and(|id| work_item_alive(state, org, project, id))
+    });
+    rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+    rows
+}
+
+fn work_item_alive(state: &AppState, org: &str, project: &str, id: i64) -> bool {
+    state.read(|db| {
+        db.project(org, project)
+            .is_some_and(|stored| stored.work_items.contains_key(&id))
+    })
+}
+
+fn work_item_record(state: &AppState, org: &str, project: &str, id: i64) -> Option<Value> {
+    state.read(|db| {
+        db.project(org, project)
+            .and_then(|stored| stored.work_items.get(&id).cloned())
+    })
+}
+
+fn query_test_method_links(state: &AppState, org: &str, project: &str, test_name: &str) -> Response {
+    let matches: Vec<Value> = alive_test_method_links(state, org, project)
+        .into_iter()
+        .filter(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(test_name)))
+        .collect();
+    if matches.is_empty() {
+        return match locate_test_method_link(state, org, project, test_name) {
+            LinkHit::Orphan => fail(StatusCode::NOT_FOUND, "élément introuvable"),
+            _ => fail(StatusCode::NOT_FOUND, "lien introuvable"),
+        };
+    }
+    let container = text_of(&matches[0], "container").unwrap_or_default();
+    let work_items: Vec<Value> = matches
+        .iter()
+        .map(|item| dress_test_method_link(org, project, item.clone())["workItem"].clone())
+        .collect();
+    Json(json!({
+        "test": { "container": container, "name": text_of(&matches[0], "name").unwrap_or_else(|| test_name.to_string()) },
+        "workItems": work_items
+    }))
+    .into_response()
+}
+
+fn delete_test_method_link_query(state: &AppState, org: &str, project: &str, test_name: &str, work_item_id: &str) -> Response {
+    let Some(found) = list(state, org, project, TEST_METHOD_LINKS).into_iter().find(|item| {
+        text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(test_name))
+            && text_of(item, "workItemId").is_some_and(|stored| same_work_item(&stored, work_item_id))
+    }) else {
+        return fail(StatusCode::NOT_FOUND, "lien introuvable");
+    };
+    let Some(id) = text_of(&found, "workItemId").and_then(|value| value.parse::<i64>().ok()) else {
+        return fail(StatusCode::NOT_FOUND, "lien introuvable");
+    };
+    if !work_item_alive(state, org, project, id) {
+        return fail(StatusCode::NOT_FOUND, "élément introuvable");
+    }
+    let stored_id = value_key(&found["id"]);
+    if delete_item(state, org, project, TEST_METHOD_LINKS, &stored_id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        fail(StatusCode::NOT_FOUND, "lien introuvable")
+    }
+}
+
+fn same_work_item(stored: &str, query: &str) -> bool {
+    if stored == query {
+        return true;
+    }
+    matches!((stored.parse::<i64>(), query.parse::<i64>()), (Ok(left), Ok(right)) if left == right)
+}
+
+struct TestMethodLinkDraft {
+    name: String,
+    container: String,
+    executed_in: String,
+    work_item_id: Option<i64>,
+    work_item_name: Option<String>,
+    work_item_type: Option<String>,
+}
+
+fn test_method_link_payload(body: &[u8]) -> Result<TestMethodLinkDraft, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("lien illisible");
+    };
+    let (name, container) = match object.get("tests") {
+        None => (link_text(object.get("name"), "nom absent")?, String::new()),
+        Some(Value::Array(rows)) => {
+            if rows.is_empty() {
+                (link_text(object.get("name"), "nom absent")?, String::new())
+            } else {
+                let Some(test) = rows[0].as_object() else {
+                    return Err("nom absent");
+                };
+                let name = link_text(test.get("name"), "nom absent")?;
+                let container = match test.get("container") {
+                    None => String::new(),
+                    Some(Value::String(value)) => value.trim().to_string(),
+                    Some(_) => return Err("conteneur absent"),
+                };
+                (name, container)
+            }
+        }
+        Some(_) => return Err("lien illisible"),
+    };
+    let executed_in = match object.get("executedIn") {
+        None => "tcm".to_string(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("contexte absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("contexte absent"),
+    };
+    let (work_item_id, work_item_name, work_item_type) = match object.get("workItem") {
+        None => (None, None, None),
+        Some(Value::Object(work_item)) => {
+            let work_item_id = match work_item.get("id") {
+                None => None,
+                Some(value) => Some(positive_id(value)?),
+            };
+            let work_item_name = match work_item.get("name") {
+                None => None,
+                Some(value) => Some(link_text(Some(value), "élément absent")?),
+            };
+            let work_item_type = match work_item.get("type") {
+                None => None,
+                Some(Value::String(value)) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err("type absent");
+                    }
+                    Some(value.to_string())
+                }
+                Some(_) => return Err("type absent"),
+            };
+            (work_item_id, work_item_name, work_item_type)
+        }
+        Some(_) => return Err("élément absent"),
+    };
+    Ok(TestMethodLinkDraft {
+        name,
+        container,
+        executed_in,
+        work_item_id,
+        work_item_name,
+        work_item_type,
+    })
+}
+
+fn link_text(value: Option<&Value>, message: &'static str) -> Result<String, &'static str> {
+    match value {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                Err(message)
+            } else {
+                Ok(text.to_string())
+            }
+        }
+        _ => Err(message),
+    }
+}
+
+fn positive_id(value: &Value) -> Result<i64, &'static str> {
+    let id = match value {
+        Value::Number(_) => json_i64(value),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    };
+    id.filter(|id| *id > 0).ok_or("élément absent")
+}
+
+fn test_method_link_create(state: &AppState, org: &str, project: &str, draft: TestMethodLinkDraft) -> Result<Value, &'static str> {
+    if alive_test_method_links(state, org, project)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&draft.name)))
+    {
+        return Err("lien existant");
+    }
+    let (work_item_id, work_item_name, work_item_type) = match draft.work_item_id {
+        Some(id) => {
+            let Some(item) = work_item_record(state, org, project, id) else {
+                return Err("élément introuvable");
+            };
+            let fields = item.get("fields");
+            let name = draft.work_item_name.unwrap_or_else(|| {
+                fields
+                    .and_then(|fields| text_of(fields, "System.Title"))
+                    .unwrap_or_else(|| draft.name.clone())
+            });
+            let kind = draft.work_item_type.unwrap_or_else(|| {
+                fields
+                    .and_then(|fields| text_of(fields, "System.WorkItemType"))
+                    .unwrap_or_else(|| "Bug".into())
+            });
+            (id, name, kind)
+        }
+        None => {
+            let name = draft.work_item_name.unwrap_or_else(|| draft.name.clone());
+            let kind = draft.work_item_type.unwrap_or_else(|| "Bug".into());
+            let created = state.write(|db| {
+                db.ensure_project(org, project);
+                let stored = db.project_mut(org, project)?;
+                let mut fields = Map::new();
+                fields.insert("System.Title".into(), json!(name.clone()));
+                Some(stored.create_work_item(project, &kind, fields))
+            });
+            let Some(item) = created else {
+                return Err("élément introuvable");
+            };
+            deliver_work_item(state, org, project, "workitem.created", &item);
+            let id = item.get("id").and_then(json_i64).ok_or("élément introuvable")?;
+            (id, name, kind)
+        }
+    };
+    let id = format!("tw-{}", next_test_method_link_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": draft.name,
+        "container": draft.container,
+        "executedIn": draft.executed_in,
+        "workItemId": work_item_id.to_string(),
+        "workItemName": work_item_name,
+        "workItemType": work_item_type
+    });
+    put_item(state, org, project, TEST_METHOD_LINKS, item.clone());
+    Ok(dress_test_method_link(org, project, item))
+}
+
+fn next_test_method_link_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(TEST_METHOD_LINKS) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("tw-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn dress_test_method_link(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    let name = text_of(&item, "name").unwrap_or_default();
+    let container = text_of(&item, "container").unwrap_or_default();
+    let work_item_id = text_of(&item, "workItemId").unwrap_or_default();
+    let work_item_name = text_of(&item, "workItemName").unwrap_or_else(|| name.clone());
+    let work_item_type = text_of(&item, "workItemType").unwrap_or_else(|| "Bug".into());
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("testName".into(), json!(name));
+        object.insert(
+            "tests".into(),
+            json!([{ "container": container, "name": name }]),
+        );
+        object.insert(
+            "workItem".into(),
+            json!({
+                "id": work_item_id,
+                "name": work_item_name,
+                "type": work_item_type,
+                "url": format!("/{org}/{project}/_apis/wit/workitems/{work_item_id}"),
+                "webUrl": format!("/{org}/{project}/_workitems?id={work_item_id}")
+            }),
+        );
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testresults/testmethods/workitems/{id}")),
         );
     }
     item
