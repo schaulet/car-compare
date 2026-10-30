@@ -388,6 +388,9 @@ impl AppState {
         if resource.as_deref() == Some("attachments") {
             return self.attachments(method, org, project, rest, query, body);
         }
+        if resource.as_deref() == Some("templates") {
+            return crate::tracking::work_item_templates(self, method, org, project, rest, body);
+        }
         if resource.as_deref() == Some("queries") {
             return self.queries(method, org, project, rest, query, body);
         }

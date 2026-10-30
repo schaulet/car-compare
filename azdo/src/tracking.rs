@@ -1791,6 +1791,7 @@ const WORK_ITEM_PAGES: &str = "work/processes/pages";
 const WORK_ITEM_GROUPS: &str = "work/processes/groups";
 const WORK_ITEM_CONTROLS: &str = "work/processes/controls";
 const TYPE_BEHAVIORS: &str = "work/processes/witbehaviors";
+const WORK_ITEM_TEMPLATES: &str = "wit/templates";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -2222,6 +2223,7 @@ fn work_item_types(
         };
         let stored_id = item_id(&found);
         let reference = item_text(&found, "referenceName").unwrap_or_default();
+        let type_name = item_text(&found, "name").unwrap_or_default();
         let removed = state.write(|db| -> bool {
             let Some(stored) = db.project_mut(org, &owner) else {
                 return false;
@@ -2233,6 +2235,7 @@ fn work_item_types(
             drop_work_item_groups(stored, &process_id, Some(reference.as_str()), None);
             drop_work_item_controls(stored, &process_id, Some(reference.as_str()), None);
             drop_type_behaviors(stored, &process_id, Some(reference.as_str()), None);
+            drop_work_item_templates(stored, Some(reference.as_str()), Some(type_name.as_str()));
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -5147,6 +5150,225 @@ fn drop_work_item_states(stored: &mut crate::store::ProjectData, process_id: &st
         .filter(|(_, item)| {
             item_text(item, "processId").is_some_and(|process| process == process_id)
                 && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
+}
+
+pub fn work_item_templates(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() >= 2 { &rest[2..] } else { rest };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "modèle introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list_templates(state, org, project);
+            rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+            let value = rows.into_iter().map(|item| dress_template(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match template_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match template_create(state, org, project, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    if method == Method::GET {
+        return match locate_template(state, org, project, key.trim()) {
+            Some(found) => Json(dress_template(org, project, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "modèle introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_template(state, org, project, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "modèle introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, project)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_TEMPLATES))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "modèle introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn list_templates(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(WORK_ITEM_TEMPLATES)).unwrap_or_default())
+}
+
+fn locate_template(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    list_templates(state, org, project)
+        .into_iter()
+        .find(|item| item_id(item) == key || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_template_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_TEMPLATES) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("template-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn template_create(state: &AppState, org: &str, project: &str, parsed: (String, String, String, String, Value)) -> Result<Value, &'static str> {
+    let (name, description, type_name, type_reference, fields) = parsed;
+    let (type_name, type_reference) = resolve_template_type(state, org, project, &type_name).or_else(|_| {
+        if type_reference.is_empty() {
+            Err("type inconnu")
+        } else {
+            resolve_template_type(state, org, project, &type_reference)
+        }
+    })?;
+    let id = format!("template-{}", next_template_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "description": description,
+        "workItemTypeName": type_name,
+        "workItemTypeReference": type_reference,
+        "fields": fields
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("modèle introuvable");
+        };
+        if stored.list_bucket(WORK_ITEM_TEMPLATES).iter().any(|stored| item_text(stored, "name").is_some_and(|current| current.eq_ignore_ascii_case(&name))) {
+            return Err("modèle existant");
+        }
+        stored.put_bucket(WORK_ITEM_TEMPLATES, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_template(org, project, item))
+}
+
+fn template_payload(body: &[u8]) -> Result<(String, String, String, String, Value), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("modèle illisible");
+    };
+    let name = match object.get("name") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => return Err("nom absent"),
+    };
+    let description = match object.get("description") {
+        None => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => return Err("description absente"),
+    };
+    let type_name = match object.get("workItemTypeName") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("type absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("type absent"),
+        None => return Err("type absent"),
+    };
+    let fields = template_fields(object.get("fields"))?;
+    Ok((name, description, type_name, String::new(), fields))
+}
+
+fn template_fields(value: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(value) = value else {
+        return Ok(json!({}));
+    };
+    let Some(object) = value.as_object() else {
+        return Err("champ absent");
+    };
+    let mut fields = serde_json::Map::new();
+    for (key, item) in object {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("champ absent");
+        }
+        let Some(text) = item.as_str() else {
+            return Err("champ absent");
+        };
+        fields.insert(key.to_string(), json!(text));
+    }
+    Ok(Value::Object(fields))
+}
+
+fn resolve_template_type(state: &AppState, org: &str, project: &str, key: &str) -> Result<(String, String), &'static str> {
+    for parent in [AGILE, SCRUM, CMMI, BASIC] {
+        if let Some(item) = system_work_item_types(parent).iter().find(|item| item.name.eq_ignore_ascii_case(key) || item.reference.eq_ignore_ascii_case(key)) {
+            return Ok((item.name.to_string(), item.reference.to_string()));
+        }
+    }
+    let custom = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(WORK_ITEM_TYPES)).unwrap_or_default());
+    if let Some(item) = custom.into_iter().find(|item| {
+        item_text(item, "name").is_some_and(|name| name.eq_ignore_ascii_case(key))
+            || item_text(item, "referenceName").is_some_and(|name| name.eq_ignore_ascii_case(key))
+    }) {
+        return Ok((item_text(&item, "name").unwrap_or_default(), item_text(&item, "referenceName").unwrap_or_default()));
+    }
+    Err("type inconnu")
+}
+
+fn dress_template(org: &str, project: &str, mut item: Value) -> Value {
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/wit/templates/{id}")));
+    }
+    item
+}
+
+fn drop_work_item_templates(stored: &mut crate::store::ProjectData, reference: Option<&str>, name: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TEMPLATES) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            reference.is_some_and(|reference| item_text(item, "workItemTypeReference").is_some_and(|stored| stored == reference))
+                || name.is_some_and(|name| item_text(item, "workItemTypeName").is_some_and(|stored| stored == name))
         })
         .map(|(key, _)| key.clone())
         .collect();

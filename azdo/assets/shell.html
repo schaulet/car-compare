@@ -167,6 +167,7 @@
       <a href="/__ORG__/__PROJECT__/_layoutgroups">Groupes de page</a>
       <a href="/__ORG__/__PROJECT__/_layoutcontrols">Contrôles</a>
       <a href="/__ORG__/__PROJECT__/_witbehaviors">Comportements du type</a>
+      <a href="/__ORG__/__PROJECT__/_templates">Modèles</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4072,6 +4073,38 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.type) + "/behaviors/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_templates") {
+          const page = await api("GET", root + "/wit/templates?api-version=7.1");
+          const rows = (page.value || []).filter((item) => item.id && String(item.id).startsWith("template-"));
+          const table = rows.length ? "<table id='templates'><thead><tr><th></th><th>Nom</th><th>Type</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='template-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.workItemTypeName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='template-empty' class='sub'>Aucun modèle.</p>";
+          view.innerHTML = "<h1>Modèles</h1><div class='command'><input id='template-name' placeholder='Pompe' /><button id='template-add' type='button'>Ajouter</button></div>" + table + "<p id='template-error' class='error' hidden></p>";
+          document.getElementById("template-add").onclick = async () => {
+            const error = document.getElementById("template-error");
+            error.hidden = true;
+            const name = document.getElementById("template-name").value;
+            try {
+              await api("POST", root + "/wit/templates?api-version=7.1", { name: name, workItemTypeName: "Bug" });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.template-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("template-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/wit/templates/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
