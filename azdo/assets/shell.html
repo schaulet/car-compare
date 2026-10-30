@@ -189,6 +189,7 @@
       <a href="/__ORG__/__PROJECT__/_coverage">Couverture</a>
       <a href="/__ORG__/__PROJECT__/_failures">Échecs</a>
       <a href="/__ORG__/__PROJECT__/_metadata">Métadonnées</a>
+      <a href="/__ORG__/__PROJECT__/_testfields">Champs de test</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5118,6 +5119,47 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/testresults/results/resultmetadata/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_testfields") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const page = await api("GET", root + "/testresults/runs/" + encodeURIComponent(run.id) + "/customfields?api-version=7.1");
+            rows = rows.concat(page.value || []);
+          }
+          const table = rows.length ? "<table id='testfields'><thead><tr><th></th><th>Nom</th><th>Valeur</th><th>Exécution</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='testfield-remove' data-id='" + esc(item.id) + "' data-run='" + esc(item.runId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.value) + "</td><td>" + esc(item.runName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='testfield-empty' class='sub'>Aucun champ de test.</p>";
+          view.innerHTML = "<h1>Champs de test</h1><div class='command'><input id='testfield-name' placeholder='Pompe' /><button id='testfield-add' type='button'>Ajouter</button></div>" + table + "<p id='testfield-error' class='error' hidden></p>";
+          document.getElementById("testfield-add").onclick = async () => {
+            const error = document.getElementById("testfield-error");
+            error.hidden = true;
+            const name = document.getElementById("testfield-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Ligne" });
+                current = await collection("test/runs");
+              }
+              await api("POST", root + "/testresults/runs/" + encodeURIComponent(current[0].id) + "/customfields?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.testfield-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("testfield-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/testresults/runs/" + encodeURIComponent(button.dataset.run) + "/customfields/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
