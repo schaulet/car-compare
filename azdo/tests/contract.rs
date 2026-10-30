@@ -34622,3 +34622,179 @@ async fn removing_one_test_run_tag_keeps_the_sibling_the_log_store_file_and_the_
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["fileName"], "Journal");
 }
+
+#[tokio::test]
+async fn removing_one_code_coverage_keeps_the_sibling_the_test_tag_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn create_build(app: &axum::Router, auth: &str, project: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/build/builds?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(r#"{"definition":{"id":1}}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        match &created["id"] {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Number(value) => value.to_string(),
+            _ => panic!("{created}"),
+        }
+    }
+
+    async fn create_run(app: &axum::Router, auth: &str, project: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/test/runs?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(r#"{"name":"Ligne"}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        match &created["id"] {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Number(value) => value.to_string(),
+            _ => panic!("{created}"),
+        }
+    }
+
+    async fn create_tag(app: &axum::Router, auth: &str, project: &str, run: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/testresults/runs/{run}/tags?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(r#"{"name":"Journal"}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        serde_json::from_str(&response).unwrap()
+    }
+
+    async fn create_coverage(app: &axum::Router, auth: &str, project: &str, build: &str, body: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/testresults/codecoverage?buildId={build}&api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("cv-"), "{created}");
+        assert_eq!(created["buildId"], build);
+        assert_eq!(created["project"], project);
+        created
+    }
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ligne = create_run(&app, &auth, "AzurzDemo").await;
+    let journal = create_tag(&app, &auth, "AzurzDemo", &ligne).await;
+    assert!(journal["id"].as_str().unwrap().starts_with("tg-"), "{journal}");
+    let build = create_build(&app, &auth, "AzurzDemo").await;
+    let coverage = format!("/azurz/AzurzDemo/_apis/testresults/codecoverage?buildId={build}&api-version=7.1");
+    let list = "/azurz/AzurzDemo/_apis/testresults/codecoverage?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", &list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let before_count = before["count"].as_i64().unwrap_or(0);
+    let (status, body, _) = call(&app, "DELETE", &list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "PUT", &list, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("couverture illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"buildFlavor":" ","buildPlatform":"AnyCPU","coverageStats":[{"label":"Pompe"}]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("variante absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"buildFlavor":"Debug","coverageStats":[{"label":"Pompe"}]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("plateforme absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"buildFlavor":"Debug","buildPlatform":"AnyCPU","coverageStats":"x"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statistique illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"buildFlavor":"Debug","buildPlatform":"AnyCPU","coverageStats":[]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("statistique absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"buildFlavor":"Debug","buildPlatform":"AnyCPU","coverageStats":[{"label":"Pompe","covered":"a"}]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("couvert absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", "/azurz/AzurzDemo/_apis/testresults/codecoverage?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("build absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", "/azurz/AzurzDemo/_apis/testresults/codecoverage?buildId=absent&api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+
+    let pompe = create_coverage(&app, &auth, "AzurzDemo", &build, r#"{"name":"Pompe"}"#).await;
+    assert_eq!(pompe["name"], "Pompe");
+    assert_eq!(pompe["label"], "Pompe");
+    assert_eq!(pompe["buildFlavor"], "Debug");
+    assert_eq!(pompe["buildPlatform"], "AnyCPU");
+    assert_eq!(pompe["covered"], 1);
+    assert_eq!(pompe["total"], 1);
+    let relais = create_coverage(&app, &auth, "AzurzDemo", &build, r#"{"buildFlavor":"Release","buildPlatform":"x64","coverageStats":[{"label":"Relais","covered":8,"total":10}]}"#).await;
+    assert_eq!(relais["buildFlavor"], "Release");
+    assert_eq!(relais["buildPlatform"], "x64");
+    assert_eq!(relais["covered"], 8);
+    assert_eq!(relais["total"], 10);
+    let (status, body, _) = call(&app, "POST", &coverage, Some(&auth), None, "application/json", Some(r#"{"name":"pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("couverture existante"), "{body}");
+    let atelier_build = create_build(&app, &auth, "Atelier").await;
+    let atelier = create_coverage(&app, &auth, "Atelier", &atelier_build, r#"{"name":"Pompe"}"#).await;
+    let (status, body, _) = call(&app, "DELETE", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}?api-version=7.1", atelier["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("couverture introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &coverage, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(summary["build"]["id"], build);
+    assert_eq!(summary["coverageData"].as_array().unwrap().len(), 2, "{body}");
+    let (status, body, _) = call(&app, "GET", &list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"].as_i64().unwrap(), before_count + 2, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/Relais?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"], relais["id"]);
+    let (status, body, _) = call(&app, "PUT", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}?api-version=7.1", pompe["id"].as_str().unwrap()), Some(&auth), None, "application/json", Some(r#"{"name":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "DELETE", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("couverture introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}?api-version=7.1", pompe["id"].as_str().unwrap());
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &list, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let kept_rows: Vec<_> = kept["value"].as_array().unwrap().iter().filter(|item| item["buildId"] == build).collect();
+    assert_eq!(kept_rows.len(), 1, "{body}");
+    assert_eq!(kept_rows[0]["name"], "Relais");
+    assert_eq!(kept_rows[0]["covered"], 8);
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/runs/{ligne}/tags/{}?api-version=7.1", journal["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Journal");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/Atelier/_apis/testresults/codecoverage/{}?api-version=7.1", atelier["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["name"], "Pompe");
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("couverture introuvable"), "{body}");
+
+    let abandon = create_build(&app, &auth, "AzurzDemo").await;
+    let abandoned = create_coverage(&app, &auth, "AzurzDemo", &abandon, r#"{"name":"Abandon"}"#).await;
+    let (status, body, _) = call(&app, "DELETE", &format!("/azurz/AzurzDemo/_apis/build/builds/{abandon}?api-version=7.1"), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}?api-version=7.1", abandoned["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("build introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/codecoverage/{}?api-version=7.1", relais["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Relais");
+    let (status, body, _) = call(&app, "GET", &format!("/azurz/AzurzDemo/_apis/testresults/runs/{ligne}/tags/{}?api-version=7.1", journal["id"].as_str().unwrap()), Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Journal");
+}

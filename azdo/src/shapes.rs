@@ -57,6 +57,7 @@ pub fn dispatch(
         ("testplan", "variables") => test_variables(state, method, org, project, rest, body),
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
+        ("testresults", "codecoverage") => test_code_coverage(state, method, org, project, rest, query, body),
         ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
         ("testresults", "runs") => {
             if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("tags")) {
@@ -4177,6 +4178,20 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
             Some(item) => Json(promote_build(state, org, project, item)).into_response(),
             None => fail(StatusCode::NOT_FOUND, "build introuvable"),
         };
+    }
+    if method == Method::DELETE && rest.len() == 3 {
+        let Some(found) = get_item(state, org, project, key, id) else {
+            return fail(StatusCode::NOT_FOUND, "build introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        state.write(|db| {
+            if let Some(stored) = db.project_mut(org, project) {
+                if let Some(bucket) = stored.buckets.get_mut(key) {
+                    bucket.remove(&stored_id);
+                }
+            }
+        });
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method == Method::PATCH || method == Method::PUT {
         let payload = parse_json(body).unwrap_or(json!({}));
@@ -8496,6 +8511,276 @@ fn dress_sub_result_attachment(
         );
     }
     item
+}
+
+const CODE_COVERAGE: &str = "testresults/codecoverage";
+
+fn test_code_coverage(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 2 { &rest[2..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "couverture introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            if let Some(build_id) = query_text(query, "buildId") {
+                let Some(build) = get_item(state, org, project, "build/builds", build_id.trim()) else {
+                    return fail(StatusCode::NOT_FOUND, "build introuvable");
+                };
+                let stored_build = value_key(&build["id"]);
+                let build_name = text_of(&build, "buildNumber")
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| text_of(&build, "name"))
+                    .unwrap_or_else(|| stored_build.clone());
+                return Json(coverage_summary(state, org, project, &stored_build, &build_name)).into_response();
+            }
+            let mut rows = alive_coverage(state, org, project);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_coverage(state, org, project, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let Some(build_id) = query_text(query, "buildId") else {
+                return fail(StatusCode::BAD_REQUEST, "build absent");
+            };
+            let Some(build) = get_item(state, org, project, "build/builds", build_id.trim()) else {
+                return fail(StatusCode::NOT_FOUND, "build introuvable");
+            };
+            let stored_build = value_key(&build["id"]);
+            let parsed = match coverage_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            let mut created = Vec::new();
+            for row in parsed {
+                match coverage_create(state, org, project, &stored_build, row) {
+                    Ok(item) => created.push(item),
+                    Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+                }
+            }
+            return if created.len() == 1 {
+                Json(created.remove(0)).into_response()
+            } else {
+                Json(created).into_response()
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    let Some(found) = locate_coverage(state, org, project, key) else {
+        return fail(StatusCode::NOT_FOUND, "couverture introuvable");
+    };
+    let build_id = value_key(&found["buildId"]);
+    if get_item(state, org, project, "build/builds", &build_id).is_none() {
+        return fail(StatusCode::NOT_FOUND, "build introuvable");
+    }
+    if method == Method::GET {
+        return Json(dress_coverage(state, org, project, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, CODE_COVERAGE, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "couverture introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+struct CoverageRow {
+    flavor: String,
+    platform: String,
+    label: String,
+    covered: i64,
+    total: i64,
+}
+
+fn coverage_payload(body: &[u8]) -> Result<Vec<CoverageRow>, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("couverture illisible");
+    };
+    if object.contains_key("coverageStats") || object.contains_key("buildFlavor") || object.contains_key("buildPlatform") {
+        let flavor = required_coverage_text(object.get("buildFlavor"), "variante absente")?;
+        let platform = required_coverage_text(object.get("buildPlatform"), "plateforme absente")?;
+        let Some(stats) = object.get("coverageStats").and_then(Value::as_array) else {
+            return Err("statistique illisible");
+        };
+        if stats.is_empty() {
+            return Err("statistique absente");
+        }
+        let mut rows = Vec::new();
+        for stat in stats {
+            let Some(stat) = stat.as_object() else {
+                return Err("statistique illisible");
+            };
+            let label = required_coverage_text(stat.get("label"), "nom absent")?;
+            let covered = coverage_number(stat.get("covered"), "couvert absent")?;
+            let total = coverage_number(stat.get("total"), "total absent")?;
+            if rows.iter().any(|row: &CoverageRow| {
+                row.flavor.eq_ignore_ascii_case(&flavor)
+                    && row.platform.eq_ignore_ascii_case(&platform)
+                    && row.label.eq_ignore_ascii_case(&label)
+            }) {
+                return Err("couverture existante");
+            }
+            rows.push(CoverageRow { flavor: flavor.clone(), platform: platform.clone(), label, covered, total });
+        }
+        return Ok(rows);
+    }
+    let label = required_coverage_text(object.get("name").or_else(|| object.get("label")), "nom absent")?;
+    Ok(vec![CoverageRow {
+        flavor: "Debug".into(),
+        platform: "AnyCPU".into(),
+        label,
+        covered: 1,
+        total: 1,
+    }])
+}
+
+fn required_coverage_text(value: Option<&Value>, missing: &'static str) -> Result<String, &'static str> {
+    let Some(value) = value else {
+        return Err(missing);
+    };
+    let Some(text) = value.as_str() else {
+        return Err(missing);
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(missing);
+    }
+    Ok(text.to_string())
+}
+
+fn coverage_number(value: Option<&Value>, missing: &'static str) -> Result<i64, &'static str> {
+    match value {
+        None => Ok(0),
+        Some(Value::Number(number)) => number.as_i64().ok_or(missing),
+        Some(_) => Err(missing),
+    }
+}
+
+fn coverage_create(state: &AppState, org: &str, project: &str, build_id: &str, row: CoverageRow) -> Result<Value, &'static str> {
+    if alive_coverage(state, org, project).iter().any(|item| {
+        value_key(&item["buildId"]) == build_id
+            && text_of(item, "buildFlavor").is_some_and(|stored| stored.eq_ignore_ascii_case(&row.flavor))
+            && text_of(item, "buildPlatform").is_some_and(|stored| stored.eq_ignore_ascii_case(&row.platform))
+            && text_of(item, "label").is_some_and(|stored| stored.eq_ignore_ascii_case(&row.label))
+    }) {
+        return Err("couverture existante");
+    }
+    let id = format!("cv-{}", next_coverage_id(state, org));
+    let item = json!({
+        "id": id,
+        "buildId": build_id,
+        "buildFlavor": row.flavor,
+        "buildPlatform": row.platform,
+        "label": row.label.clone(),
+        "name": row.label,
+        "covered": row.covered,
+        "total": row.total
+    });
+    put_item(state, org, project, CODE_COVERAGE, item.clone());
+    Ok(dress_coverage(state, org, project, item))
+}
+
+fn next_coverage_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(CODE_COVERAGE) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("cv-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn alive_coverage(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+    list(state, org, project, CODE_COVERAGE)
+        .into_iter()
+        .filter(|item| get_item(state, org, project, "build/builds", &value_key(&item["buildId"])).is_some())
+        .collect()
+}
+
+fn locate_coverage(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    list(state, org, project, CODE_COVERAGE).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn dress_coverage(state: &AppState, org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    let build_id = value_key(&item["buildId"]);
+    let build_name = get_item(state, org, project, "build/builds", &build_id)
+        .and_then(|build| text_of(&build, "buildNumber").filter(|value| !value.trim().is_empty()).or_else(|| text_of(&build, "name")))
+        .unwrap_or_else(|| build_id.clone());
+    if let Some(object) = item.as_object_mut() {
+        object.insert("buildId".into(), json!(build_id));
+        object.insert("buildName".into(), json!(build_name));
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/testresults/codecoverage/{id}")));
+    }
+    item
+}
+
+fn coverage_summary(state: &AppState, org: &str, project: &str, build_id: &str, build_name: &str) -> Value {
+    let mut groups: Vec<(String, String, Vec<Value>)> = Vec::new();
+    for item in alive_coverage(state, org, project) {
+        if value_key(&item["buildId"]) != build_id {
+            continue;
+        }
+        let flavor = text_of(&item, "buildFlavor").unwrap_or_default();
+        let platform = text_of(&item, "buildPlatform").unwrap_or_default();
+        let stat = json!({
+            "label": text_of(&item, "label").unwrap_or_default(),
+            "covered": item.get("covered").and_then(Value::as_i64).unwrap_or(0),
+            "total": item.get("total").and_then(Value::as_i64).unwrap_or(0),
+            "position": 0
+        });
+        if let Some(group) = groups.iter_mut().find(|group| group.0.eq_ignore_ascii_case(&flavor) && group.1.eq_ignore_ascii_case(&platform)) {
+            group.2.push(stat);
+        } else {
+            groups.push((flavor, platform, vec![stat]));
+        }
+    }
+    let coverage_data: Vec<Value> = groups
+        .into_iter()
+        .map(|(flavor, platform, stats)| json!({ "buildFlavor": flavor, "buildPlatform": platform, "coverageStats": stats }))
+        .collect();
+    json!({
+        "build": { "id": build_id, "name": build_name },
+        "coverageData": coverage_data,
+        "status": "completed",
+        "project": project
+    })
 }
 
 fn test_run_tags(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {

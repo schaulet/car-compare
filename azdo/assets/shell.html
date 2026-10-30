@@ -186,6 +186,7 @@
       <a href="/__ORG__/__PROJECT__/_methodlinks">Liens de méthode</a>
       <a href="/__ORG__/__PROJECT__/_logstore">Magasin de journaux</a>
       <a href="/__ORG__/__PROJECT__/_runtags">Étiquettes de test</a>
+      <a href="/__ORG__/__PROJECT__/_coverage">Couverture</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5014,6 +5015,43 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/testresults/runs/" + encodeURIComponent(button.dataset.run) + "/tags/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_coverage") {
+          const page = await api("GET", root + "/testresults/codecoverage?api-version=7.1");
+          const rows = page.value || [];
+          const table = rows.length ? "<table id='coverage'><thead><tr><th></th><th>Nom</th><th>Build</th><th>Plateforme</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='coverage-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.buildName) + "</td><td>" + esc(item.buildPlatform) + "</td></tr>").join("") + "</tbody></table>" : "<p id='coverage-empty' class='sub'>Aucune couverture.</p>";
+          view.innerHTML = "<h1>Couverture</h1><div class='command'><input id='coverage-name' placeholder='Pompe' /><button id='coverage-add' type='button'>Ajouter</button></div>" + table + "<p id='coverage-error' class='error' hidden></p>";
+          document.getElementById("coverage-add").onclick = async () => {
+            const error = document.getElementById("coverage-error");
+            error.hidden = true;
+            const name = document.getElementById("coverage-name").value;
+            try {
+              let builds = await collection("build/builds");
+              if (!builds.length) {
+                await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 } });
+                builds = await collection("build/builds");
+              }
+              await api("POST", root + "/testresults/codecoverage?buildId=" + encodeURIComponent(builds[0].id) + "&api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.coverage-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("coverage-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/testresults/codecoverage/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
