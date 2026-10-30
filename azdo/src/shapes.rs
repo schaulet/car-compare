@@ -58,6 +58,7 @@ pub fn dispatch(
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("testresults", "codecoverage") => test_code_coverage(state, method, org, project, rest, query, body),
+        ("testresults", "testfailuretype") => test_failure_types(state, method, org, project, rest, body),
         ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
         ("testresults", "runs") => {
             if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("tags")) {
@@ -8509,6 +8510,127 @@ fn dress_sub_result_attachment(
                 "/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/subresults/{sub_id}/attachments/{id}"
             )),
         );
+    }
+    item
+}
+
+const FAILURE_TYPES: &str = "testresults/testfailuretype";
+
+fn test_failure_types(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() > 2 { &rest[2..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "échec introuvable")
+        };
+    }
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, FAILURE_TYPES);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_failure_type(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let name = match failure_type_name(body) {
+                Ok(name) => name,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match failure_type_create(state, org, project, name) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    let Some(found) = locate_failure_type(state, org, project, key) else {
+        return fail(StatusCode::NOT_FOUND, "échec introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_failure_type(org, project, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, FAILURE_TYPES, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "échec introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn failure_type_name(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("échec illisible");
+    };
+    let Some(name) = object.get("name").and_then(Value::as_str) else {
+        return Err("nom absent");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("nom absent");
+    }
+    Ok(name.to_string())
+}
+
+fn failure_type_create(state: &AppState, org: &str, project: &str, name: String) -> Result<Value, &'static str> {
+    if list(state, org, project, FAILURE_TYPES)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("échec existant");
+    }
+    let number = next_failure_type_id(state, org);
+    let item = json!({
+        "id": format!("ft-{number}"),
+        "failureTypeId": number,
+        "name": name
+    });
+    put_item(state, org, project, FAILURE_TYPES, item.clone());
+    Ok(dress_failure_type(org, project, item))
+}
+
+fn next_failure_type_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(FAILURE_TYPES) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("ft-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn locate_failure_type(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    list(state, org, project, FAILURE_TYPES).into_iter().find(|item| {
+        value_key(&item["id"]) == key
+            || value_key(&item["failureTypeId"]) == key
+            || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn dress_failure_type(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/testresults/testfailuretype/{id}")));
     }
     item
 }
