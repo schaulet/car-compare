@@ -196,6 +196,7 @@
       <a href="/__ORG__/__PROJECT__/_wikiattachments">Pièces de wiki</a>
       <a href="/__ORG__/__PROJECT__/_runresults">Résultats de test</a>
       <a href="/__ORG__/__PROJECT__/_buildprops">Propriétés de build</a>
+      <a href="/__ORG__/__PROJECT__/_defprops">Propriétés de définition</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5424,6 +5425,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/properties/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_defprops") {
+          const definitions = await collection("build/definitions");
+          let rows = [];
+          for (const definition of definitions) {
+            const props = await api("GET", root + "/build/definitions/" + encodeURIComponent(definition.id) + "/properties?api-version=7.1");
+            rows = rows.concat(props.value || []);
+          }
+          const table = rows.length ? "<table id='def-props'><thead><tr><th></th><th>Clé</th><th>Définition</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='def-prop-remove' data-id='" + esc(item.id) + "' data-key='" + esc(item.key) + "' data-definition='" + esc(item.definitionId) + "'>Retirer</button></td><td>" + esc(item.key) + "</td><td>" + esc(item.definitionName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='def-prop-empty' class='sub'>Aucune propriété de définition.</p>";
+          view.innerHTML = "<h1>Propriétés de définition</h1><div class='command'><input id='def-prop-key' placeholder='Pompe' /><button id='def-prop-add' type='button'>Ajouter</button></div>" + table + "<p id='def-prop-error' class='error' hidden></p>";
+          document.getElementById("def-prop-add").onclick = async () => {
+            const error = document.getElementById("def-prop-error");
+            error.hidden = true;
+            const key = document.getElementById("def-prop-key").value;
+            try {
+              let current = await collection("build/definitions");
+              if (!current.length) {
+                await api("POST", root + "/build/definitions?api-version=7.1", { name: key || "Pompe" });
+                current = await collection("build/definitions");
+              }
+              const definition = current[0];
+              await api("POST", root + "/build/definitions/" + encodeURIComponent(definition.id) + "/properties?api-version=7.1", { key: key });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.def-prop-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("def-prop-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/build/definitions/" + encodeURIComponent(button.dataset.definition) + "/properties/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

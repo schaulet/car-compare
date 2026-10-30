@@ -3276,6 +3276,180 @@ fn security_namespaces(org: &str) -> Value {
     page(value)
 }
 
+fn definition_properties(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    definition_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "propriété introuvable")
+        };
+    }
+    let Some(definition) = get_item(state, org, project, "build/definitions", definition_id) else {
+        return fail(StatusCode::NOT_FOUND, "définition introuvable");
+    };
+    let stored_id = value_key(&definition["id"]);
+    let definition_name = text_of(&definition, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_id.clone());
+    let bucket = format!("build/definitions/{stored_id}/properties");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_definition_property(org, project, &stored_id, &definition_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match definition_property_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match definition_property_create(state, org, project, &stored_id, &definition_name, &bucket, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let wanted = pct_decode(&tail[0]);
+    let Some(found) = locate_definition_property(state, org, project, &bucket, wanted.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "propriété introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_definition_property(org, project, &stored_id, &definition_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_property = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_property) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "propriété introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn definition_property_payload(body: &[u8]) -> Result<(String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("propriété illisible");
+    };
+    let key = match object.get("key") {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("clé absente");
+            }
+            text.to_string()
+        }
+        _ => return Err("clé absente"),
+    };
+    let value = match object.get("value") {
+        None => String::new(),
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("valeur absente");
+            }
+            text.to_string()
+        }
+        Some(_) => return Err("valeur absente"),
+    };
+    Ok((key, value))
+}
+
+fn locate_definition_property(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "key").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_definition_property_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if definition_property_bucket(key) {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("dp-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn definition_property_bucket(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("build")
+        && parts.next() == Some("definitions")
+        && parts.next().is_some()
+        && parts.next() == Some("properties")
+        && parts.next().is_none()
+}
+
+fn definition_property_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    definition_id: &str,
+    definition_name: &str,
+    bucket: &str,
+    parsed: (String, String),
+) -> Result<Value, &'static str> {
+    let (key, value) = parsed;
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "key").is_some_and(|stored| stored.eq_ignore_ascii_case(&key)))
+    {
+        return Err("propriété existante");
+    }
+    let item = json!({
+        "id": format!("dp-{}", next_definition_property_id(state, org)),
+        "key": key,
+        "value": value,
+        "definitionId": definition_id
+    });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_definition_property(org, project, definition_id, definition_name, item))
+}
+
+fn dress_definition_property(org: &str, project: &str, definition_id: &str, definition_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("definitionId".into(), json!(definition_id));
+        object.insert("definitionName".into(), json!(definition_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/build/definitions/{definition_id}/properties/{id}")),
+        );
+    }
+    item
+}
+
 fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
     let key = "build/definitions";
     if rest.len() == 2 && method == Method::GET {
@@ -3323,6 +3497,9 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
     let id = rest.get(2).map(String::as_str).unwrap_or("").to_string();
     if id.is_empty() {
         return fail(StatusCode::NOT_FOUND, "définition introuvable");
+    }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("properties")) {
+        return definition_properties(state, method, org, project, &id, rest, body);
     }
     if method == Method::GET {
         return match get_item(state, org, project, key, &id) {
@@ -3381,14 +3558,16 @@ fn definitions(state: &AppState, method: &Method, org: &str, project: &str, rest
         if rest.len() != 3 {
             return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
         }
-        if get_item(state, org, project, key, &id).is_none() {
+        let Some(found) = get_item(state, org, project, key, &id) else {
             return fail(StatusCode::NOT_FOUND, "définition introuvable");
-        }
+        };
+        let stored_id = value_key(&found["id"]);
         state.write(|db| {
             if let Some(stored) = db.project_mut(org, project) {
                 if let Some(bucket) = stored.buckets.get_mut(key) {
                     bucket.remove(&id);
                 }
+                stored.buckets.remove(&format!("build/definitions/{stored_id}/properties"));
             }
         });
         return StatusCode::NO_CONTENT.into_response();
