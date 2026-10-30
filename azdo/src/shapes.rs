@@ -22,6 +22,9 @@ pub fn dispatch(
     let area = rest.first()?.to_ascii_lowercase();
     let resource = rest.get(1)?.to_ascii_lowercase();
     if area == "distributedtask" && resource == "environments" && rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("providers")) {
+        if rest.get(4).is_some_and(|part| part.eq_ignore_ascii_case("kubernetes")) {
+            return Some(environment_kubernetes(state, method, org, project, rest, body));
+        }
         return Some(environment_virtual_machines(state, method, org, project, rest, body));
     }
     if area == "distributedtask" && resource == "environments" && method == Method::DELETE {
@@ -4498,6 +4501,192 @@ fn dress_virtual_machine(org: &str, project: &str, environment_name: &str, mut i
     item
 }
 
+fn environment_kubernetes(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let cluster_tail = if rest.len() > 5 { &rest[5..] } else { &[] };
+    if cluster_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "cluster introuvable")
+        };
+    }
+    let environment_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(environment) = resolve_environment_record(state, org, project, environment_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "environnement introuvable");
+    };
+    let environment_id = value_key(&environment["id"]);
+    let environment_name = text_of(&environment, "name").unwrap_or_default();
+    if cluster_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list_kubernetes(state, org, project, &environment_id);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_kubernetes(org, project, &environment_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match kubernetes_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match kubernetes_create(state, org, project, &environment_id, &environment_name, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&cluster_tail[0]);
+    if method == Method::GET {
+        return match locate_kubernetes(state, org, project, &environment_id, key.trim()) {
+            Some(found) => Json(dress_kubernetes(org, project, &environment_name, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "cluster introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_kubernetes(state, org, project, &environment_id, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "cluster introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = delete_item(state, org, project, "distributedtask/environments/kubernetes", &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "cluster introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn list_kubernetes(state: &AppState, org: &str, project: &str, environment_id: &str) -> Vec<Value> {
+    list(state, org, project, "distributedtask/environments/kubernetes")
+        .into_iter()
+        .filter(|item| text_of(item, "environmentId").is_some_and(|stored| stored == environment_id))
+        .collect()
+}
+
+fn locate_kubernetes(state: &AppState, org: &str, project: &str, environment_id: &str, key: &str) -> Option<Value> {
+    list_kubernetes(state, org, project, environment_id)
+        .into_iter()
+        .find(|item| value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_kubernetes_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get("distributedtask/environments/kubernetes") {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("k8s-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn kubernetes_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    environment_id: &str,
+    environment_name: &str,
+    parsed: (String, String, String),
+) -> Result<Value, &'static str> {
+    let (name, namespace, cluster_name) = parsed;
+    if list_kubernetes(state, org, project, environment_id)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("cluster existant");
+    }
+    let id = format!("k8s-{}", next_kubernetes_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "type": "kubernetes",
+        "namespace": namespace,
+        "clusterName": cluster_name,
+        "environmentId": environment_id,
+        "environmentName": environment_name
+    });
+    put_item(state, org, project, "distributedtask/environments/kubernetes", item.clone());
+    Ok(dress_kubernetes(org, project, environment_name, item))
+}
+
+fn kubernetes_payload(body: &[u8]) -> Result<(String, String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("cluster illisible");
+    };
+    let name = match object.get("name") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => return Err("nom absent"),
+    };
+    let namespace = match object.get("namespace") {
+        None => "default".to_string(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("espace absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("espace absent"),
+    };
+    let cluster_name = match object.get("clusterName") {
+        None => name.clone(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("cluster absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("cluster absent"),
+    };
+    Ok((name, namespace, cluster_name))
+}
+
+fn dress_kubernetes(org: &str, project: &str, environment_name: &str, mut item: Value) -> Value {
+    let environment_id = text_of(&item, "environmentId").unwrap_or_default();
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("environmentName".into(), json!(environment_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/distributedtask/environments/{environment_id}/providers/kubernetes/{id}")),
+        );
+    }
+    item
+}
+
 fn delete_environment(state: &AppState, org: &str, project: &str, rest: &[String]) -> Response {
     let key = "distributedtask/environments";
     if rest.len() == 2 {
@@ -4524,6 +4713,17 @@ fn delete_environment(state: &AppState, org: &str, project: &str, rest: &[String
                     .collect();
                 for stored_key in doomed {
                     machines.items.remove(&stored_key);
+                }
+            }
+            if let Some(clusters) = stored.buckets.get_mut("distributedtask/environments/kubernetes") {
+                let doomed: Vec<String> = clusters
+                    .items
+                    .iter()
+                    .filter(|(_, item)| text_of(item, "environmentId").is_some_and(|stored| stored == stored_id))
+                    .map(|(stored_key, _)| stored_key.clone())
+                    .collect();
+                for stored_key in doomed {
+                    clusters.items.remove(&stored_key);
                 }
             }
             if let Some(checks) = stored.buckets.get_mut("pipelines/checks/configurations") {

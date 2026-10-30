@@ -31039,3 +31039,246 @@ async fn removing_one_virtual_machine_keeps_the_sibling_the_template_and_the_oth
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Relais");
 }
+
+#[tokio::test]
+async fn removing_one_kubernetes_cluster_keeps_the_sibling_the_machine_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+
+    async fn create_environment(app: &axum::Router, auth: &str, project: &str, name: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/distributedtask/environments?api-version=7.1");
+        let body = format!(r#"{{"name":"{name}","description":""}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        match &created["id"] {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Number(value) => value.to_string(),
+            _ => panic!("{created}"),
+        }
+    }
+
+    async fn create_machine(app: &axum::Router, auth: &str, project: &str, environment: &str, name: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/distributedtask/environments/{environment}/providers/virtualmachines?api-version=7.1");
+        let body = format!(r#"{{"name":"{name}"}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        serde_json::from_str(&response).unwrap()
+    }
+
+    async fn create_cluster(app: &axum::Router, auth: &str, project: &str, environment: &str, body: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/distributedtask/environments/{environment}/providers/kubernetes?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("k8s-"), "{created}");
+        assert_eq!(created["type"], "kubernetes");
+        assert_eq!(created["environmentId"], environment);
+        assert_eq!(created["project"], project);
+        created
+    }
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ligne = create_environment(&app, &auth, "AzurzDemo", "Ligne").await;
+    let clusters = format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes?api-version=7.1");
+    let (status, body, _) = call(&app, "GET", &clusters, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 0, "{body}");
+    let (status, body, _) = call(&app, "DELETE", &clusters, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("cluster illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#] {
+        let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","namespace":" "}"#, r#"{"name":"Pompe","namespace":1}"#] {
+        let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("espace absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","clusterName":" "}"#, r#"{"name":"Pompe","clusterName":1}"#] {
+        let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("cluster absent"), "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments/absent/providers/kubernetes?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("environnement introuvable"), "{body}");
+
+    let machine = create_machine(&app, &auth, "AzurzDemo", &ligne, "Pompe").await;
+    let pompe = create_cluster(&app, &auth, "AzurzDemo", &ligne, r#"{"name":"Pompe"}"#).await;
+    assert_eq!(pompe["name"], "Pompe");
+    assert_eq!(pompe["namespace"], "default");
+    assert_eq!(pompe["clusterName"], "Pompe");
+    assert_eq!(pompe["environmentName"], "Ligne");
+    let relais = create_cluster(&app, &auth, "AzurzDemo", &ligne, r#"{"name":"Relais","namespace":"web","clusterName":"four"}"#).await;
+    assert_eq!(relais["namespace"], "web");
+    assert_eq!(relais["clusterName"], "four");
+    let (status, body, _) = call(&app, "POST", &clusters, Some(&auth), None, "application/json", Some(r#"{"name":"pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("cluster existant"), "{body}");
+    let atelier_environment = create_environment(&app, &auth, "Atelier", "Atelier").await;
+    let atelier = create_cluster(&app, &auth, "Atelier", &atelier_environment, r#"{"name":"Pompe","namespace":"atelier","clusterName":"cave"}"#).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("cluster introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &clusters, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/Relais?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"], relais["id"]);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("cluster introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}?api-version=7.1", pompe["id"].as_str().unwrap());
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &clusters, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert_eq!(kept["value"][0]["name"], "Relais");
+    assert_eq!(kept["value"][0]["namespace"], "web");
+    assert_eq!(kept["value"][0]["clusterName"], "four");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/virtualmachines/{}?api-version=7.1", machine["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/distributedtask/environments/{atelier_environment}/providers/kubernetes/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["name"], "Pompe");
+    assert_eq!(kept_other["namespace"], "atelier");
+    assert_eq!(kept_other["clusterName"], "cave");
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("cluster introuvable"), "{body}");
+
+    let jetable = create_environment(&app, &auth, "AzurzDemo", "Jetable").await;
+    let dropped = create_cluster(&app, &auth, "AzurzDemo", &jetable, r#"{"name":"Jetable"}"#).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{jetable}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{jetable}/providers/kubernetes/{}?api-version=7.1", dropped["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("environnement introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{ligne}/providers/kubernetes/{}?api-version=7.1", relais["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Relais");
+}
