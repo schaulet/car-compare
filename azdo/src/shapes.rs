@@ -6011,6 +6011,9 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return Json(item).into_response();
     }
     let run_id = rest.get(2).map(String::as_str).unwrap_or("");
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("attachments")) {
+        return run_attachments(state, method, org, project, run_id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("results") {
         if get_item(state, org, project, key, run_id).is_none() {
             return fail(StatusCode::NOT_FOUND, "exécution introuvable");
@@ -6066,11 +6069,188 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
                     bucket.remove(run_id);
                 }
                 stored.buckets.remove(&results_key);
+                stored.buckets.remove(&format!("test/runs/{run_id}/attachments"));
             }
         });
         return StatusCode::NO_CONTENT.into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn run_attachments(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let attachment_tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if attachment_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    let Some(run) = get_item(state, org, project, "test/runs", run_id) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name").unwrap_or_default();
+    let bucket = format!("test/runs/{stored_run}/attachments");
+    if attachment_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_run_attachment(org, project, &stored_run, &run_name, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match run_attachment_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match run_attachment_create(state, org, project, &stored_run, &run_name, &bucket, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&attachment_tail[0]);
+    if method == Method::GET {
+        return match locate_run_attachment(state, org, project, &bucket, key.trim()) {
+            Some(found) => Json(dress_run_attachment(org, project, &stored_run, &run_name, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "pièce introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_run_attachment(state, org, project, &bucket, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "pièce introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = delete_item(state, org, project, &bucket, &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn locate_run_attachment(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket)
+        .into_iter()
+        .find(|item| value_key(&item["id"]) == key || text_of(item, "fileName").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_run_attachment_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.contains("/attachments") && key.starts_with("test/runs/") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("ta-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn run_attachment_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    bucket: &str,
+    parsed: (String, String, String, Option<String>),
+) -> Result<Value, &'static str> {
+    let (file_name, comment, attachment_type, stream) = parsed;
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "fileName").is_some_and(|stored| stored.eq_ignore_ascii_case(&file_name)))
+    {
+        return Err("pièce existante");
+    }
+    let id = format!("ta-{}", next_run_attachment_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "fileName": file_name,
+        "comment": comment,
+        "attachmentType": attachment_type,
+        "runId": run_id
+    });
+    if let Some(stream) = stream {
+        item["stream"] = json!(stream);
+    }
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_run_attachment(org, project, run_id, run_name, item))
+}
+
+fn run_attachment_payload(body: &[u8]) -> Result<(String, String, String, Option<String>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("pièce illisible");
+    };
+    let file_name = match object.get("fileName") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => return Err("nom absent"),
+    };
+    let comment = match object.get("comment") {
+        None => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => return Err("commentaire absent"),
+    };
+    let attachment_type = match object.get("attachmentType") {
+        None => "GeneralAttachment".to_string(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("type absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("type absent"),
+    };
+    let stream = match object.get("stream") {
+        None => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(_) => return Err("contenu absent"),
+    };
+    Ok((file_name, comment, attachment_type, stream))
+}
+
+fn dress_run_attachment(org: &str, project: &str, run_id: &str, run_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runName".into(), json!(run_name));
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/test/runs/{run_id}/attachments/{id}")));
+    }
+    item
 }
 
 fn page_path_of(raw: &str) -> String {

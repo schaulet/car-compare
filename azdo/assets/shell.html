@@ -171,6 +171,7 @@
       <a href="/__ORG__/__PROJECT__/_machines">Machines</a>
       <a href="/__ORG__/__PROJECT__/_clusters">Clusters</a>
       <a href="/__ORG__/__PROJECT__/_sharedparams">Paramètres partagés</a>
+      <a href="/__ORG__/__PROJECT__/_runfiles">Pièces d'exécution</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4222,6 +4223,47 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/testplan/sharedparameters/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_runfiles") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const attachments = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/attachments?api-version=7.1");
+            rows = rows.concat(attachments.value || []);
+          }
+          const table = rows.length ? "<table id='run-files'><thead><tr><th></th><th>Nom</th><th>Exécution</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='run-file-remove' data-run='" + esc(item.runId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.runName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='run-file-empty' class='sub'>Aucune pièce.</p>";
+          view.innerHTML = "<h1>Pièces d'exécution</h1><div class='command'><input id='run-file-name' placeholder='Pompe' /><button id='run-file-add' type='button'>Ajouter</button></div>" + table + "<p id='run-file-error' class='error' hidden></p>";
+          document.getElementById("run-file-add").onclick = async () => {
+            const error = document.getElementById("run-file-error");
+            error.hidden = true;
+            const name = document.getElementById("run-file-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.run-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("run-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
