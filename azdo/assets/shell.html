@@ -200,6 +200,7 @@
       <a href="/__ORG__/__PROJECT__/_deftags">Étiquettes de définition</a>
       <a href="/__ORG__/__PROJECT__/_defrevs">Révisions de définition</a>
       <a href="/__ORG__/__PROJECT__/_defmetrics">Métriques de définition</a>
+      <a href="/__ORG__/__PROJECT__/_buildchanges">Changements de build</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5596,6 +5597,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/build/definitions/" + encodeURIComponent(button.dataset.definition) + "/metrics/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_buildchanges") {
+          const builds = await collection("build/builds");
+          let rows = [];
+          for (const build of builds) {
+            const changes = await api("GET", root + "/build/builds/" + encodeURIComponent(build.id) + "/changes?api-version=7.1");
+            rows = rows.concat(changes.value || []);
+          }
+          const table = rows.length ? "<table id='build-changes'><thead><tr><th></th><th>Message</th><th>Build</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='build-change-remove' data-id='" + esc(item.id) + "' data-message='" + esc(item.message) + "' data-build='" + esc(item.buildId) + "'>Retirer</button></td><td>" + esc(item.message) + "</td><td>" + esc(item.buildNumber) + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-change-empty' class='sub'>Aucun changement de build.</p>";
+          view.innerHTML = "<h1>Changements de build</h1><div class='command'><input id='build-change-message' placeholder='Pompe' /><button id='build-change-add' type='button'>Ajouter</button></div>" + table + "<p id='build-change-error' class='error' hidden></p>";
+          document.getElementById("build-change-add").onclick = async () => {
+            const error = document.getElementById("build-change-error");
+            error.hidden = true;
+            const message = document.getElementById("build-change-message").value;
+            try {
+              let current = await collection("build/builds");
+              if (!current.length) {
+                await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
+                current = await collection("build/builds");
+              }
+              const build = current[0];
+              await api("POST", root + "/build/builds/" + encodeURIComponent(build.id) + "/changes?api-version=7.1", { message: message });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.build-change-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("build-change-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/changes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
