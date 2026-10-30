@@ -182,6 +182,7 @@
       <a href="/__ORG__/__PROJECT__/_actionparams">Paramètres d'action</a>
       <a href="/__ORG__/__PROJECT__/_resultlogs">Journaux de résultat</a>
       <a href="/__ORG__/__PROJECT__/_subresults">Sous-résultats</a>
+      <a href="/__ORG__/__PROJECT__/_subfiles">Pièces de sous-résultat</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4837,6 +4838,65 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/subresults/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_subfiles") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const subs = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1");
+              for (const sub of subs.value || []) {
+                const files = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/subresults/" + encodeURIComponent(sub.id) + "/attachments?api-version=7.1");
+                rows = rows.concat(files.value || []);
+              }
+            }
+          }
+          const table = rows.length ? "<table id='sub-files'><thead><tr><th></th><th>Nom</th><th>Sous-résultat</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='sub-file-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-sub='" + esc(item.subResultId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.subResultName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='sub-file-empty' class='sub'>Aucune pièce de sous-résultat.</p>";
+          view.innerHTML = "<h1>Pièces de sous-résultat</h1><div class='command'><input id='sub-file-name' placeholder='Pompe' /><button id='sub-file-add' type='button'>Ajouter</button></div>" + table + "<p id='sub-file-error' class='error' hidden></p>";
+          document.getElementById("sub-file-add").onclick = async () => {
+            const error = document.getElementById("sub-file-error");
+            error.hidden = true;
+            const name = document.getElementById("sub-file-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              let subs = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1");
+              if (!(subs.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1", { name: "Pompe" });
+                subs = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1");
+              }
+              const sub = (subs.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/subresults/" + encodeURIComponent(sub.id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.sub-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("sub-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/subresults/" + encodeURIComponent(button.dataset.sub) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
