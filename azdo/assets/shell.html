@@ -172,6 +172,7 @@
       <a href="/__ORG__/__PROJECT__/_clusters">Clusters</a>
       <a href="/__ORG__/__PROJECT__/_sharedparams">Paramètres partagés</a>
       <a href="/__ORG__/__PROJECT__/_runfiles">Pièces d'exécution</a>
+      <a href="/__ORG__/__PROJECT__/_resultfiles">Pièces de résultat</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4264,6 +4265,56 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_resultfiles") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const attachments = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/attachments?api-version=7.1");
+              rows = rows.concat(attachments.value || []);
+            }
+          }
+          const table = rows.length ? "<table id='result-files'><thead><tr><th></th><th>Nom</th><th>Résultat</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='result-file-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.resultName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='result-file-empty' class='sub'>Aucune pièce de résultat.</p>";
+          view.innerHTML = "<h1>Pièces de résultat</h1><div class='command'><input id='result-file-name' placeholder='Pompe' /><button id='result-file-add' type='button'>Ajouter</button></div>" + table + "<p id='result-file-error' class='error' hidden></p>";
+          document.getElementById("result-file-add").onclick = async () => {
+            const error = document.getElementById("result-file-error");
+            error.hidden = true;
+            const name = document.getElementById("result-file-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.result-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("result-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
