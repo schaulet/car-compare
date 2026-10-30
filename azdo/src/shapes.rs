@@ -58,7 +58,13 @@ pub fn dispatch(
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
-        ("testresults", "runs") => test_log_store(state, method, org, project, rest, query, body),
+        ("testresults", "runs") => {
+            if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("tags")) {
+                test_run_tags(state, method, org, project, rest, body)
+            } else {
+                test_log_store(state, method, org, project, rest, query, body)
+            }
+        }
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
         ("release", "folders") => release_folders(state, method, org, project, rest, body),
@@ -6137,6 +6143,7 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
                 stored.buckets.remove(&results_key);
                 stored.buckets.remove(&format!("test/runs/{stored_run}/attachments"));
                 stored.buckets.remove(&format!("testresults/runs/{stored_run}/testattachments"));
+                stored.buckets.remove(&format!("testresults/runs/{stored_run}/tags"));
                 let prefix = format!("test/runs/{stored_run}/results/");
                 let nested: Vec<String> = stored.buckets.keys().filter(|key| key.starts_with(&prefix)).cloned().collect();
                 for key in nested {
@@ -8486,6 +8493,205 @@ fn dress_sub_result_attachment(
             json!(format!(
                 "/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/subresults/{sub_id}/attachments/{id}"
             )),
+        );
+    }
+    item
+}
+
+fn test_run_tags(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "étiquette introuvable")
+        };
+    }
+    let run_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(run) = get_item(state, org, project, "test/runs", run_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_run.clone());
+    let bucket = format!("testresults/runs/{stored_run}/tags");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_test_run_tag(org, project, &stored_run, &run_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let name = match test_run_tag_payload(body) {
+                Ok(name) => name,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match test_run_tag_create(state, org, project, &stored_run, &run_name, &bucket, &name) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        if method == Method::PATCH {
+            let names = match test_run_tags_update(body) {
+                Ok(names) => names,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            state.write(|db| {
+                if let Some(stored) = db.project_mut(org, project) {
+                    stored.buckets.remove(&bucket);
+                }
+            });
+            let mut rows = Vec::new();
+            for name in names {
+                match test_run_tag_create(state, org, project, &stored_run, &run_name, &bucket, &name) {
+                    Ok(item) => rows.push(item),
+                    Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+                }
+            }
+            return Json(rows).into_response();
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    if method == Method::GET {
+        return match locate_test_run_tag(state, org, project, &bucket, key) {
+            Some(found) => Json(dress_test_run_tag(org, project, &stored_run, &run_name, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "étiquette introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_test_run_tag(state, org, project, &bucket, key) else {
+            return fail(StatusCode::NOT_FOUND, "étiquette introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "étiquette introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn test_run_tag_payload(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("étiquette illisible");
+    };
+    let Some(name) = object.get("name") else {
+        return Err("nom absent");
+    };
+    test_tag_name(name)
+}
+
+fn test_run_tags_update(body: &[u8]) -> Result<Vec<String>, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("étiquette illisible");
+    };
+    let Some(tags) = object.get("tags").and_then(Value::as_array) else {
+        return Err("étiquette illisible");
+    };
+    let mut names = Vec::new();
+    for item in tags {
+        let Some(object) = item.as_object() else {
+            return Err("étiquette illisible");
+        };
+        let Some(name) = object.get("name") else {
+            return Err("nom absent");
+        };
+        let name = test_tag_name(name)?;
+        if names.iter().any(|stored: &String| stored.eq_ignore_ascii_case(&name)) {
+            return Err("étiquette existante");
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn test_tag_name(value: &Value) -> Result<String, &'static str> {
+    let Some(text) = value.as_str() else {
+        return Err("nom absent");
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("nom absent");
+    }
+    if text.len() >= 30 || !text.chars().all(|char| char.is_ascii_alphanumeric()) {
+        return Err("nom invalide");
+    }
+    Ok(text.to_string())
+}
+
+fn locate_test_run_tag(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket)
+        .into_iter()
+        .find(|item| value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn test_run_tag_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    bucket: &str,
+    name: &str,
+) -> Result<Value, &'static str> {
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(name)))
+    {
+        return Err("étiquette existante");
+    }
+    let id = format!("tg-{}", next_test_run_tag_id(state, org));
+    let item = json!({ "id": id, "name": name, "runId": run_id });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_test_run_tag(org, project, run_id, run_name, item))
+}
+
+fn next_test_run_tag_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.starts_with("testresults/runs/") && key.ends_with("/tags") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("tg-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn dress_test_run_tag(org: &str, project: &str, run_id: &str, run_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("runName".into(), json!(run_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testresults/runs/{run_id}/tags/{id}")),
         );
     }
     item
