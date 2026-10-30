@@ -176,6 +176,7 @@
       <a href="/__ORG__/__PROJECT__/_resultbugs">Bogues de résultat</a>
       <a href="/__ORG__/__PROJECT__/_resultiters">Itérations de résultat</a>
       <a href="/__ORG__/__PROJECT__/_resultactions">Actions de résultat</a>
+      <a href="/__ORG__/__PROJECT__/_iterfiles">Pièces d'itération</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4477,6 +4478,65 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/actionresults/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_iterfiles") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              for (const iteration of iterations.value || []) {
+                const files = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/attachments?api-version=7.1");
+                rows = rows.concat(files.value || []);
+              }
+            }
+          }
+          const table = rows.length ? "<table id='iter-files'><thead><tr><th></th><th>Nom</th><th>Itération</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='iter-file-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-iteration='" + esc(item.iterationId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.iterationName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='iter-file-empty' class='sub'>Aucune pièce d'itération.</p>";
+          view.innerHTML = "<h1>Pièces d'itération</h1><div class='command'><input id='iter-file-name' placeholder='Pompe' /><button id='iter-file-add' type='button'>Ajouter</button></div>" + table + "<p id='iter-file-error' class='error' hidden></p>";
+          document.getElementById("iter-file-add").onclick = async () => {
+            const error = document.getElementById("iter-file-error");
+            error.hidden = true;
+            const name = document.getElementById("iter-file-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              let iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              if (!(iterations.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1", { name: "Pompe" });
+                iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              }
+              const iteration = (iterations.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.iter-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("iter-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

@@ -6032,6 +6032,12 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     }
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
         && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("iterations"))
+        && rest.get(7).is_some_and(|part| part.eq_ignore_ascii_case("attachments"))
+    {
+        return iteration_attachments(state, method, org, project, run_id, rest, body);
+    }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
+        && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("iterations"))
     {
         return result_iterations(state, method, org, project, run_id, rest, body);
     }
@@ -6675,9 +6681,11 @@ fn result_iterations(
         let removed = delete_item(state, org, project, &bucket, &stored_id);
         if removed {
             let actions_key = format!("test/runs/{stored_run}/results/{stored_result}/iterations/{stored_id}/actionresults");
+            let files_key = format!("test/runs/{stored_run}/results/{stored_result}/iterations/{stored_id}/attachments");
             state.write(|db| {
                 if let Some(stored) = db.project_mut(org, project) {
                     stored.buckets.remove(&actions_key);
+                    stored.buckets.remove(&files_key);
                 }
             });
             return StatusCode::NO_CONTENT.into_response();
@@ -7022,6 +7030,196 @@ fn dress_result_action(
         object.insert(
             "url".into(),
             json!(format!("/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/iterations/{iteration_id}/actionresults/{id}")),
+        );
+    }
+    item
+}
+
+fn iteration_attachments(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let file_tail = if rest.len() > 8 { &rest[8..] } else { &[] };
+    if file_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    let Some(run) = get_item(state, org, project, "test/runs", run_id) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let result_key = pct_decode(rest.get(4).map(String::as_str).unwrap_or(""));
+    let results_key = format!("test/runs/{stored_run}/results");
+    let Some(result) = get_item(state, org, project, &results_key, result_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "résultat introuvable");
+    };
+    let stored_result = value_key(&result["id"]);
+    let result_name = text_of(&result, "testCaseTitle")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_result.clone());
+    let iteration_key = pct_decode(rest.get(6).map(String::as_str).unwrap_or(""));
+    let iterations_key = format!("test/runs/{stored_run}/results/{stored_result}/iterations");
+    let Some(iteration) = get_item(state, org, project, &iterations_key, iteration_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    };
+    let stored_iteration = value_key(&iteration["id"]);
+    let iteration_name = text_of(&iteration, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_iteration.clone());
+    let bucket = format!("test/runs/{stored_run}/results/{stored_result}/iterations/{stored_iteration}/attachments");
+    if file_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_iteration_attachment(org, project, &stored_run, &stored_result, &result_name, &stored_iteration, &iteration_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match run_attachment_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match iteration_attachment_create(
+                state,
+                org,
+                project,
+                &stored_run,
+                &stored_result,
+                &result_name,
+                &stored_iteration,
+                &iteration_name,
+                &bucket,
+                parsed,
+            ) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&file_tail[0]);
+    if method == Method::GET {
+        return match locate_run_attachment(state, org, project, &bucket, key.trim()) {
+            Some(found) => Json(dress_iteration_attachment(
+                org,
+                project,
+                &stored_run,
+                &stored_result,
+                &result_name,
+                &stored_iteration,
+                &iteration_name,
+                found,
+            ))
+            .into_response(),
+            None => fail(StatusCode::NOT_FOUND, "pièce introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_run_attachment(state, org, project, &bucket, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "pièce introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = delete_item(state, org, project, &bucket, &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn next_iteration_attachment_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.starts_with("test/runs/") && key.contains("/iterations/") && key.ends_with("/attachments") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("ia-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn iteration_attachment_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    result_id: &str,
+    result_name: &str,
+    iteration_id: &str,
+    iteration_name: &str,
+    bucket: &str,
+    parsed: (String, String, String, Option<String>),
+) -> Result<Value, &'static str> {
+    let (file_name, comment, attachment_type, stream) = parsed;
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "fileName").is_some_and(|stored| stored.eq_ignore_ascii_case(&file_name)))
+    {
+        return Err("pièce existante");
+    }
+    let id = format!("ia-{}", next_iteration_attachment_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "fileName": file_name,
+        "comment": comment,
+        "attachmentType": attachment_type,
+        "runId": run_id,
+        "resultId": result_id,
+        "iterationId": iteration_id
+    });
+    if let Some(stream) = stream {
+        item["stream"] = json!(stream);
+    }
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_iteration_attachment(org, project, run_id, result_id, result_name, iteration_id, iteration_name, item))
+}
+
+fn dress_iteration_attachment(
+    org: &str,
+    project: &str,
+    run_id: &str,
+    result_id: &str,
+    result_name: &str,
+    iteration_id: &str,
+    iteration_name: &str,
+    mut item: Value,
+) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("resultId".into(), json!(result_id));
+        object.insert("resultName".into(), json!(result_name));
+        object.insert("iterationId".into(), json!(iteration_id));
+        object.insert("iterationName".into(), json!(iteration_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/iterations/{iteration_id}/attachments/{id}")),
         );
     }
     item
