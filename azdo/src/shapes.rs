@@ -21,6 +21,9 @@ pub fn dispatch(
 ) -> Option<Response> {
     let area = rest.first()?.to_ascii_lowercase();
     let resource = rest.get(1)?.to_ascii_lowercase();
+    if area == "distributedtask" && resource == "environments" && rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("providers")) {
+        return Some(environment_virtual_machines(state, method, org, project, rest, body));
+    }
     if area == "distributedtask" && resource == "environments" && method == Method::DELETE {
         return Some(delete_environment(state, org, project, rest));
     }
@@ -4298,6 +4301,203 @@ fn pipelines(state: &AppState, method: &Method, org: &str, project: &str, rest: 
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
+fn environment_virtual_machines(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let provider = rest.get(4).map(|value| value.as_str());
+    if provider.is_none_or(|part| !part.eq_ignore_ascii_case("virtualmachines")) {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "machine introuvable")
+        };
+    }
+    let machine_tail = if rest.len() > 5 { &rest[5..] } else { &[] };
+    if machine_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "machine introuvable")
+        };
+    }
+    let environment_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(environment) = resolve_environment_record(state, org, project, environment_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "environnement introuvable");
+    };
+    let environment_id = value_key(&environment["id"]);
+    let environment_name = text_of(&environment, "name").unwrap_or_default();
+    if machine_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list_virtual_machines(state, org, project, &environment_id);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_virtual_machine(org, project, &environment_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match virtual_machine_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match virtual_machine_create(state, org, project, &environment_id, &environment_name, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&machine_tail[0]);
+    if method == Method::GET {
+        return match locate_virtual_machine(state, org, project, &environment_id, key.trim()) {
+            Some(found) => Json(dress_virtual_machine(org, project, &environment_name, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "machine introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_virtual_machine(state, org, project, &environment_id, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "machine introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = delete_item(state, org, project, "distributedtask/environments/virtualmachines", &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "machine introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn resolve_environment_record(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(found) = get_item(state, org, project, "distributedtask/environments", key) {
+        return Some(found);
+    }
+    list(state, org, project, "distributedtask/environments")
+        .into_iter()
+        .find(|item| text_of(item, "name").is_some_and(|name| name.eq_ignore_ascii_case(key)))
+}
+
+fn list_virtual_machines(state: &AppState, org: &str, project: &str, environment_id: &str) -> Vec<Value> {
+    list(state, org, project, "distributedtask/environments/virtualmachines")
+        .into_iter()
+        .filter(|item| text_of(item, "environmentId").is_some_and(|stored| stored == environment_id))
+        .collect()
+}
+
+fn locate_virtual_machine(state: &AppState, org: &str, project: &str, environment_id: &str, key: &str) -> Option<Value> {
+    list_virtual_machines(state, org, project, environment_id)
+        .into_iter()
+        .find(|item| value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_virtual_machine_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get("distributedtask/environments/virtualmachines") {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("vm-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn virtual_machine_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    environment_id: &str,
+    environment_name: &str,
+    parsed: (String, Vec<String>),
+) -> Result<Value, &'static str> {
+    let (name, tags) = parsed;
+    if list_virtual_machines(state, org, project, environment_id)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("machine existante");
+    }
+    let id = format!("vm-{}", next_virtual_machine_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "type": "virtualMachine",
+        "tags": tags,
+        "environmentId": environment_id,
+        "environmentName": environment_name
+    });
+    put_item(state, org, project, "distributedtask/environments/virtualmachines", item.clone());
+    Ok(dress_virtual_machine(org, project, environment_name, item))
+}
+
+fn virtual_machine_payload(body: &[u8]) -> Result<(String, Vec<String>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("machine illisible");
+    };
+    let name = match object.get("name") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => return Err("nom absent"),
+    };
+    let tags = match object.get("tags") {
+        None => Vec::new(),
+        Some(Value::Array(items)) => {
+            let mut tags = Vec::new();
+            for item in items {
+                let Some(value) = item.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                    return Err("étiquette absente");
+                };
+                tags.push(value.to_string());
+            }
+            tags
+        }
+        Some(_) => return Err("étiquette absente"),
+    };
+    Ok((name, tags))
+}
+
+fn dress_virtual_machine(org: &str, project: &str, environment_name: &str, mut item: Value) -> Value {
+    let environment_id = text_of(&item, "environmentId").unwrap_or_default();
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("environmentName".into(), json!(environment_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/distributedtask/environments/{environment_id}/providers/virtualmachines/{id}")),
+        );
+    }
+    item
+}
+
 fn delete_environment(state: &AppState, org: &str, project: &str, rest: &[String]) -> Response {
     let key = "distributedtask/environments";
     if rest.len() == 2 {
@@ -4314,6 +4514,17 @@ fn delete_environment(state: &AppState, org: &str, project: &str, rest: &[String
         if let Some(stored) = db.project_mut(org, project) {
             if let Some(bucket) = stored.buckets.get_mut(key) {
                 bucket.remove(&stored_id);
+            }
+            if let Some(machines) = stored.buckets.get_mut("distributedtask/environments/virtualmachines") {
+                let doomed: Vec<String> = machines
+                    .items
+                    .iter()
+                    .filter(|(_, item)| text_of(item, "environmentId").is_some_and(|stored| stored == stored_id))
+                    .map(|(stored_key, _)| stored_key.clone())
+                    .collect();
+                for stored_key in doomed {
+                    machines.items.remove(&stored_key);
+                }
             }
             if let Some(checks) = stored.buckets.get_mut("pipelines/checks/configurations") {
                 let doomed: Vec<String> = checks

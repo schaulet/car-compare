@@ -168,6 +168,7 @@
       <a href="/__ORG__/__PROJECT__/_layoutcontrols">Contrôles</a>
       <a href="/__ORG__/__PROJECT__/_witbehaviors">Comportements du type</a>
       <a href="/__ORG__/__PROJECT__/_templates">Modèles</a>
+      <a href="/__ORG__/__PROJECT__/_machines">Machines</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4105,6 +4106,47 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/wit/templates/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_machines") {
+          const environments = await collection("distributedtask/environments");
+          let rows = [];
+          for (const environment of environments) {
+            const machines = await api("GET", root + "/distributedtask/environments/" + encodeURIComponent(environment.id) + "/providers/virtualmachines?api-version=7.1");
+            rows = rows.concat(machines.value || []);
+          }
+          const table = rows.length ? "<table id='machines'><thead><tr><th></th><th>Nom</th><th>Environnement</th><th>Étiquettes</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='machine-remove' data-environment='" + esc(item.environmentId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.environmentName) + "</td><td>" + esc((item.tags || []).join(", ")) + "</td></tr>").join("") + "</tbody></table>" : "<p id='machine-empty' class='sub'>Aucune machine.</p>";
+          view.innerHTML = "<h1>Machines</h1><div class='command'><input id='machine-name' placeholder='Pompe' /><button id='machine-add' type='button'>Ajouter</button></div>" + table + "<p id='machine-error' class='error' hidden></p>";
+          document.getElementById("machine-add").onclick = async () => {
+            const error = document.getElementById("machine-error");
+            error.hidden = true;
+            const name = document.getElementById("machine-name").value;
+            try {
+              let current = await collection("distributedtask/environments");
+              if (!current.length) {
+                await api("POST", root + "/distributedtask/environments?api-version=7.1", { name: "Production", description: "" });
+                current = await collection("distributedtask/environments");
+              }
+              await api("POST", root + "/distributedtask/environments/" + encodeURIComponent(current[0].id) + "/providers/virtualmachines?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.machine-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("machine-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/distributedtask/environments/" + encodeURIComponent(button.dataset.environment) + "/providers/virtualmachines/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
