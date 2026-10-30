@@ -1,5 +1,17 @@
 # Architecture technique
 
+## Processus de développement
+
+L'hôte de développement lance trois spécialisations, chacune seulement si son point d'entrée est dans l'arbre :
+
+| Processus | Commande | Port |
+| --- | --- | --- |
+| Car Compare | `uv run uvicorn car_compare.main:app --host 0.0.0.0 --port 8000` | 8000 |
+| Azurz | `uv run azurz` | 8080 |
+| Azure DevOps Rust | `azdo/target/debug/azdo` avec `AZDO_PORT=8081` | 8081 |
+
+`uv sync --all-extras` prépare le venv. `cargo build --manifest-path azdo/Cargo.toml` ne s'exécute que si le manifeste existe, pour que la branche `main` (sans crate) reste installable.
+
 ## Azurz
 
 ```

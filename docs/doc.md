@@ -1,5 +1,9 @@
 # Documentation générale
 
+## Environnement de développement
+
+Le cycle quotidien n'exige pas Docker. `uv sync --all-extras` installe Car Compare et Azurz. Trois processus suffisent : l'API Car Compare (`http://localhost:8000`), le pont Azurz (`http://localhost:8080`, tickets en mémoire) et, lorsque le crate est présent, l'Azure DevOps Rust (`http://localhost:8081`, PAT `azurz-lab-pat`). Le lab Ignition reste la démo complète, lancée avec Docker Compose.
+
 ## Azurz — pont Dust, Azure DevOps et Ignition
 
 Azurz relie un chat Dust (dust.tt) à Azure DevOps et à des agents capables de produire un module Ignition, de le prouver par des tests Cucumber, puis de le déposer sur les passerelles choisies.
