@@ -191,6 +191,7 @@
       <a href="/__ORG__/__PROJECT__/_metadata">Métadonnées</a>
       <a href="/__ORG__/__PROJECT__/_testfields">Champs de test</a>
       <a href="/__ORG__/__PROJECT__/_resultfields">Champs de résultat</a>
+      <a href="/__ORG__/__PROJECT__/_resultitems">Éléments de résultat</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5211,6 +5212,56 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/testresults/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/customfields/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_resultitems") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await collection("test/runs/" + encodeURIComponent(run.id) + "/results");
+            for (const result of results) {
+              const page = await api("GET", root + "/testresults/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/workitems?api-version=7.1");
+              rows = rows.concat(page.value || []);
+            }
+          }
+          const table = rows.length ? "<table id='resultitems'><thead><tr><th></th><th>Nom</th><th>Type</th><th>Résultat</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='resultitem-remove' data-id='" + esc(item.id) + "' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.type) + "</td><td>" + esc(item.resultName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='resultitem-empty' class='sub'>Aucun élément de résultat.</p>";
+          view.innerHTML = "<h1>Éléments de résultat</h1><div class='command'><input id='resultitem-name' placeholder='Pompe' /><button id='resultitem-add' type='button'>Ajouter</button></div>" + table + "<p id='resultitem-error' class='error' hidden></p>";
+          document.getElementById("resultitem-add").onclick = async () => {
+            const error = document.getElementById("resultitem-error");
+            error.hidden = true;
+            const name = document.getElementById("resultitem-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Ligne" });
+                current = await collection("test/runs");
+              }
+              const run = current[0];
+              let results = await collection("test/runs/" + encodeURIComponent(run.id) + "/results");
+              if (!results.length) {
+                const created = await api("POST", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1", [{ testCaseTitle: "Ligne" }]);
+                results = created.value || [];
+              }
+              await api("POST", root + "/testresults/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(results[0].id) + "/workitems?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.resultitem-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("resultitem-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/testresults/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/workitems/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

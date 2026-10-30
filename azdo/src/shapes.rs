@@ -70,6 +70,10 @@ pub fn dispatch(
                 && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("customfields"))
             {
                 test_result_custom_fields(state, method, org, project, rest, body)
+            } else if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
+                && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("workitems"))
+            {
+                test_result_work_items(state, method, org, project, rest, body)
             } else {
                 test_log_store(state, method, org, project, rest, query, body)
             }
@@ -6051,6 +6055,11 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return test_result_custom_fields(state, method, org, project, rest, body);
     }
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
+        && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("workitems"))
+    {
+        return test_result_work_items(state, method, org, project, rest, body);
+    }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
         && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("attachments"))
     {
         return result_attachments(state, method, org, project, run_id, rest, body);
@@ -9095,6 +9104,193 @@ fn coverage_summary(state: &AppState, org: &str, project: &str, build_id: &str, 
         "status": "completed",
         "project": project
     })
+}
+
+fn test_result_work_items(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() > 6 { &rest[6..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "élément de résultat introuvable")
+        };
+    }
+    let run_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(run) = get_item(state, org, project, "test/runs", run_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_run.clone());
+    let result_key = pct_decode(rest.get(4).map(String::as_str).unwrap_or(""));
+    let results_key = format!("test/runs/{stored_run}/results");
+    let Some(result) = get_item(state, org, project, &results_key, result_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "résultat introuvable");
+    };
+    let stored_result = value_key(&result["id"]);
+    let result_name = text_of(&result, "testCaseTitle")
+        .or_else(|| text_of(&result, "automatedTestName"))
+        .or_else(|| text_of(&result, "comment"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_result.clone());
+    let bucket = format!("test/runs/{stored_run}/results/{stored_result}/workitems");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_result_work_item(org, project, &stored_run, &run_name, &stored_result, &result_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, kind) = match result_work_item_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match result_work_item_create(
+                state,
+                org,
+                project,
+                &stored_run,
+                &run_name,
+                &stored_result,
+                &result_name,
+                &bucket,
+                name,
+                kind,
+            ) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    let Some(found) = locate_result_work_item(state, org, project, &bucket, key) else {
+        return fail(StatusCode::NOT_FOUND, "élément de résultat introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_result_work_item(org, project, &stored_run, &run_name, &stored_result, &result_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "élément de résultat introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn result_work_item_payload(body: &[u8]) -> Result<(String, String), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("élément de résultat illisible");
+    };
+    let name = required_metadata_text(object.get("name"), "nom absent")?;
+    let kind = match object.get("type") {
+        None => "Bug".to_string(),
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("type absent");
+            }
+            text.to_string()
+        }
+        Some(_) => return Err("type absent"),
+    };
+    Ok((name, kind))
+}
+
+fn result_work_item_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    result_id: &str,
+    result_name: &str,
+    bucket: &str,
+    name: String,
+    kind: String,
+) -> Result<Value, &'static str> {
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("élément de résultat existant");
+    }
+    let number = next_result_work_item_id(state, org);
+    let item = json!({
+        "id": format!("rw-{number}"),
+        "workItemId": number,
+        "name": name,
+        "type": kind
+    });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_result_work_item(org, project, run_id, run_name, result_id, result_name, item))
+}
+
+fn next_result_work_item_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.ends_with("/workitems") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("rw-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn locate_result_work_item(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket).into_iter().find(|item| {
+        value_key(&item["id"]) == key
+            || value_key(&item["workItemId"]) == key
+            || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn dress_result_work_item(
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    result_id: &str,
+    result_name: &str,
+    mut item: Value,
+) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("runName".into(), json!(run_name));
+        object.insert("resultId".into(), json!(result_id));
+        object.insert("resultName".into(), json!(result_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testresults/runs/{run_id}/results/{result_id}/workitems/{id}")),
+        );
+    }
+    item
 }
 
 fn test_result_custom_fields(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
