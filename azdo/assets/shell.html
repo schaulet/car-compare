@@ -177,6 +177,7 @@
       <a href="/__ORG__/__PROJECT__/_resultiters">Itérations de résultat</a>
       <a href="/__ORG__/__PROJECT__/_resultactions">Actions de résultat</a>
       <a href="/__ORG__/__PROJECT__/_iterfiles">Pièces d'itération</a>
+      <a href="/__ORG__/__PROJECT__/_iterparams">Paramètres d'itération</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4537,6 +4538,65 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_iterparams") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              for (const iteration of iterations.value || []) {
+                const parameters = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/parameterresults?api-version=7.1");
+                rows = rows.concat(parameters.value || []);
+              }
+            }
+          }
+          const table = rows.length ? "<table id='iter-params'><thead><tr><th></th><th>Nom</th><th>Itération</th><th>Valeur</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='iter-param-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-iteration='" + esc(item.iterationId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.iterationName) + "</td><td>" + esc(item.value) + "</td></tr>").join("") + "</tbody></table>" : "<p id='iter-param-empty' class='sub'>Aucun paramètre d'itération.</p>";
+          view.innerHTML = "<h1>Paramètres d'itération</h1><div class='command'><input id='iter-param-name' placeholder='Pompe' /><button id='iter-param-add' type='button'>Ajouter</button></div>" + table + "<p id='iter-param-error' class='error' hidden></p>";
+          document.getElementById("iter-param-add").onclick = async () => {
+            const error = document.getElementById("iter-param-error");
+            error.hidden = true;
+            const name = document.getElementById("iter-param-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              let iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              if (!(iterations.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1", { name: "Pompe" });
+                iterations = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations?api-version=7.1");
+              }
+              const iteration = (iterations.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/iterations/" + encodeURIComponent(iteration.id) + "/parameterresults?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.iter-param-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("iter-param-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/iterations/" + encodeURIComponent(button.dataset.iteration) + "/parameterresults/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
