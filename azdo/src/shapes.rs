@@ -55,6 +55,7 @@ pub fn dispatch(
         ("testplan", "plans") | ("test", "plans") => test_plans(state, method, org, project, rest, body),
         ("test", "configurations") | ("testplan", "configurations") => test_configurations(state, method, org, project, rest, body),
         ("testplan", "variables") => test_variables(state, method, org, project, rest, body),
+        ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
@@ -5454,6 +5455,186 @@ fn dress_configuration(org: &str, project: &str, area: &str, mut item: Value) ->
         object.entry("values").or_insert(json!([]));
         object.insert("project".into(), json!({"name": project}));
         object.insert("url".into(), json!(format!("/{org}/{project}/_apis/{area}/configurations/{id}")));
+    }
+    item
+}
+
+fn shared_parameters(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let key = "testplan/sharedparameters";
+    if rest.len() == 2 {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, key);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows.into_iter().map(|item| dress_shared_parameter(org, project, item)).collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match shared_parameter_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match shared_parameter_create(state, org, project, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() != 3 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "paramètre introuvable")
+        };
+    }
+    let id = pct_decode(&rest[2]);
+    if method == Method::GET {
+        return match locate_shared_parameter(state, org, project, id.trim()) {
+            Some(found) => Json(dress_shared_parameter(org, project, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "paramètre introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_shared_parameter(state, org, project, id.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "paramètre introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        let removed = delete_item(state, org, project, key, &stored_id);
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "paramètre introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn locate_shared_parameter(state: &AppState, org: &str, project: &str, key: &str) -> Option<Value> {
+    list(state, org, project, "testplan/sharedparameters")
+        .into_iter()
+        .find(|item| value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_shared_parameter_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get("testplan/sharedparameters") {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("sp-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn shared_parameter_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    parsed: (String, Vec<String>, Vec<Value>),
+) -> Result<Value, &'static str> {
+    let (name, param_names, param_data) = parsed;
+    if list(state, org, project, "testplan/sharedparameters")
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("paramètre existant");
+    }
+    let id = format!("sp-{}", next_shared_parameter_id(state, org));
+    let item = json!({
+        "id": id,
+        "name": name,
+        "paramNames": param_names,
+        "paramData": param_data
+    });
+    put_item(state, org, project, "testplan/sharedparameters", item.clone());
+    Ok(dress_shared_parameter(org, project, item))
+}
+
+fn shared_parameter_name(object: &Map<String, Value>) -> Result<String, &'static str> {
+    for key in ["name", "sharedParameterDataSetName"] {
+        if let Some(value) = object.get(key) {
+            let Some(text) = value.as_str().map(str::trim).filter(|text| !text.is_empty()) else {
+                return Err("nom absent");
+            };
+            return Ok(text.to_string());
+        }
+    }
+    Err("nom absent")
+}
+
+fn shared_parameter_payload(body: &[u8]) -> Result<(String, Vec<String>, Vec<Value>), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("paramètre illisible");
+    };
+    let name = shared_parameter_name(object)?;
+    let param_names = match object.get("paramNames") {
+        None => vec![name.clone()],
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut names = Vec::new();
+            for item in items {
+                let Some(value) = item.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                    return Err("nom de paramètre absent");
+                };
+                if names.iter().any(|stored: &String| stored.eq_ignore_ascii_case(value)) {
+                    return Err("nom de paramètre existant");
+                }
+                names.push(value.to_string());
+            }
+            names
+        }
+        Some(_) => return Err("nom de paramètre absent"),
+    };
+    let param_data = match object.get("paramData") {
+        None => {
+            let mut row = Map::new();
+            for param in &param_names {
+                row.insert(param.clone(), json!(""));
+            }
+            vec![Value::Object(row)]
+        }
+        Some(Value::Array(items)) => {
+            let mut rows = Vec::new();
+            for item in items {
+                let Some(row) = item.as_object() else {
+                    return Err("valeur absente");
+                };
+                if row.len() != param_names.len() || param_names.iter().any(|param| !row.contains_key(param)) {
+                    return Err("valeur absente");
+                }
+                let mut stored = Map::new();
+                for param in &param_names {
+                    let Some(value) = row.get(param).and_then(|value| value.as_str()) else {
+                        return Err("valeur absente");
+                    };
+                    stored.insert(param.clone(), json!(value));
+                }
+                rows.push(Value::Object(stored));
+            }
+            rows
+        }
+        Some(_) => return Err("valeur absente"),
+    };
+    Ok((name, param_names, param_data))
+}
+
+fn dress_shared_parameter(org: &str, project: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert("url".into(), json!(format!("/{org}/{project}/_apis/testplan/sharedparameters/{id}")));
     }
     item
 }

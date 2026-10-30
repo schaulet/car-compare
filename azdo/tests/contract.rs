@@ -31282,3 +31282,203 @@ async fn removing_one_kubernetes_cluster_keeps_the_sibling_the_machine_and_the_o
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Relais");
 }
+
+#[tokio::test]
+async fn removing_one_shared_parameter_keeps_the_sibling_the_cluster_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let sets = "/azurz/AzurzDemo/_apis/testplan/sharedparameters?api-version=7.1";
+
+    async fn create_set(app: &axum::Router, auth: &str, project: &str, body: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/testplan/sharedparameters?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(created["id"].as_str().unwrap().starts_with("sp-"), "{created}");
+        assert_eq!(created["project"], project);
+        created
+    }
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", sets, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 0, "{body}");
+    let (status, body, _) = call(&app, "DELETE", sets, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("paramètre illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"name":" "}"#, r#"{"name":1}"#, r#"{"sharedParameterDataSetName":""}"#] {
+        let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"name":"Pompe","paramNames":[]}"#, r#"{"name":"Pompe","paramNames":[""]}"#, r#"{"name":"Pompe","paramNames":"login"}"#] {
+        let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom de paramètre absent"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(r#"{"name":"Pompe","paramNames":["login","Login"]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de paramètre existant"), "{body}");
+    for payload in [
+        r#"{"name":"Pompe","paramNames":["login"],"paramData":"ada"}"#,
+        r#"{"name":"Pompe","paramNames":["login"],"paramData":[1]}"#,
+        r#"{"name":"Pompe","paramNames":["login"],"paramData":[{"login":1}]}"#,
+        r#"{"name":"Pompe","paramNames":["login"],"paramData":[{}]}"#,
+        r#"{"name":"Pompe","paramNames":["login"],"paramData":[{"login":"ada","extra":"x"}]}"#,
+    ] {
+        let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("valeur absente"), "{body}");
+    }
+
+    let (status, env_body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/distributedtask/environments?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Ligne","description":""}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{env_body}");
+    let environment: serde_json::Value = serde_json::from_str(&env_body).unwrap();
+    let environment_id = match &environment["id"] {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Number(value) => value.to_string(),
+        _ => panic!("{environment}"),
+    };
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{environment_id}/providers/kubernetes?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cluster: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let pompe = create_set(&app, &auth, "AzurzDemo", r#"{"name":"Pompe"}"#).await;
+    assert_eq!(pompe["paramNames"][0], "Pompe");
+    assert_eq!(pompe["paramData"][0]["Pompe"], "");
+    let relais = create_set(
+        &app,
+        &auth,
+        "AzurzDemo",
+        r#"{"sharedParameterDataSetName":"Relais","paramNames":["login","role"],"paramData":[{"login":"ada","role":"ligne"}]}"#,
+    )
+    .await;
+    assert_eq!(relais["name"], "Relais");
+    assert_eq!(relais["paramData"][0]["login"], "ada");
+    assert_eq!(relais["paramData"][0]["role"], "ligne");
+    let (status, body, _) = call(&app, "POST", sets, Some(&auth), None, "application/json", Some(r#"{"name":"pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("paramètre existant"), "{body}");
+    let atelier = create_set(&app, &auth, "Atelier", r#"{"name":"Pompe","paramNames":["atelier"],"paramData":[{"atelier":"cave"}]}"#).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/testplan/sharedparameters/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paramètre introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", sets, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 2, "{body}");
+    let (status, body, _) = call(&app, "GET", "/azurz/AzurzDemo/_apis/testplan/sharedparameters/Relais?api-version=7.1", Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"], relais["id"]);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/testplan/sharedparameters/{}?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/testplan/sharedparameters/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/testplan/sharedparameters/{}/extra?api-version=7.1", pompe["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paramètre introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/testplan/sharedparameters/{}?api-version=7.1", pompe["id"].as_str().unwrap());
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", sets, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert_eq!(kept["value"][0]["name"], "Relais");
+    assert_eq!(kept["value"][0]["paramNames"][0], "login");
+    assert_eq!(kept["value"][0]["paramData"][0]["role"], "ligne");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/distributedtask/environments/{environment_id}/providers/kubernetes/{}?api-version=7.1", cluster["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Pompe");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/testplan/sharedparameters/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["name"], "Pompe");
+    assert_eq!(kept_other["paramData"][0]["atelier"], "cave");
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("paramètre introuvable"), "{body}");
+}
