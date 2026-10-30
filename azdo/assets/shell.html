@@ -181,6 +181,7 @@
       <a href="/__ORG__/__PROJECT__/_actionfiles">Pièces d'action</a>
       <a href="/__ORG__/__PROJECT__/_actionparams">Paramètres d'action</a>
       <a href="/__ORG__/__PROJECT__/_resultlogs">Journaux de résultat</a>
+      <a href="/__ORG__/__PROJECT__/_subresults">Sous-résultats</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -4786,6 +4787,56 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/logs/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_subresults") {
+          const runs = await collection("test/runs");
+          let rows = [];
+          for (const run of runs) {
+            const results = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results?api-version=7.1");
+            for (const result of results.value || []) {
+              const subs = await api("GET", root + "/test/runs/" + encodeURIComponent(run.id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1");
+              rows = rows.concat(subs.value || []);
+            }
+          }
+          const table = rows.length ? "<table id='sub-results'><thead><tr><th></th><th>Nom</th><th>Résultat</th><th>Commentaire</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='sub-result-remove' data-run='" + esc(item.runId) + "' data-result='" + esc(item.resultId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.resultName) + "</td><td>" + esc(item.comment) + "</td></tr>").join("") + "</tbody></table>" : "<p id='sub-result-empty' class='sub'>Aucun sous-résultat.</p>";
+          view.innerHTML = "<h1>Sous-résultats</h1><div class='command'><input id='sub-result-name' placeholder='Pompe' /><button id='sub-result-add' type='button'>Ajouter</button></div>" + table + "<p id='sub-result-error' class='error' hidden></p>";
+          document.getElementById("sub-result-add").onclick = async () => {
+            const error = document.getElementById("sub-result-error");
+            error.hidden = true;
+            const name = document.getElementById("sub-result-name").value;
+            try {
+              let current = await collection("test/runs");
+              if (!current.length) {
+                await api("POST", root + "/test/runs?api-version=7.1", { name: "Pompe" });
+                current = await collection("test/runs");
+              }
+              let results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              if (!(results.value || []).length) {
+                await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1", [{ testCaseTitle: "Pompe" }]);
+                results = await api("GET", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results?api-version=7.1");
+              }
+              const result = (results.value || [])[0];
+              await api("POST", root + "/test/runs/" + encodeURIComponent(current[0].id) + "/results/" + encodeURIComponent(result.id) + "/subresults?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.sub-result-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("sub-result-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/test/runs/" + encodeURIComponent(button.dataset.run) + "/results/" + encodeURIComponent(button.dataset.result) + "/subresults/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
