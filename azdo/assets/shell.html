@@ -198,6 +198,7 @@
       <a href="/__ORG__/__PROJECT__/_buildprops">Propriétés de build</a>
       <a href="/__ORG__/__PROJECT__/_defprops">Propriétés de définition</a>
       <a href="/__ORG__/__PROJECT__/_deftags">Étiquettes de définition</a>
+      <a href="/__ORG__/__PROJECT__/_defrevs">Révisions de définition</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5510,6 +5511,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/build/definitions/" + encodeURIComponent(button.dataset.definition) + "/tags/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_defrevs") {
+          const definitions = await collection("build/definitions");
+          let rows = [];
+          for (const definition of definitions) {
+            const revisions = await api("GET", root + "/build/definitions/" + encodeURIComponent(definition.id) + "/revisions?api-version=7.1");
+            rows = rows.concat(revisions.value || []);
+          }
+          const table = rows.length ? "<table id='def-revs'><thead><tr><th></th><th>Commentaire</th><th>Définition</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='def-rev-remove' data-id='" + esc(item.id) + "' data-comment='" + esc(item.comment) + "' data-definition='" + esc(item.definitionId) + "'>Retirer</button></td><td>" + esc(item.comment) + "</td><td>" + esc(item.definitionName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='def-rev-empty' class='sub'>Aucune révision de définition.</p>";
+          view.innerHTML = "<h1>Révisions de définition</h1><div class='command'><input id='def-rev-comment' placeholder='Pompe' /><button id='def-rev-add' type='button'>Ajouter</button></div>" + table + "<p id='def-rev-error' class='error' hidden></p>";
+          document.getElementById("def-rev-add").onclick = async () => {
+            const error = document.getElementById("def-rev-error");
+            error.hidden = true;
+            const comment = document.getElementById("def-rev-comment").value;
+            try {
+              let current = await collection("build/definitions");
+              if (!current.length) {
+                await api("POST", root + "/build/definitions?api-version=7.1", { name: comment || "Pompe" });
+                current = await collection("build/definitions");
+              }
+              const definition = current[0];
+              await api("POST", root + "/build/definitions/" + encodeURIComponent(definition.id) + "/revisions?api-version=7.1", { comment: comment });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.def-rev-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("def-rev-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/build/definitions/" + encodeURIComponent(button.dataset.definition) + "/revisions/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
