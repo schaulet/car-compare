@@ -58,6 +58,7 @@ pub fn dispatch(
         ("testplan", "sharedparameters") => shared_parameters(state, method, org, project, rest, body),
         ("test", "runs") => test_runs(state, method, org, project, rest, body),
         ("testresults", "testmethods") => test_method_links(state, method, org, project, rest, query, body),
+        ("testresults", "runs") => test_log_store(state, method, org, project, rest, query, body),
         ("wiki", "wikis") => wikis(state, method, org, project, rest, query, body),
         ("packaging", "feeds") => feeds(state, method, org, project, rest, body),
         ("release", "folders") => release_folders(state, method, org, project, rest, body),
@@ -6123,18 +6124,20 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         };
     }
     if method == Method::DELETE && rest.len() == 3 {
-        if get_item(state, org, project, key, run_id).is_none() {
+        let Some(run) = get_item(state, org, project, key, run_id) else {
             return fail(StatusCode::NOT_FOUND, "exécution introuvable");
-        }
-        let results_key = format!("test/runs/{run_id}/results");
+        };
+        let stored_run = value_key(&run["id"]);
+        let results_key = format!("test/runs/{stored_run}/results");
         state.write(|db| {
             if let Some(stored) = db.project_mut(org, project) {
                 if let Some(bucket) = stored.buckets.get_mut(key) {
-                    bucket.remove(run_id);
+                    bucket.remove(&stored_run);
                 }
                 stored.buckets.remove(&results_key);
-                stored.buckets.remove(&format!("test/runs/{run_id}/attachments"));
-                let prefix = format!("test/runs/{run_id}/results/");
+                stored.buckets.remove(&format!("test/runs/{stored_run}/attachments"));
+                stored.buckets.remove(&format!("testresults/runs/{stored_run}/testattachments"));
+                let prefix = format!("test/runs/{stored_run}/results/");
                 let nested: Vec<String> = stored.buckets.keys().filter(|key| key.starts_with(&prefix)).cloned().collect();
                 for key in nested {
                     stored.buckets.remove(&key);
@@ -8483,6 +8486,171 @@ fn dress_sub_result_attachment(
             json!(format!(
                 "/{org}/{project}/_apis/test/runs/{run_id}/results/{result_id}/subresults/{sub_id}/attachments/{id}"
             )),
+        );
+    }
+    item
+}
+
+fn test_log_store(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    rest: &[String],
+    query: &str,
+    body: &[u8],
+) -> Response {
+    if rest.get(3).is_none_or(|part| !part.eq_ignore_ascii_case("testattachments")) {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    let run_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(run) = get_item(state, org, project, "test/runs", run_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_run.clone());
+    let bucket = format!("testresults/runs/{stored_run}/testattachments");
+    if tail.is_empty() {
+        if method == Method::GET {
+            if let Some(filename) = query_text(query, "filename") {
+                return match locate_run_attachment(state, org, project, &bucket, &filename) {
+                    Some(found) => Json(dress_log_store_file(org, project, &stored_run, &run_name, found)).into_response(),
+                    None => fail(StatusCode::NOT_FOUND, "pièce introuvable"),
+                };
+            }
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_log_store_file(org, project, &stored_run, &run_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match run_attachment_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match log_store_file_create(state, org, project, &stored_run, &run_name, &bucket, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        if method == Method::DELETE {
+            let Some(filename) = query_text(query, "filename") else {
+                return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+            };
+            let Some(found) = locate_run_attachment(state, org, project, &bucket, &filename) else {
+                return fail(StatusCode::NOT_FOUND, "pièce introuvable");
+            };
+            let stored_id = value_key(&found["id"]);
+            return if delete_item(state, org, project, &bucket, &stored_id) {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                fail(StatusCode::NOT_FOUND, "pièce introuvable")
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    if method == Method::GET {
+        return match locate_run_attachment(state, org, project, &bucket, key) {
+            Some(found) => Json(dress_log_store_file(org, project, &stored_run, &run_name, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "pièce introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_run_attachment(state, org, project, &bucket, key) else {
+            return fail(StatusCode::NOT_FOUND, "pièce introuvable");
+        };
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn log_store_file_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    bucket: &str,
+    parsed: (String, String, String, Option<String>),
+) -> Result<Value, &'static str> {
+    let (file_name, comment, attachment_type, stream) = parsed;
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "fileName").is_some_and(|stored| stored.eq_ignore_ascii_case(&file_name)))
+    {
+        return Err("pièce existante");
+    }
+    let id = format!("ls-{}", next_log_store_file_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "fileName": file_name,
+        "comment": comment,
+        "attachmentType": attachment_type,
+        "runId": run_id
+    });
+    if let Some(stream) = stream {
+        item["stream"] = json!(stream);
+    }
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_log_store_file(org, project, run_id, run_name, item))
+}
+
+fn next_log_store_file_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.starts_with("testresults/runs/") && key.ends_with("/testattachments") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("ls-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn dress_log_store_file(org: &str, project: &str, run_id: &str, run_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("runName".into(), json!(run_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testresults/runs/{run_id}/testattachments/{id}")),
         );
     }
     item
