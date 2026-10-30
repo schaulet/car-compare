@@ -10947,6 +10947,9 @@ fn wikis(
     if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("pagemoves")) {
         return move_wiki_page(state, method, org, project, wiki_id, body);
     }
+    if rest.get(3).is_some_and(|value| value.eq_ignore_ascii_case("attachments")) {
+        return wiki_attachments(state, method, org, project, wiki_id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("pages") && (method == Method::GET || method == Method::PUT || method == Method::POST || method == Method::DELETE) {
         let resolved = resolve_wiki(state, org, project, wiki_id);
         let Some(wiki) = resolved else {
@@ -10989,6 +10992,16 @@ fn wikis(
                 if let Some(bucket) = stored.buckets.get_mut(key) {
                     bucket.remove(&stored_id);
                 }
+                let prefix = format!("wiki/wikis/{stored_id}/");
+                let gone: Vec<String> = stored
+                    .buckets
+                    .keys()
+                    .filter(|bucket_key| bucket_key.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                for bucket_key in gone {
+                    stored.buckets.remove(&bucket_key);
+                }
             }
         });
         return StatusCode::NO_CONTENT.into_response();
@@ -11000,6 +11013,139 @@ fn wikis(
         };
     }
     fail(StatusCode::NOT_FOUND, "wiki introuvable")
+}
+
+fn wiki_attachments(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    wiki_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    let Some(wiki) = resolve_wiki(state, org, project, wiki_id) else {
+        return fail(StatusCode::NOT_FOUND, "wiki introuvable");
+    };
+    let stored_wiki = value_key(&wiki["id"]);
+    let wiki_name = text_of(&wiki, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_wiki.clone());
+    let bucket = format!("wiki/wikis/{stored_wiki}/attachments");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_wiki_attachment(org, project, &stored_wiki, &wiki_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match run_attachment_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match wiki_attachment_create(state, org, project, &stored_wiki, &wiki_name, &bucket, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let Some(found) = locate_run_attachment(state, org, project, &bucket, key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "pièce introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_wiki_attachment(org, project, &stored_wiki, &wiki_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "pièce introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn next_wiki_attachment_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.starts_with("wiki/wikis/") && key.ends_with("/attachments") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("wa-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn wiki_attachment_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    wiki_id: &str,
+    wiki_name: &str,
+    bucket: &str,
+    parsed: (String, String, String, Option<String>),
+) -> Result<Value, &'static str> {
+    let (file_name, comment, attachment_type, stream) = parsed;
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "fileName").is_some_and(|stored| stored.eq_ignore_ascii_case(&file_name)))
+    {
+        return Err("pièce existante");
+    }
+    let id = format!("wa-{}", next_wiki_attachment_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "fileName": file_name,
+        "comment": comment,
+        "attachmentType": attachment_type,
+        "wikiId": wiki_id
+    });
+    if let Some(stream) = stream {
+        item["stream"] = json!(stream);
+    }
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_wiki_attachment(org, project, wiki_id, wiki_name, item))
+}
+
+fn dress_wiki_attachment(org: &str, project: &str, wiki_id: &str, wiki_name: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("wikiId".into(), json!(wiki_id));
+        object.insert("wikiName".into(), json!(wiki_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/wiki/wikis/{wiki_id}/attachments/{id}")),
+        );
+    }
+    item
 }
 
 fn feeds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {

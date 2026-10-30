@@ -193,6 +193,7 @@
       <a href="/__ORG__/__PROJECT__/_resultfields">Champs de résultat</a>
       <a href="/__ORG__/__PROJECT__/_resultitems">Éléments de résultat</a>
       <a href="/__ORG__/__PROJECT__/_testcases">Cas de test</a>
+      <a href="/__ORG__/__PROJECT__/_wikiattachments">Pièces de wiki</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5295,6 +5296,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/test/testcases/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_wikiattachments") {
+          const wikis = await collection("wiki/wikis");
+          let rows = [];
+          for (const wiki of wikis) {
+            const files = await api("GET", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/attachments?api-version=7.1");
+            rows = rows.concat(files.value || []);
+          }
+          const table = rows.length ? "<table id='wiki-files'><thead><tr><th></th><th>Nom</th><th>Wiki</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='wiki-file-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.fileName) + "' data-wiki='" + esc(item.wikiId) + "'>Retirer</button></td><td>" + esc(item.fileName) + "</td><td>" + esc(item.wikiName) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wiki-file-empty' class='sub'>Aucune pièce de wiki.</p>";
+          view.innerHTML = "<h1>Pièces de wiki</h1><div class='command'><input id='wiki-file-name' placeholder='Pompe' /><button id='wiki-file-add' type='button'>Ajouter</button></div>" + table + "<p id='wiki-file-error' class='error' hidden></p>";
+          document.getElementById("wiki-file-add").onclick = async () => {
+            const error = document.getElementById("wiki-file-error");
+            error.hidden = true;
+            const name = document.getElementById("wiki-file-name").value;
+            try {
+              let current = await collection("wiki/wikis");
+              if (!current.length) {
+                await api("POST", root + "/wiki/wikis?api-version=7.1", { name: "Pompe" });
+                current = await collection("wiki/wikis");
+              }
+              const wiki = current[0];
+              await api("POST", root + "/wiki/wikis/" + encodeURIComponent(wiki.id) + "/attachments?api-version=7.1", { fileName: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.wiki-file-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("wiki-file-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/wiki/wikis/" + encodeURIComponent(button.dataset.wiki) + "/attachments/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
