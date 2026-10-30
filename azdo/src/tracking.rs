@@ -1790,6 +1790,7 @@ const BEHAVIORS: &str = "work/processes/behaviors";
 const WORK_ITEM_PAGES: &str = "work/processes/pages";
 const WORK_ITEM_GROUPS: &str = "work/processes/groups";
 const WORK_ITEM_CONTROLS: &str = "work/processes/controls";
+const TYPE_BEHAVIORS: &str = "work/processes/witbehaviors";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1908,6 +1909,7 @@ pub fn work_processes(
             drop_work_item_pages(stored, &stored_id, None);
             drop_work_item_groups(stored, &stored_id, None, None);
             drop_work_item_controls(stored, &stored_id, None, None);
+            drop_type_behaviors(stored, &stored_id, None, None);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -2166,6 +2168,9 @@ fn work_item_types(
     if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("layout")) {
         return work_item_pages(state, method, org, project, process_key.trim(), type_tail, body);
     }
+    if type_tail.len() >= 2 && type_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("behaviors")) {
+        return work_item_type_behaviors(state, method, org, project, process_key.trim(), type_tail, body);
+    }
     if type_tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -2227,6 +2232,7 @@ fn work_item_types(
             drop_work_item_pages(stored, &process_id, Some(reference.as_str()));
             drop_work_item_groups(stored, &process_id, Some(reference.as_str()), None);
             drop_work_item_controls(stored, &process_id, Some(reference.as_str()), None);
+            drop_type_behaviors(stored, &process_id, Some(reference.as_str()), None);
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -3487,10 +3493,14 @@ fn work_behaviors(state: &AppState, method: &Method, org: &str, project: Option<
             return fail(StatusCode::NOT_FOUND, "comportement introuvable");
         };
         let stored_id = item_id(&found);
+        let reference_name = item_text(&found, "referenceName").unwrap_or_default();
         let removed = state.write(|db| -> bool {
-            db.project_mut(org, &owner)
-                .and_then(|stored| stored.buckets.get_mut(BEHAVIORS))
-                .is_some_and(|bucket| bucket.remove(&stored_id))
+            let Some(stored) = db.project_mut(org, &owner) else {
+                return false;
+            };
+            drop_type_behaviors(stored, &process_id, None, Some(stored_id.as_str()));
+            drop_type_behaviors(stored, &process_id, None, Some(reference_name.as_str()));
+            stored.buckets.get_mut(BEHAVIORS).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
             StatusCode::NO_CONTENT.into_response()
@@ -3696,6 +3706,316 @@ fn dress_behavior(org: &str, project: &str, mut item: Value) -> Value {
         }
     }
     item
+}
+
+fn system_type_behavior(parent_id: &str, type_reference: &str) -> Option<SystemBehavior> {
+    let behavior_ref = match type_reference.rsplit('.').next().unwrap_or(type_reference) {
+        "Epic" => "Microsoft.VSTS.Common.EpicBacklogBehavior",
+        "Feature" => "Microsoft.VSTS.Common.FeatureBacklogBehavior",
+        "Task" => "Microsoft.VSTS.Common.TaskBacklogBehavior",
+        "Bug" | "UserStory" | "ProductBacklogItem" | "Requirement" | "Issue" => "Microsoft.VSTS.Common.RequirementBacklogBehavior",
+        _ => return None,
+    };
+    system_behaviors(parent_id).into_iter().find(|item| item.reference == behavior_ref)
+}
+
+fn work_item_type_behaviors(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    process_key: &str,
+    type_tail: &[String],
+    body: &[u8],
+) -> Response {
+    let behavior_tail = &type_tail[2..];
+    if behavior_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "rattachement introuvable")
+        };
+    }
+    let Some((owner, process_id, reference, system_type)) = resolve_state_type(state, org, project, process_key, type_tail[0].trim()) else {
+        return if system_process(process_key).is_none() && locate_process(state, org, project, process_key).is_none() {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    };
+    let Some((_, _, parent_id)) = resolve_type_process(state, org, project, process_key) else {
+        return fail(StatusCode::NOT_FOUND, "processus introuvable");
+    };
+    let inherited = system_type_behavior(&parent_id, &reference);
+    if behavior_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = Vec::new();
+            if let Some(system) = inherited.as_ref() {
+                rows.push(dress_system_type_behavior(org, &owner, &process_id, &reference, system));
+            }
+            rows.extend(list_type_behaviors(state, org, &owner, &process_id, &reference).into_iter().map(|item| dress_type_behavior(org, &owner, item)));
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match type_behavior_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_type {
+                return fail(StatusCode::BAD_REQUEST, "type système");
+            }
+            return match type_behavior_create(state, org, &owner, &process_id, &parent_id, &reference, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&behavior_tail[0]);
+    if let Some(system) = inherited.as_ref().filter(|item| behavior_matches_system(item, key.trim())) {
+        if method == Method::GET {
+            return Json(dress_system_type_behavior(org, &owner, &process_id, &reference, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "comportement système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if method == Method::GET {
+        return match locate_type_behavior(state, org, &owner, &process_id, &reference, key.trim()) {
+            Some(found) => Json(dress_type_behavior(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "rattachement introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_type_behavior(state, org, &owner, &process_id, &reference, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "rattachement introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(TYPE_BEHAVIORS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "rattachement introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn list_type_behaviors(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(TYPE_BEHAVIORS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                item_text(item, "processId").is_some_and(|stored| stored == process_id)
+                    && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+            })
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_type_behavior(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, key: &str) -> Option<Value> {
+    list_type_behaviors(state, org, project, process_id, reference).into_iter().find(|item| {
+        item_id(item) == key
+            || item_text(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+            || item_text(item, "referenceName").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+            || item_text(item, "behaviorStorageId").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn type_behavior_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    parent_id: &str,
+    reference: &str,
+    parsed: (String, bool),
+) -> Result<Value, &'static str> {
+    let (key, is_default) = parsed;
+    let resolved = resolve_attachable_behavior(state, org, project, process_id, parent_id, &key)?;
+    if system_type_behavior(parent_id, reference).is_some_and(|item| behavior_matches_system(&item, &resolved.reference)) {
+        return Err("comportement existant");
+    }
+    let mut item = json!({
+        "id": resolved.reference,
+        "referenceName": resolved.reference,
+        "name": resolved.name,
+        "color": resolved.color,
+        "rank": resolved.rank,
+        "isDefault": is_default,
+        "behaviorStorageId": resolved.storage_id,
+        "customizationType": "custom",
+        "processId": process_id,
+        "workItemType": reference
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("rattachement introuvable");
+        };
+        let existing = stored.list_bucket(TYPE_BEHAVIORS);
+        let same_type = existing.iter().filter(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+        });
+        if same_type.clone().any(|stored| item_text(stored, "referenceName").is_some_and(|current| current.eq_ignore_ascii_case(&resolved.reference))) {
+            return Err("comportement existant");
+        }
+        if is_default && same_type.clone().any(|stored| stored.get("isDefault").and_then(|value| value.as_bool()).unwrap_or(false)) {
+            return Err("défaut existant");
+        }
+        if let Some(object) = item.as_object_mut() {
+            object.insert("isDefault".into(), json!(is_default));
+        }
+        stored.put_bucket(TYPE_BEHAVIORS, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_type_behavior(org, project, item))
+}
+
+struct AttachableBehavior {
+    reference: String,
+    name: String,
+    color: String,
+    rank: i64,
+    storage_id: String,
+}
+
+fn resolve_attachable_behavior(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    parent_id: &str,
+    key: &str,
+) -> Result<AttachableBehavior, &'static str> {
+    if let Some(system) = system_behaviors(parent_id).into_iter().find(|item| behavior_matches_system(item, key)) {
+        if system.is_abstract {
+            return Err("comportement abstrait");
+        }
+        return Ok(AttachableBehavior {
+            reference: system.reference.to_string(),
+            name: system.name.to_string(),
+            color: system.color.to_string(),
+            rank: system.rank,
+            storage_id: system.reference.to_string(),
+        });
+    }
+    if let Some(custom) = locate_behavior(state, org, project, process_id, key) {
+        return Ok(AttachableBehavior {
+            reference: item_text(&custom, "referenceName").unwrap_or_else(|| item_id(&custom)),
+            name: item_text(&custom, "name").unwrap_or_default(),
+            color: item_text(&custom, "color").unwrap_or_default(),
+            rank: custom.get("rank").and_then(|value| value.as_i64()).unwrap_or(0),
+            storage_id: item_id(&custom),
+        });
+    }
+    Err("comportement inconnu")
+}
+
+fn type_behavior_payload(body: &[u8]) -> Result<(String, bool), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("rattachement illisible");
+    };
+    let key = match object.get("behavior") {
+        Some(Value::Object(behavior)) => behavior_key(behavior.get("id").or_else(|| behavior.get("name")))?,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("comportement absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("comportement absent"),
+        None => behavior_key(object.get("behaviorId").or_else(|| object.get("id")).or_else(|| object.get("name")))?,
+    };
+    let is_default = match object.get("isDefault") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("défaut absent"),
+    };
+    Ok((key, is_default))
+}
+
+fn behavior_key(value: Option<&Value>) -> Result<String, &'static str> {
+    match value {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Err("comportement absent")
+            } else {
+                Ok(value.to_string())
+            }
+        }
+        Some(_) => Err("comportement absent"),
+        None => Err("comportement absent"),
+    }
+}
+
+fn dress_system_type_behavior(org: &str, project: &str, process_id: &str, reference: &str, item: &SystemBehavior) -> Value {
+    json!({
+        "id": item.reference,
+        "referenceName": item.reference,
+        "name": item.name,
+        "color": item.color,
+        "rank": item.rank,
+        "isDefault": true,
+        "behaviorStorageId": item.reference,
+        "customizationType": "system",
+        "processId": process_id,
+        "workItemType": reference,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/behaviors/{}", item.reference)
+    })
+}
+
+fn dress_type_behavior(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "workItemType").unwrap_or_default();
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/behaviors/{id}")),
+        );
+    }
+    item
+}
+
+fn drop_type_behaviors(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>, behavior_key: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(TYPE_BEHAVIORS) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            item_text(item, "processId").is_some_and(|process| process == process_id)
+                && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+                && behavior_key.is_none_or(|key| {
+                    item_text(item, "referenceName").is_some_and(|stored| stored == key)
+                        || item_text(item, "behaviorStorageId").is_some_and(|stored| stored == key)
+                        || item_id(item) == key
+                })
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
 }
 
 fn drop_behaviors(stored: &mut crate::store::ProjectData, process_id: &str) {
