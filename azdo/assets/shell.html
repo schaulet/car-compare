@@ -201,6 +201,7 @@
       <a href="/__ORG__/__PROJECT__/_defrevs">Révisions de définition</a>
       <a href="/__ORG__/__PROJECT__/_defmetrics">Métriques de définition</a>
       <a href="/__ORG__/__PROJECT__/_buildchanges">Changements de build</a>
+      <a href="/__ORG__/__PROJECT__/_builditems">Éléments de build</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -5639,6 +5640,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/changes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_builditems") {
+          const builds = await collection("build/builds");
+          let rows = [];
+          for (const build of builds) {
+            const items = await api("GET", root + "/build/builds/" + encodeURIComponent(build.id) + "/workitems?api-version=7.1");
+            rows = rows.concat(items.value || []);
+          }
+          const table = rows.length ? "<table id='build-items'><thead><tr><th></th><th>Titre</th><th>Build</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='build-item-remove' data-id='" + esc(item.id) + "' data-title='" + esc(item.title) + "' data-build='" + esc(item.buildId) + "'>Retirer</button></td><td>" + esc(item.title) + "</td><td>" + esc(item.buildNumber) + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-item-empty' class='sub'>Aucun élément de build.</p>";
+          view.innerHTML = "<h1>Éléments de build</h1><div class='command'><input id='build-item-title' placeholder='Pompe' /><button id='build-item-add' type='button'>Ajouter</button></div>" + table + "<p id='build-item-error' class='error' hidden></p>";
+          document.getElementById("build-item-add").onclick = async () => {
+            const error = document.getElementById("build-item-error");
+            error.hidden = true;
+            const title = document.getElementById("build-item-title").value;
+            try {
+              let current = await collection("build/builds");
+              if (!current.length) {
+                await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
+                current = await collection("build/builds");
+              }
+              const build = current[0];
+              await api("POST", root + "/build/builds/" + encodeURIComponent(build.id) + "/workitems?api-version=7.1", { title: title });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.build-item-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("build-item-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/workitems/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
