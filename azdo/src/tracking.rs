@@ -1788,6 +1788,7 @@ const WORK_ITEM_RULES: &str = "work/processes/rules";
 const WORK_ITEM_TYPE_FIELDS: &str = "work/processes/typefields";
 const BEHAVIORS: &str = "work/processes/behaviors";
 const WORK_ITEM_PAGES: &str = "work/processes/pages";
+const WORK_ITEM_GROUPS: &str = "work/processes/groups";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1904,6 +1905,7 @@ pub fn work_processes(
             drop_work_item_type_fields(stored, &stored_id, None);
             drop_behaviors(stored, &stored_id);
             drop_work_item_pages(stored, &stored_id, None);
+            drop_work_item_groups(stored, &stored_id, None, None);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -2221,6 +2223,7 @@ fn work_item_types(
             drop_work_item_rules(stored, &process_id, Some(reference.as_str()));
             drop_work_item_type_fields(stored, &process_id, Some(reference.as_str()));
             drop_work_item_pages(stored, &process_id, Some(reference.as_str()));
+            drop_work_item_groups(stored, &process_id, Some(reference.as_str()), None);
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -3731,6 +3734,9 @@ fn work_item_pages(
     body: &[u8],
 ) -> Response {
     let layout_tail = &type_tail[2..];
+    if layout_tail.first().is_some_and(|part| part.eq_ignore_ascii_case("groups")) {
+        return work_item_groups(state, method, org, project, process_key, type_tail, body);
+    }
     if layout_tail.first().is_none_or(|part| !part.eq_ignore_ascii_case("pages")) {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -3802,10 +3808,13 @@ fn work_item_pages(
             return fail(StatusCode::NOT_FOUND, "page introuvable");
         };
         let stored_id = item_id(&found);
+        let page_label = item_text(&found, "label").unwrap_or_default();
         let removed = state.write(|db| -> bool {
-            db.project_mut(org, &owner)
-                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_PAGES))
-                .is_some_and(|bucket| bucket.remove(&stored_id))
+            let Some(stored) = db.project_mut(org, &owner) else {
+                return false;
+            };
+            drop_work_item_groups(stored, &process_id, Some(reference.as_str()), Some(page_label.as_str()));
+            stored.buckets.get_mut(WORK_ITEM_PAGES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
             StatusCode::NO_CONTENT.into_response()
@@ -4024,6 +4033,370 @@ fn dress_page(org: &str, project: &str, mut item: Value) -> Value {
         );
     }
     item
+}
+
+struct SystemGroup {
+    id: &'static str,
+    label: &'static str,
+    order: i64,
+}
+
+const SYSTEM_GROUPS: &[SystemGroup] = &[
+    SystemGroup { id: "System.Description", label: "Description", order: 1 },
+    SystemGroup { id: "System.Planning", label: "Planning", order: 2 },
+    SystemGroup { id: "System.Classification", label: "Classification", order: 3 },
+    SystemGroup { id: "System.Effort", label: "Effort", order: 4 },
+];
+
+fn work_item_groups(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    process_key: &str,
+    type_tail: &[String],
+    body: &[u8],
+) -> Response {
+    let group_tail = &type_tail[3..];
+    if group_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        };
+    }
+    let Some((owner, process_id, reference, system_type)) = resolve_state_type(state, org, project, process_key, type_tail[0].trim()) else {
+        return if system_process(process_key).is_none() && locate_process(state, org, project, process_key).is_none() {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    };
+    if group_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows: Vec<Value> = SYSTEM_GROUPS.iter().map(|item| dress_system_group(org, &owner, &process_id, &reference, item)).collect();
+            rows.extend(list_groups(state, org, &owner, &process_id, &reference).into_iter().map(|item| dress_group(org, &owner, item)));
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match group_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_type {
+                return fail(StatusCode::BAD_REQUEST, "type système");
+            }
+            return match group_create(state, org, &owner, &process_id, &reference, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&group_tail[0]);
+    if let Some(system) = SYSTEM_GROUPS.iter().find(|item| item.id.eq_ignore_ascii_case(key.trim()) || item.label.eq_ignore_ascii_case(key.trim())) {
+        if method == Method::GET {
+            return Json(dress_system_group(org, &owner, &process_id, &reference, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "groupe système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if system_type {
+        return if method == Method::DELETE || method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    if method == Method::GET {
+        return match locate_group(state, org, &owner, &process_id, &reference, key.trim()) {
+            Some(found) => Json(dress_group(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "groupe introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_group(state, org, &owner, &process_id, &reference, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_GROUPS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "groupe introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn list_groups(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(WORK_ITEM_GROUPS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                item_text(item, "processId").is_some_and(|stored| stored == process_id)
+                    && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+            })
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_group(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, key: &str) -> Option<Value> {
+    list_groups(state, org, project, process_id, reference)
+        .into_iter()
+        .find(|item| item_id(item) == key || item_text(item, "label").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_group_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_GROUPS) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("group-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn group_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    reference: &str,
+    parsed: (String, bool, Option<i64>, String, String, Value),
+) -> Result<Value, &'static str> {
+    let (label, visible, order, page_label, section_id, controls) = parsed;
+    if SYSTEM_GROUPS.iter().any(|item| item.label.eq_ignore_ascii_case(&label) || item.id.eq_ignore_ascii_case(&label)) {
+        return Err("groupe existant");
+    }
+    let page_label = canonical_page_label(state, org, project, process_id, reference, &page_label)?;
+    let id = format!("group-{}", next_group_id(state, org));
+    let mut item = json!({
+        "id": id,
+        "label": label,
+        "visible": visible,
+        "pageLabel": page_label,
+        "sectionId": section_id,
+        "controls": controls,
+        "customizationType": "custom",
+        "processId": process_id,
+        "workItemType": reference
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("groupe introuvable");
+        };
+        let existing = stored.list_bucket(WORK_ITEM_GROUPS);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                && item_text(stored, "label").is_some_and(|current| current.eq_ignore_ascii_case(&label))
+        }) {
+            return Err("groupe existant");
+        }
+        let order = order.unwrap_or_else(|| {
+            existing
+                .iter()
+                .filter(|stored| {
+                    item_text(stored, "processId").is_some_and(|process| process == process_id)
+                        && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                })
+                .filter_map(|stored| stored.get("order").and_then(|value| value.as_i64()))
+                .max()
+                .unwrap_or(4)
+                + 1
+        });
+        if let Some(object) = item.as_object_mut() {
+            object.insert("order".into(), json!(order));
+        }
+        stored.put_bucket(WORK_ITEM_GROUPS, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_group(org, project, item))
+}
+
+fn group_payload(body: &[u8]) -> Result<(String, bool, Option<i64>, String, String, Value), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("groupe illisible");
+    };
+    let label = match object.get("label").or_else(|| object.get("name")) {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => return Err("nom absent"),
+    };
+    let visible = match object.get("visible") {
+        None => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("visibilité absente"),
+    };
+    let order = match object.get("order") {
+        None => None,
+        Some(Value::Number(value)) => {
+            let Some(order) = value.as_i64() else {
+                return Err("ordre absent");
+            };
+            if order < 0 {
+                return Err("ordre absent");
+            }
+            Some(order)
+        }
+        Some(_) => return Err("ordre absent"),
+    };
+    let page_label = match object.get("pageLabel") {
+        None => "Details".to_string(),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("page absente");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("page absente"),
+    };
+    let section_id = match object.get("sectionId") {
+        None => "Section1".to_string(),
+        Some(Value::String(value)) => canonical_section(value)?,
+        Some(_) => return Err("section absente"),
+    };
+    let controls = group_controls(object.get("controls"))?;
+    Ok((label, visible, order, page_label, section_id, controls))
+}
+
+fn canonical_section(value: &str) -> Result<String, &'static str> {
+    match value.trim() {
+        "Section1" | "section1" => Ok("Section1".into()),
+        "Section2" | "section2" => Ok("Section2".into()),
+        "Section3" | "section3" => Ok("Section3".into()),
+        "Section4" | "section4" => Ok("Section4".into()),
+        "" => Err("section absente"),
+        _ => Err("section inconnue"),
+    }
+}
+
+fn canonical_page_label(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, value: &str) -> Result<String, &'static str> {
+    if let Some(system) = SYSTEM_PAGES.iter().find(|item| item.label.eq_ignore_ascii_case(value) || item.id.eq_ignore_ascii_case(value)) {
+        return Ok(system.label.to_string());
+    }
+    list_pages(state, org, project, process_id, reference)
+        .into_iter()
+        .find_map(|item| item_text(&item, "label").filter(|label| label.eq_ignore_ascii_case(value)))
+        .ok_or("page inconnue")
+}
+
+fn group_controls(value: Option<&Value>) -> Result<Value, &'static str> {
+    let Some(value) = value else {
+        return Ok(json!([]));
+    };
+    let Some(items) = value.as_array() else {
+        return Err("contrôle absent");
+    };
+    let mut rows = Vec::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err("contrôle absent");
+        };
+        let Some(id) = object.get("id").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err("contrôle absent");
+        };
+        let label = match object.get("label") {
+            None => id.to_string(),
+            Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_string(),
+            Some(_) => return Err("contrôle absent"),
+        };
+        let control_type = match object.get("controlType") {
+            None => "FieldControl".to_string(),
+            Some(Value::String(value)) if matches!(value.as_str(), "FieldControl" | "LabelControl" | "HtmlFieldControl" | "DateTimeControl") => value.clone(),
+            Some(_) => return Err("contrôle absent"),
+        };
+        let visible = match object.get("visible") {
+            None => true,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err("contrôle absent"),
+        };
+        rows.push(json!({ "id": id, "label": label, "controlType": control_type, "visible": visible }));
+    }
+    Ok(Value::Array(rows))
+}
+
+fn dress_system_group(org: &str, project: &str, process_id: &str, reference: &str, item: &SystemGroup) -> Value {
+    json!({
+        "id": item.id,
+        "label": item.label,
+        "order": item.order,
+        "visible": true,
+        "pageLabel": "Details",
+        "sectionId": "Section1",
+        "controls": [],
+        "customizationType": "system",
+        "processId": process_id,
+        "workItemType": reference,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/layout/groups/{}", item.id)
+    })
+}
+
+fn dress_group(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "workItemType").unwrap_or_default();
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/layout/groups/{id}")),
+        );
+    }
+    item
+}
+
+fn drop_work_item_groups(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>, page_label: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_GROUPS) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            item_text(item, "processId").is_some_and(|process| process == process_id)
+                && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+                && page_label.is_none_or(|page_label| item_text(item, "pageLabel").is_some_and(|stored| stored == page_label))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
 }
 
 fn drop_work_item_pages(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>) {
