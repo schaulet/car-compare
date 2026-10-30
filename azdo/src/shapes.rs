@@ -66,6 +66,10 @@ pub fn dispatch(
                 test_run_tags(state, method, org, project, rest, body)
             } else if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("customfields")) {
                 test_run_custom_fields(state, method, org, project, rest, body)
+            } else if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
+                && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("customfields"))
+            {
+                test_result_custom_fields(state, method, org, project, rest, body)
             } else {
                 test_log_store(state, method, org, project, rest, query, body)
             }
@@ -6042,6 +6046,11 @@ fn test_runs(state: &AppState, method: &Method, org: &str, project: &str, rest: 
         return run_attachments(state, method, org, project, run_id, rest, body);
     }
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
+        && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("customfields"))
+    {
+        return test_result_custom_fields(state, method, org, project, rest, body);
+    }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("results"))
         && rest.get(5).is_some_and(|part| part.eq_ignore_ascii_case("attachments"))
     {
         return result_attachments(state, method, org, project, run_id, rest, body);
@@ -9086,6 +9095,188 @@ fn coverage_summary(state: &AppState, org: &str, project: &str, build_id: &str, 
         "status": "completed",
         "project": project
     })
+}
+
+fn test_result_custom_fields(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
+    let tail = if rest.len() > 6 { &rest[6..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ de résultat introuvable")
+        };
+    }
+    let run_key = pct_decode(rest.get(2).map(String::as_str).unwrap_or(""));
+    let Some(run) = get_item(state, org, project, "test/runs", run_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "exécution introuvable");
+    };
+    let stored_run = value_key(&run["id"]);
+    let run_name = text_of(&run, "name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_run.clone());
+    let result_key = pct_decode(rest.get(4).map(String::as_str).unwrap_or(""));
+    let results_key = format!("test/runs/{stored_run}/results");
+    let Some(result) = get_item(state, org, project, &results_key, result_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "résultat introuvable");
+    };
+    let stored_result = value_key(&result["id"]);
+    let result_name = text_of(&result, "testCaseTitle")
+        .or_else(|| text_of(&result, "automatedTestName"))
+        .or_else(|| text_of(&result, "comment"))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_result.clone());
+    let bucket = format!("test/runs/{stored_run}/results/{stored_result}/customfields");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_result_field(org, project, &stored_run, &run_name, &stored_result, &result_name, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let (name, value) = match result_field_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match result_field_create(
+                state,
+                org,
+                project,
+                &stored_run,
+                &run_name,
+                &stored_result,
+                &result_name,
+                &bucket,
+                name,
+                value,
+            ) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&tail[0]);
+    let key = key.trim();
+    let Some(found) = locate_custom_field(state, org, project, &bucket, key) else {
+        return fail(StatusCode::NOT_FOUND, "champ de résultat introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_result_field(org, project, &stored_run, &run_name, &stored_result, &result_name, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_id = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "champ de résultat introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn result_field_payload(body: &[u8]) -> Result<(String, Value), &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("champ de résultat illisible");
+    };
+    let name = required_metadata_text(object.get("fieldName").or_else(|| object.get("name")), "nom absent")?;
+    let value = match object.get("value") {
+        None => json!(name),
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("valeur absente");
+            }
+            json!(text)
+        }
+        Some(Value::Number(number)) => Value::Number(number.clone()),
+        Some(Value::Bool(flag)) => json!(flag),
+        Some(_) => return Err("valeur absente"),
+    };
+    Ok((name, value))
+}
+
+fn result_field_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    result_id: &str,
+    result_name: &str,
+    bucket: &str,
+    name: String,
+    value: Value,
+) -> Result<Value, &'static str> {
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "fieldName").is_some_and(|stored| stored.eq_ignore_ascii_case(&name)))
+    {
+        return Err("champ de résultat existant");
+    }
+    let number = next_result_field_id(state, org);
+    let item = json!({
+        "id": format!("rf-{number}"),
+        "fieldId": number,
+        "fieldName": name,
+        "name": name,
+        "value": value
+    });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_result_field(org, project, run_id, run_name, result_id, result_name, item))
+}
+
+fn next_result_field_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if key.ends_with("/customfields") {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("rf-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn dress_result_field(
+    org: &str,
+    project: &str,
+    run_id: &str,
+    run_name: &str,
+    result_id: &str,
+    result_name: &str,
+    mut item: Value,
+) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("runId".into(), json!(run_id));
+        object.insert("runName".into(), json!(run_name));
+        object.insert("resultId".into(), json!(result_id));
+        object.insert("resultName".into(), json!(result_name));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/testresults/runs/{run_id}/results/{result_id}/customfields/{id}")),
+        );
+    }
+    item
 }
 
 fn test_run_custom_fields(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], body: &[u8]) -> Response {
