@@ -165,6 +165,7 @@
       <a href="/__ORG__/__PROJECT__/_behaviors">Comportements</a>
       <a href="/__ORG__/__PROJECT__/_pages">Pages</a>
       <a href="/__ORG__/__PROJECT__/_layoutgroups">Groupes de page</a>
+      <a href="/__ORG__/__PROJECT__/_layoutcontrols">Contrôles</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -3950,6 +3951,68 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.type) + "/layout/groups/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_layoutcontrols") {
+          const agile = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+          const systemGroups = ["System.Description", "System.Planning", "System.Classification", "System.Effort"];
+          const processes = await api("GET", root + "/work/processes?api-version=7.1");
+          const inherited = (processes.value || []).filter((item) => item.customizationType === "Inherited");
+          let rows = [];
+          for (const process of inherited) {
+            const types = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes?api-version=7.1");
+            for (const type of (types.value || []).filter((item) => item.customizationType === "custom")) {
+              const groups = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes/" + encodeURIComponent(type.referenceName) + "/layout/groups?api-version=7.1");
+              const groupIds = systemGroups.concat((groups.value || []).filter((item) => item.customizationType === "custom").map((item) => item.id));
+              for (const groupId of groupIds) {
+                const controls = await api("GET", root + "/work/processes/" + encodeURIComponent(process.typeId) + "/workitemtypes/" + encodeURIComponent(type.referenceName) + "/layout/groups/" + encodeURIComponent(groupId) + "/controls?api-version=7.1");
+                rows = rows.concat((controls.value || []).filter((item) => item.customizationType === "custom"));
+              }
+            }
+          }
+          let systems = [];
+          for (const groupId of systemGroups) {
+            const controls = await api("GET", root + "/work/processes/" + agile + "/workitemtypes/Microsoft.Bug/layout/groups/" + encodeURIComponent(groupId) + "/controls?api-version=7.1");
+            systems = systems.concat((controls.value || []).filter((item) => item.customizationType === "system"));
+          }
+          const table = rows.length ? "<table id='layoutcontrols'><thead><tr><th></th><th>Nom</th><th>Groupe</th><th>Type</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='control-remove' data-process='" + esc(item.processId) + "' data-type='" + esc(item.workItemType) + "' data-group='" + esc(item.groupId) + "' data-id='" + esc(item.id) + "' data-name='" + esc(item.label) + "'>Retirer</button></td><td>" + esc(item.label) + "</td><td>" + esc(item.groupLabel) + "</td><td>" + esc(item.controlType) + "</td></tr>").join("") + "</tbody></table>" : "<p id='control-empty' class='sub'>Aucun contrôle.</p>";
+          const catalog = "<h2>Système</h2><table id='system-controls'><thead><tr><th>Nom</th><th>Groupe</th></tr></thead><tbody>" + systems.map((item) => "<tr><td>" + esc(item.label) + "</td><td>" + esc(item.groupLabel) + "</td></tr>").join("") + "</tbody></table>";
+          view.innerHTML = "<h1>Contrôles</h1><div class='command'><input id='control-name' placeholder='Pompe' /><button id='control-add' type='button'>Ajouter</button></div>" + table + catalog + "<p id='control-error' class='error' hidden></p>";
+          document.getElementById("control-add").onclick = async () => {
+            const error = document.getElementById("control-error");
+            error.hidden = true;
+            const label = document.getElementById("control-name").value;
+            try {
+              const current = await api("GET", root + "/work/processes?api-version=7.1");
+              let processId = ((current.value || []).find((item) => item.customizationType === "Inherited") || {}).typeId || "";
+              if (!processId) {
+                processId = (await api("POST", root + "/work/processes?api-version=7.1", { name: "Hérité", parentProcessTypeId: agile })).typeId;
+              }
+              const types = await api("GET", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes?api-version=7.1");
+              let reference = ((types.value || []).find((item) => item.customizationType === "custom") || {}).referenceName || "";
+              if (!reference) {
+                reference = (await api("POST", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes?api-version=7.1", { name: "Ticket" })).referenceName;
+              }
+              await api("POST", root + "/work/processes/" + encodeURIComponent(processId) + "/workitemtypes/" + encodeURIComponent(reference) + "/layout/groups/System.Description/controls?api-version=7.1", { label: label });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.control-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("control-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/work/processes/" + encodeURIComponent(button.dataset.process) + "/workitemtypes/" + encodeURIComponent(button.dataset.type) + "/layout/groups/" + encodeURIComponent(button.dataset.group) + "/controls/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;

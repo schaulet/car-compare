@@ -1789,6 +1789,7 @@ const WORK_ITEM_TYPE_FIELDS: &str = "work/processes/typefields";
 const BEHAVIORS: &str = "work/processes/behaviors";
 const WORK_ITEM_PAGES: &str = "work/processes/pages";
 const WORK_ITEM_GROUPS: &str = "work/processes/groups";
+const WORK_ITEM_CONTROLS: &str = "work/processes/controls";
 const PICKLISTS: &str = "work/processes/lists";
 const AGILE: &str = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
 const SCRUM: &str = "6b724908-ef14-45cf-84f8-768b5384da45";
@@ -1906,6 +1907,7 @@ pub fn work_processes(
             drop_behaviors(stored, &stored_id);
             drop_work_item_pages(stored, &stored_id, None);
             drop_work_item_groups(stored, &stored_id, None, None);
+            drop_work_item_controls(stored, &stored_id, None, None);
             if let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_TYPES) {
                 let stale: Vec<String> = bucket
                     .items
@@ -2224,6 +2226,7 @@ fn work_item_types(
             drop_work_item_type_fields(stored, &process_id, Some(reference.as_str()));
             drop_work_item_pages(stored, &process_id, Some(reference.as_str()));
             drop_work_item_groups(stored, &process_id, Some(reference.as_str()), None);
+            drop_work_item_controls(stored, &process_id, Some(reference.as_str()), None);
             stored.buckets.get_mut(WORK_ITEM_TYPES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -3813,7 +3816,26 @@ fn work_item_pages(
             let Some(stored) = db.project_mut(org, &owner) else {
                 return false;
             };
+            let group_ids = stored
+                .buckets
+                .get(WORK_ITEM_GROUPS)
+                .map(|bucket| {
+                    bucket
+                        .items
+                        .values()
+                        .filter(|item| {
+                            item_text(item, "processId").is_some_and(|process| process == process_id)
+                                && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+                                && item_text(item, "pageLabel").is_some_and(|stored| stored == page_label)
+                        })
+                        .map(|item| item_id(item))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             drop_work_item_groups(stored, &process_id, Some(reference.as_str()), Some(page_label.as_str()));
+            for group_id in &group_ids {
+                drop_work_item_controls(stored, &process_id, Some(reference.as_str()), Some(group_id));
+            }
             stored.buckets.get_mut(WORK_ITEM_PAGES).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
@@ -4058,6 +4080,9 @@ fn work_item_groups(
     body: &[u8],
 ) -> Response {
     let group_tail = &type_tail[3..];
+    if group_tail.len() >= 2 && group_tail.get(1).is_some_and(|part| part.eq_ignore_ascii_case("controls")) {
+        return work_item_controls(state, method, org, project, process_key, type_tail, body);
+    }
     if group_tail.len() > 1 {
         return if method == Method::DELETE {
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
@@ -4122,9 +4147,11 @@ fn work_item_groups(
         };
         let stored_id = item_id(&found);
         let removed = state.write(|db| -> bool {
-            db.project_mut(org, &owner)
-                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_GROUPS))
-                .is_some_and(|bucket| bucket.remove(&stored_id))
+            let Some(stored) = db.project_mut(org, &owner) else {
+                return false;
+            };
+            drop_work_item_controls(stored, &process_id, Some(reference.as_str()), Some(stored_id.as_str()));
+            stored.buckets.get_mut(WORK_ITEM_GROUPS).is_some_and(|bucket| bucket.remove(&stored_id))
         });
         return if removed {
             StatusCode::NO_CONTENT.into_response()
@@ -4378,6 +4405,379 @@ fn dress_group(org: &str, project: &str, mut item: Value) -> Value {
         );
     }
     item
+}
+
+struct SystemControl {
+    id: &'static str,
+    label: &'static str,
+    order: i64,
+    group_id: &'static str,
+    group_label: &'static str,
+}
+
+const SYSTEM_CONTROLS: &[SystemControl] = &[
+    SystemControl { id: "System.Title", label: "Title", order: 1, group_id: "System.Description", group_label: "Description" },
+    SystemControl { id: "System.State", label: "State", order: 2, group_id: "System.Planning", group_label: "Planning" },
+    SystemControl { id: "System.AssignedTo", label: "Assigned To", order: 3, group_id: "System.Planning", group_label: "Planning" },
+    SystemControl { id: "System.AreaPath", label: "Area Path", order: 4, group_id: "System.Classification", group_label: "Classification" },
+];
+
+fn work_item_controls(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: Option<&str>,
+    process_key: &str,
+    type_tail: &[String],
+    body: &[u8],
+) -> Response {
+    let control_tail = &type_tail[5..];
+    if control_tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "contrôle introuvable")
+        };
+    }
+    let Some((owner, process_id, reference, system_type)) = resolve_state_type(state, org, project, process_key, type_tail[0].trim()) else {
+        return if system_process(process_key).is_none() && locate_process(state, org, project, process_key).is_none() {
+            fail(StatusCode::NOT_FOUND, "processus introuvable")
+        } else {
+            fail(StatusCode::NOT_FOUND, "type introuvable")
+        };
+    };
+    let group_key = pct_decode(&type_tail[3]);
+    let Some((group_id, group_label, _system_group)) = locate_layout_group(state, org, &owner, &process_id, &reference, group_key.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "groupe introuvable");
+    };
+    if control_tail.is_empty() {
+        if method == Method::GET {
+            let mut rows: Vec<Value> = SYSTEM_CONTROLS
+                .iter()
+                .filter(|item| item.group_id == group_id)
+                .map(|item| dress_system_control(org, &owner, &process_id, &reference, item))
+                .collect();
+            rows.extend(
+                list_controls(state, org, &owner, &process_id, &reference, &group_id)
+                    .into_iter()
+                    .map(|item| dress_control(org, &owner, item)),
+            );
+            return Json(page(rows)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match control_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            if system_type {
+                return fail(StatusCode::BAD_REQUEST, "type système");
+            }
+            return match control_create(state, org, &owner, &process_id, &reference, &group_id, &group_label, parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let key = pct_decode(&control_tail[0]);
+    if SYSTEM_CONTROLS.iter().any(|item| item.id.eq_ignore_ascii_case(key.trim()) || item.label.eq_ignore_ascii_case(key.trim()))
+        && SYSTEM_CONTROLS.iter().any(|item| {
+            item.group_id == group_id && (item.id.eq_ignore_ascii_case(key.trim()) || item.label.eq_ignore_ascii_case(key.trim()))
+        })
+    {
+        let system = SYSTEM_CONTROLS.iter().find(|item| item.group_id == group_id && (item.id.eq_ignore_ascii_case(key.trim()) || item.label.eq_ignore_ascii_case(key.trim()))).unwrap();
+        if method == Method::GET {
+            return Json(dress_system_control(org, &owner, &process_id, &reference, system)).into_response();
+        }
+        if method == Method::DELETE {
+            return fail(StatusCode::BAD_REQUEST, "contrôle système");
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if SYSTEM_CONTROLS.iter().any(|item| item.id.eq_ignore_ascii_case(key.trim()) || (item.group_id == group_id && item.label.eq_ignore_ascii_case(key.trim())))
+        && method == Method::DELETE
+    {
+        return fail(StatusCode::BAD_REQUEST, "contrôle système");
+    }
+    if method == Method::GET {
+        return match locate_control(state, org, &owner, &process_id, &reference, &group_id, key.trim()) {
+            Some(found) => Json(dress_control(org, &owner, found)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "contrôle introuvable"),
+        };
+    }
+    if method == Method::DELETE {
+        let Some(found) = locate_control(state, org, &owner, &process_id, &reference, &group_id, key.trim()) else {
+            return fail(StatusCode::NOT_FOUND, "contrôle introuvable");
+        };
+        let stored_id = item_id(&found);
+        let removed = state.write(|db| -> bool {
+            db.project_mut(org, &owner)
+                .and_then(|stored| stored.buckets.get_mut(WORK_ITEM_CONTROLS))
+                .is_some_and(|bucket| bucket.remove(&stored_id))
+        });
+        return if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "contrôle introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn locate_layout_group(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, key: &str) -> Option<(String, String, bool)> {
+    if let Some(system) = SYSTEM_GROUPS.iter().find(|item| item.id.eq_ignore_ascii_case(key) || item.label.eq_ignore_ascii_case(key)) {
+        return Some((system.id.to_string(), system.label.to_string(), true));
+    }
+    list_groups(state, org, project, process_id, reference).into_iter().find_map(|item| {
+        let id = item_id(&item);
+        let label = item_text(&item, "label").unwrap_or_default();
+        if id.eq_ignore_ascii_case(key) || label.eq_ignore_ascii_case(key) {
+            Some((id, label, false))
+        } else {
+            None
+        }
+    })
+}
+
+fn list_controls(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, group_id: &str) -> Vec<Value> {
+    let mut rows = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.list_bucket(WORK_ITEM_CONTROLS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                item_text(item, "processId").is_some_and(|stored| stored == process_id)
+                    && item_text(item, "workItemType").is_some_and(|stored| stored == reference)
+                    && item_text(item, "groupId").is_some_and(|stored| stored == group_id)
+            })
+            .collect::<Vec<_>>()
+    });
+    rows.sort_by(|left, right| item_id(left).cmp(&item_id(right)));
+    rows
+}
+
+fn locate_control(state: &AppState, org: &str, project: &str, process_id: &str, reference: &str, group_id: &str, key: &str) -> Option<Value> {
+    list_controls(state, org, project, process_id, reference, group_id)
+        .into_iter()
+        .find(|item| item_id(item) == key || item_text(item, "label").is_some_and(|stored| stored.eq_ignore_ascii_case(key)))
+}
+
+fn next_control_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                if let Some(bucket) = project.buckets.get(WORK_ITEM_CONTROLS) {
+                    rows.extend(bucket.items.values().cloned());
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| item_id(item).strip_prefix("control-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+struct ParsedControl {
+    id: Option<String>,
+    label: String,
+    visible: bool,
+    read_only: bool,
+    order: Option<i64>,
+    control_type: String,
+    watermark: String,
+}
+
+fn control_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    process_id: &str,
+    reference: &str,
+    group_id: &str,
+    group_label: &str,
+    parsed: ParsedControl,
+) -> Result<Value, &'static str> {
+    if SYSTEM_CONTROLS.iter().any(|item| {
+        item.id.eq_ignore_ascii_case(&parsed.label)
+            || item.label.eq_ignore_ascii_case(&parsed.label)
+            || parsed.id.as_ref().is_some_and(|id| item.id.eq_ignore_ascii_case(id) || item.label.eq_ignore_ascii_case(id))
+    }) {
+        return Err("contrôle existant");
+    }
+    let id = parsed.id.clone().unwrap_or_else(|| format!("control-{}", next_control_id(state, org)));
+    let mut item = json!({
+        "id": id,
+        "label": parsed.label,
+        "visible": parsed.visible,
+        "readOnly": parsed.read_only,
+        "controlType": parsed.control_type,
+        "watermark": parsed.watermark,
+        "groupId": group_id,
+        "groupLabel": group_label,
+        "customizationType": "custom",
+        "processId": process_id,
+        "workItemType": reference
+    });
+    state.write(|db| -> Result<(), &'static str> {
+        db.ensure_project(org, project);
+        let Some(stored) = db.project_mut(org, project) else {
+            return Err("contrôle introuvable");
+        };
+        let existing = stored.list_bucket(WORK_ITEM_CONTROLS);
+        if existing.iter().any(|stored| {
+            item_text(stored, "processId").is_some_and(|process| process == process_id)
+                && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                && (item_id(stored).eq_ignore_ascii_case(&id)
+                    || (item_text(stored, "groupId").is_some_and(|group| group == group_id)
+                        && item_text(stored, "label").is_some_and(|current| current.eq_ignore_ascii_case(&parsed.label))))
+        }) {
+            return Err("contrôle existant");
+        }
+        let order = parsed.order.unwrap_or_else(|| {
+            existing
+                .iter()
+                .filter(|stored| {
+                    item_text(stored, "processId").is_some_and(|process| process == process_id)
+                        && item_text(stored, "workItemType").is_some_and(|kind| kind == reference)
+                        && item_text(stored, "groupId").is_some_and(|group| group == group_id)
+                })
+                .filter_map(|stored| stored.get("order").and_then(|value| value.as_i64()))
+                .max()
+                .unwrap_or(4)
+                + 1
+        });
+        if let Some(object) = item.as_object_mut() {
+            object.insert("order".into(), json!(order));
+        }
+        stored.put_bucket(WORK_ITEM_CONTROLS, item.clone());
+        Ok(())
+    })?;
+    Ok(dress_control(org, project, item))
+}
+
+fn control_payload(body: &[u8]) -> Result<ParsedControl, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("contrôle illisible");
+    };
+    let id = match object.get("id") {
+        None => None,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("référence absente");
+            }
+            Some(value.to_string())
+        }
+        Some(_) => return Err("référence absente"),
+    };
+    let label = match object.get("label").or_else(|| object.get("name")) {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom absent");
+            }
+            value.to_string()
+        }
+        Some(_) => return Err("nom absent"),
+        None => id.clone().ok_or("nom absent")?,
+    };
+    let visible = match object.get("visible") {
+        None => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("visibilité absente"),
+    };
+    let read_only = match object.get("readOnly") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("lecture absente"),
+    };
+    let order = match object.get("order") {
+        None => None,
+        Some(Value::Number(value)) => {
+            let Some(order) = value.as_i64() else {
+                return Err("ordre absent");
+            };
+            if order < 0 {
+                return Err("ordre absent");
+            }
+            Some(order)
+        }
+        Some(_) => return Err("ordre absent"),
+    };
+    let control_type = match object.get("controlType") {
+        None => "FieldControl".to_string(),
+        Some(Value::String(value)) if matches!(value.as_str(), "FieldControl" | "LabelControl" | "HtmlFieldControl" | "DateTimeControl") => value.clone(),
+        Some(Value::String(_)) => return Err("type inconnu"),
+        Some(_) => return Err("type absent"),
+    };
+    let watermark = match object.get("watermark") {
+        None => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => return Err("filigrane absent"),
+    };
+    Ok(ParsedControl { id, label, visible, read_only, order, control_type, watermark })
+}
+
+fn dress_system_control(org: &str, project: &str, process_id: &str, reference: &str, item: &SystemControl) -> Value {
+    json!({
+        "id": item.id,
+        "label": item.label,
+        "order": item.order,
+        "visible": true,
+        "readOnly": false,
+        "controlType": "FieldControl",
+        "watermark": "",
+        "groupId": item.group_id,
+        "groupLabel": item.group_label,
+        "customizationType": "system",
+        "processId": process_id,
+        "workItemType": reference,
+        "project": project,
+        "url": format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/layout/groups/{}/controls/{}", item.group_id, item.id)
+    })
+}
+
+fn dress_control(org: &str, project: &str, mut item: Value) -> Value {
+    let process_id = item_text(&item, "processId").unwrap_or_default();
+    let reference = item_text(&item, "workItemType").unwrap_or_default();
+    let group_id = item_text(&item, "groupId").unwrap_or_default();
+    let id = item_id(&item);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/work/processes/{process_id}/workitemtypes/{reference}/layout/groups/{group_id}/controls/{id}")),
+        );
+    }
+    item
+}
+
+fn drop_work_item_controls(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>, group_id: Option<&str>) {
+    let Some(bucket) = stored.buckets.get_mut(WORK_ITEM_CONTROLS) else {
+        return;
+    };
+    let stale: Vec<String> = bucket
+        .items
+        .iter()
+        .filter(|(_, item)| {
+            item_text(item, "processId").is_some_and(|process| process == process_id)
+                && reference.is_none_or(|reference| item_text(item, "workItemType").is_some_and(|stored| stored == reference))
+                && group_id.is_none_or(|group_id| item_text(item, "groupId").is_some_and(|stored| stored == group_id))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale {
+        bucket.remove(&key);
+    }
 }
 
 fn drop_work_item_groups(stored: &mut crate::store::ProjectData, process_id: &str, reference: Option<&str>, page_label: Option<&str>) {

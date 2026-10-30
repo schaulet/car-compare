@@ -29881,3 +29881,357 @@ async fn removing_one_layout_group_keeps_the_sibling_the_page_and_the_other_proj
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["label"], "Relais");
 }
+
+#[tokio::test]
+async fn removing_one_layout_control_keeps_the_sibling_the_group_and_the_other_project() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let agile = "adcc42ab-9882-485e-a3ed-7678f01f66bc";
+    let scrum = "6b724908-ef14-45cf-84f8-768b5384da45";
+    let bug_title = format!("/azurz/AzurzDemo/_apis/work/processes/{agile}/workitemtypes/Microsoft.Bug/layout/groups/System.Description/controls?api-version=7.1");
+
+    async fn create_process(app: &axum::Router, auth: &str, project: &str, name: &str, parent: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/work/processes?api-version=7.1");
+        let body = format!(r#"{{"name":"{name}","parentProcessTypeId":"{parent}"}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()["typeId"].as_str().unwrap().to_string()
+    }
+
+    async fn create_type(app: &axum::Router, auth: &str, project: &str, process: &str, name: &str) -> String {
+        let path = format!("/azurz/{project}/_apis/work/processes/{process}/workitemtypes?api-version=7.1");
+        let body = format!(r#"{{"name":"{name}"}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()["referenceName"].as_str().unwrap().to_string()
+    }
+
+    async fn create_group(app: &axum::Router, auth: &str, project: &str, process: &str, reference: &str, label: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/work/processes/{process}/workitemtypes/{reference}/layout/groups?api-version=7.1");
+        let body = format!(r#"{{"label":"{label}"}}"#);
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        serde_json::from_str(&response).unwrap()
+    }
+
+    async fn create_control(app: &axum::Router, auth: &str, project: &str, process: &str, reference: &str, group: &str, body: &str) -> serde_json::Value {
+        let path = format!("/azurz/{project}/_apis/work/processes/{process}/workitemtypes/{reference}/layout/groups/{group}/controls?api-version=7.1");
+        let (status, response, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let created: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(created["customizationType"], "custom");
+        assert_eq!(created["groupId"], group);
+        assert_eq!(created["processId"], process);
+        assert_eq!(created["workItemType"], reference);
+        assert_eq!(created["project"], project);
+        created
+    }
+
+    let (status, body, _) = call(&app, "GET", &bug_title, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let catalog: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(catalog["count"], 1, "{body}");
+    assert_eq!(catalog["value"][0]["label"], "Title");
+    assert_eq!(catalog["value"][0]["id"], "System.Title");
+    assert_eq!(catalog["value"][0]["customizationType"], "system");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{agile}/workitemtypes/Microsoft.Bug/layout/groups/Planning/controls?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let planning: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(planning["count"], 2, "{body}");
+    assert_eq!(planning["value"][0]["label"], "State");
+    assert_eq!(planning["value"][1]["label"], "Assigned To");
+    let (status, body, _) = call(&app, "DELETE", &bug_title, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{agile}/workitemtypes/Microsoft.Bug/layout/groups/System.Description/controls/Title?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contrôle système"), "{body}");
+    let (status, body, _) = call(&app, "POST", &bug_title, Some(&auth), None, "application/json", Some("{")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("JSON illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", &bug_title, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type système"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", "/azurz/_apis/projects?api-version=7.1", Some(&auth), None, "application/json", Some(r#"{"name":"Atelier"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ligne = create_process(&app, &auth, "AzurzDemo", "Ligne", agile).await;
+    let pompe = create_type(&app, &auth, "AzurzDemo", &ligne, "Pompe").await;
+    let sonde = create_group(&app, &auth, "AzurzDemo", &ligne, &pompe, "Sonde").await;
+    let group_id = sonde["id"].as_str().unwrap();
+    let controls = format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls?api-version=7.1");
+    for payload in ["[]", "null", ""] {
+        let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("contrôle illisible"), "{body}");
+    }
+    for payload in [r#"{}"#, r#"{"label":" "}"#, r#"{"label":1}"#, r#"{"name":" "}"#] {
+        let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("nom absent"), "{body}");
+    }
+    for payload in [r#"{"label":"Pompe","id":""}"#, r#"{"label":"Pompe","id":1}"#] {
+        let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("référence absente"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe","visible":"oui"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("visibilité absente"), "{body}");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe","readOnly":"oui"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("lecture absente"), "{body}");
+    for payload in [r#"{"label":"Pompe","order":-1}"#, r#"{"label":"Pompe","order":1.5}"#, r#"{"label":"Pompe","order":"1"}"#] {
+        let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("ordre absent"), "{body}");
+    }
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe","controlType":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe","controlType":"Bouton"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type inconnu"), "{body}");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Pompe","watermark":1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filigrane absent"), "{body}");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"Title"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contrôle existant"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/Inconnu/controls?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"label":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/System.Title?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contrôle système"), "{body}");
+
+    let pompe_control = create_control(&app, &auth, "AzurzDemo", &ligne, &pompe, group_id, r#"{"name":"Pompe"}"#).await;
+    assert!(pompe_control["id"].as_str().unwrap().starts_with("control-"), "{pompe_control}");
+    assert_eq!(pompe_control["label"], "Pompe");
+    assert_eq!(pompe_control["visible"], true);
+    assert_eq!(pompe_control["readOnly"], false);
+    assert_eq!(pompe_control["order"], 5);
+    assert_eq!(pompe_control["controlType"], "FieldControl");
+    assert_eq!(pompe_control["watermark"], "");
+    assert_eq!(pompe_control["groupLabel"], "Sonde");
+    let relais = create_control(
+        &app,
+        &auth,
+        "AzurzDemo",
+        &ligne,
+        &pompe,
+        group_id,
+        r#"{"id":"Custom.Relais","label":"Relais","visible":false,"readOnly":true,"order":8,"controlType":"HtmlFieldControl","watermark":"Relais"}"#,
+    )
+    .await;
+    assert_eq!(relais["id"], "Custom.Relais");
+    assert_eq!(relais["visible"], false);
+    assert_eq!(relais["readOnly"], true);
+    assert_eq!(relais["order"], 8);
+    assert_eq!(relais["controlType"], "HtmlFieldControl");
+    assert_eq!(relais["watermark"], "Relais");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"label":"pompe"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contrôle existant"), "{body}");
+    let (status, body, _) = call(&app, "POST", &controls, Some(&auth), None, "application/json", Some(r#"{"id":"Custom.Relais","label":"Autre"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("contrôle existant"), "{body}");
+    let atelier_process = create_process(&app, &auth, "Atelier", "Atelier", scrum).await;
+    let atelier_type = create_type(&app, &auth, "Atelier", &atelier_process, "Atelier").await;
+    let atelier = create_control(&app, &auth, "Atelier", &atelier_process, &atelier_type, "System.Description", r#"{"label":"Pompe","visible":false}"#).await;
+    assert_eq!(atelier["visible"], false);
+    assert_eq!(atelier["groupLabel"], "Description");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("contrôle introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", &controls, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["count"], 2, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/Relais?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let by_label: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_label["id"], relais["id"]);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}?api-version=7.1", pompe_control["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"label":"Pompe"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}/extra?api-version=7.1", pompe_control["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}/extra?api-version=7.1", pompe_control["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("contrôle introuvable"), "{body}");
+
+    let one = format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}?api-version=7.1", pompe_control["id"].as_str().unwrap());
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty(), "{body}");
+    let (status, body, _) = call(&app, "GET", &controls, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept["count"], 1, "{body}");
+    assert_eq!(kept["value"][0]["id"], relais["id"]);
+    assert_eq!(kept["value"][0]["label"], "Relais");
+    assert_eq!(kept["value"][0]["readOnly"], true);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_group: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_group["label"], "Sonde");
+    assert_eq!(kept_group["customizationType"], "custom");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/Atelier/_apis/work/processes/{atelier_process}/workitemtypes/{atelier_type}/layout/groups/System.Description/controls/{}?api-version=7.1", atelier["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept_other: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(kept_other["label"], "Pompe");
+    assert_eq!(kept_other["visible"], false);
+    assert_eq!(kept_other["project"], "Atelier");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/System.Description/controls/Title?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"], "System.Title");
+    let (status, body, _) = call(&app, "DELETE", &one, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("contrôle introuvable"), "{body}");
+
+    let jetable = create_group(&app, &auth, "AzurzDemo", &ligne, &pompe, "Jetable").await;
+    let dropped = create_control(&app, &auth, "AzurzDemo", &ligne, &pompe, jetable["id"].as_str().unwrap(), r#"{"label":"Jetable"}"#).await;
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{}?api-version=7.1", jetable["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{}/controls/{}?api-version=7.1", jetable["id"].as_str().unwrap(), dropped["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("groupe introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/processes/{ligne}/workitemtypes/{pompe}/layout/groups/{group_id}/controls/{}?api-version=7.1", relais["id"].as_str().unwrap()),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["label"], "Relais");
+}
