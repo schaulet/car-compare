@@ -684,7 +684,55 @@ fn wiql_match(fields: Option<&Map<String, Value>>, query: &str) -> bool {
             }
         }
     }
+    if let Some((under, expected)) = iteration_clause(query) {
+        let current = fields.get("System.IterationPath").and_then(|value| value.as_str()).unwrap_or("");
+        let matched = if under {
+            iteration_under(current, &expected)
+        } else {
+            current.eq_ignore_ascii_case(&expected)
+        };
+        if !matched {
+            return false;
+        }
+    }
     true
+}
+
+fn iteration_clause(query: &str) -> Option<(bool, String)> {
+    let lower = query.to_ascii_lowercase();
+    let field = "system.iterationpath";
+    let start = lower.find(field)?;
+    let mut rest = query[start + field.len()..].trim_start();
+    if rest.starts_with(']') {
+        rest = rest[1..].trim_start();
+    }
+    let under = {
+        let head = rest.to_ascii_lowercase();
+        head.starts_with("under") && rest[5..].chars().next().is_none_or(|ch| !ch.is_ascii_alphanumeric())
+    };
+    let exact = rest.starts_with('=');
+    if !under && !exact {
+        return None;
+    }
+    let rest = if under { rest[5..].trim_start() } else { rest[1..].trim_start() };
+    let rest = rest.trim_start_matches('\'').trim_start_matches('"');
+    let end = rest.find(['\'', '"']).unwrap_or(rest.len());
+    Some((under, rest[..end].trim().to_string()))
+}
+
+fn iteration_under(path: &str, root: &str) -> bool {
+    let path = path.trim_matches('\\');
+    let root = root.trim_matches('\\');
+    if root.is_empty() {
+        return false;
+    }
+    if path.eq_ignore_ascii_case(root) {
+        return true;
+    }
+    if root.len() >= path.len() {
+        return false;
+    }
+    path[..root.len()].eq_ignore_ascii_case(root) && path.as_bytes().get(root.len()) == Some(&b'\\')
 }
 
 fn clause_value<'a>(query: &'a str, field: &str, operator: &str) -> Option<&'a str> {

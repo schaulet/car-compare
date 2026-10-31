@@ -46587,3 +46587,338 @@ async fn backlog_iteration_keeps_the_sprint_story_and_drops_the_neighbor() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(settings(&body)["backlogIteration"]["path"], "AzurzDemo\\");
 }
+
+#[tokio::test]
+async fn current_iteration_query_keeps_the_sprint_story_and_drops_the_neighbor() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let document = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+    let ids = |body: &str| {
+        document(body)["workItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    async fn story(app: &axum::Router, auth: &str, title: &str, iteration: &str) -> i64 {
+        let iteration_json = iteration.replace('\\', "\\\\");
+        let patch = format!(
+            r#"[{{"op":"add","path":"/fields/System.Title","value":"{title}"}},{{"op":"add","path":"/fields/System.IterationPath","value":"{iteration_json}"}}]"#
+        );
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap()
+    }
+    async fn adopt(app: &axum::Router, auth: &str, team: &str, name: &str, start: &str, finish: &str) {
+        let payload = serde_json::json!({"name": name, "attributes": {"startDate": start, "finishDate": finish}}).to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json",
+            Some(&payload),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let identifier = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identifier"].as_str().unwrap().to_string();
+        let body = serde_json::json!({"id": identifier}).to_string();
+        let (status, response, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/AzurzDemo/{team}/_apis/work/teamsettings/iterations?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations/Sprint%201?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Semaine","attributes":{"startDate":"2026-10-26","finishDate":"2026-10-30"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    adopt(&app, &auth, "AzurzDemo%20Team", "Suivi", "2026-11-09", "2026-11-20").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    adopt(&app, &auth, "Sonde", "Releve", "2026-10-20", "2026-11-02").await;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Vide"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pompe = story(&app, &auth, "Pompe", "AzurzDemo\\Sprint 1").await;
+    let joint = story(&app, &auth, "Joint", "AzurzDemo\\Sprint 1\\Semaine").await;
+    let vanne = story(&app, &auth, "Vanne", "AzurzDemo\\Suivi").await;
+    let relais = story(&app, &auth, "Relais", "AzurzDemo\\Releve").await;
+
+    let under = r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration AND [System.State] = 'New'"}"#;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(under),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sprint = ids(&body);
+    assert!(sprint.contains(&pompe) && sprint.contains(&joint), "{body}");
+    assert!(!sprint.contains(&vanne) && !sprint.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let exact = ids(&body);
+    assert!(exact.contains(&pompe), "{body}");
+    assert!(!exact.contains(&joint) && !exact.contains(&vanne), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration + 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let next = ids(&body);
+    assert!(next.contains(&vanne), "{body}");
+    assert!(!next.contains(&pompe) && !next.contains(&joint), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration AND [System.State] = 'Active'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde = ids(&body);
+    assert!(sonde.contains(&relais), "{body}");
+    assert!(!sonde.contains(&pompe) && !sonde.contains(&vanne), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration('[Sonde]')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).contains(&relais) && !ids(&body).contains(&pompe), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration + 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("décalage d'itération hors limites"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Vide/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération courante absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Inconnue/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration('[Inconnue]')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("équipe de la macro inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration('')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("équipe de la macro absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration('Sonde'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro d'itération illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT @CurrentIteration FROM WorkItems"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro d'itération inutilisée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration AND [System.IterationPath] = @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro d'itération répétée"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(under),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).contains(&pompe) && ids(&body).contains(&joint) && !ids(&body).contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).is_empty(), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = @CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still = ids(&body);
+    assert!(still.contains(&relais) && !still.contains(&pompe), "{body}");
+}

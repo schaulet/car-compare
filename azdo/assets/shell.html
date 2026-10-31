@@ -1406,14 +1406,37 @@
           });
           const empty = removable ? "" : "<p id='query-empty' class='sub'>Aucune requête.</p>";
           const list = (lines.length ? "<ul id='query-tree'>" + lines.join("") + "</ul>" : "") + empty;
-          view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'Active'</textarea><div class='command'><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><div id='result'></div>";
+          const teams = await api("GET", "/" + org + "/_apis/projects/" + encodeURIComponent(project) + "/teams?api-version=7.1");
+          const teamRows = teams.value || [];
+          const remembered = sessionStorage.getItem("query-team");
+          const queryTeamName = teamRows.some((team) => team.name === remembered) ? remembered : project + " Team";
+          const teamOptions = teamRows.map((team) => "<option" + (team.name === queryTeamName ? " selected" : "") + ">" + esc(team.name) + "</option>").join("");
+          view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><label for='query-team'>Équipe</label><select id='query-team'>" + teamOptions + "</select><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration</textarea><div class='command'><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><p id='query-error' class='error' hidden></p><div id='result'></div>";
           let currentId = "";
+          document.getElementById("query-team").onchange = () => {
+            sessionStorage.setItem("query-team", document.getElementById("query-team").value);
+          };
+          function queryRows(items) {
+            if (!items.length) return "<p id='query-empty-result' class='sub'>Aucun élément de travail.</p>";
+            return "<table id='query-result'><thead><tr><th>ID</th><th>Titre</th><th>Itération</th></tr></thead><tbody>" + items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='iteration'>" + esc(item.fields?.["System.IterationPath"] || "") + "</td></tr>").join("") + "</tbody></table>";
+          }
           async function runQuery(text) {
-            const found = await api("POST", root + "/wit/wiql?api-version=7.1", { query: text });
-            const ids = (found.workItems || []).map((item) => item.id);
-            const page = ids.length ? await api("GET", root + "/wit/workitems?ids=" + ids.join(",") + "&api-version=7.1") : { value: [] };
-            document.getElementById("result").innerHTML = rows(page.value || []);
-            bindRows();
+            const error = document.getElementById("query-error");
+            error.hidden = true;
+            error.textContent = "";
+            const teamName = document.getElementById("query-team").value;
+            const teamRoot = "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis";
+            try {
+              const found = await api("POST", teamRoot + "/wit/wiql?api-version=7.1", { query: text });
+              const ids = (found.workItems || []).map((item) => item.id);
+              const page = ids.length ? await api("GET", root + "/wit/workitems?ids=" + ids.join(",") + "&api-version=7.1") : { value: [] };
+              document.getElementById("result").innerHTML = queryRows(page.value || []);
+              bindRows();
+            } catch (failure) {
+              document.getElementById("result").innerHTML = "";
+              error.hidden = false;
+              error.textContent = failure.message;
+            }
           }
           document.querySelectorAll("button.query-open").forEach((button) => {
             button.onclick = () => {

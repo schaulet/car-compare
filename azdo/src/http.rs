@@ -369,6 +369,11 @@ impl AppState {
             return response;
         }
         if resource.as_deref() == Some("wiql") && method == Method::POST {
+            if let Some(team) = team {
+                if !crate::tracking::team_is_known(self, org, project, team) {
+                    return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+                }
+            }
             let payload = parse_json(body).unwrap_or(json!({}));
             let mut text = payload.get("query").and_then(|value| value.as_str()).unwrap_or("").to_string();
             if text.is_empty() {
@@ -382,6 +387,10 @@ impl AppState {
                         .unwrap_or_default();
                 }
             }
+            let text = match crate::tracking::expand_current_iteration(self, org, project, team, &text) {
+                Ok(text) => text,
+                Err((message, status)) => return fail(status, message),
+            };
             let work_items = self.read(|db| {
                 db.project(org, project)
                     .map(|stored| apply_wiql(stored.work_items.values(), &text))

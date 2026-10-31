@@ -762,6 +762,184 @@ fn member_matches(item: &Value, token: &str) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case(token))
 }
 
+pub fn team_is_known(state: &AppState, org: &str, project: &str, team: &str) -> bool {
+    resolve_team_id(state, org, project, Some(team)).is_some()
+}
+
+pub fn expand_current_iteration(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    query: &str,
+) -> Result<String, (&'static str, StatusCode)> {
+    let Some(span) = parse_current_iteration_macro(query).map_err(|message| (message, StatusCode::BAD_REQUEST))? else {
+        return Ok(query.to_string());
+    };
+    if !iteration_macro_is_used(query) {
+        return Err(("macro d'itération inutilisée", StatusCode::BAD_REQUEST));
+    }
+    let path = resolve_current_iteration_path(state, org, project, team, &span).map_err(|message| (message, StatusCode::BAD_REQUEST))?;
+    let mut expanded = String::new();
+    expanded.push_str(&query[..span.start]);
+    expanded.push('\'');
+    expanded.push_str(&path.replace('\'', "''"));
+    expanded.push('\'');
+    expanded.push_str(&query[span.end..]);
+    Ok(expanded)
+}
+
+struct CurrentIterationMacro {
+    start: usize,
+    end: usize,
+    team: Option<String>,
+    offset: i64,
+}
+
+fn parse_current_iteration_macro(query: &str) -> Result<Option<CurrentIterationMacro>, &'static str> {
+    let lower = query.to_ascii_lowercase();
+    let Some(start) = lower.find("@currentiteration") else {
+        return Ok(None);
+    };
+    let marker = "@currentiteration".len();
+    if lower[start + marker..].contains("@currentiteration") {
+        return Err("macro d'itération répétée");
+    }
+    let bytes = query.as_bytes();
+    let mut index = start + marker;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let mut team = None;
+    if index < bytes.len() && bytes[index] == b'(' {
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let Some(quote) = bytes.get(index).copied() else {
+            return Err("macro d'itération illisible");
+        };
+        if quote != b'\'' && quote != b'"' {
+            return Err("macro d'itération illisible");
+        }
+        index += 1;
+        let name_start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return Err("macro d'itération illisible");
+        }
+        let raw = query[name_start..index].trim();
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b')' {
+            return Err("macro d'itération illisible");
+        }
+        index += 1;
+        if raw.is_empty() {
+            return Err("équipe de la macro absente");
+        }
+        team = Some(macro_team_name(raw));
+        if team.as_deref().unwrap_or("").is_empty() {
+            return Err("équipe de la macro absente");
+        }
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+    }
+    let mut offset = 0i64;
+    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+        let sign = if bytes[index] == b'+' { 1 } else { -1 };
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let number_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if number_start == index {
+            return Err("décalage d'itération illisible");
+        }
+        let number = query[number_start..index].parse::<i64>().map_err(|_| "décalage d'itération illisible")?;
+        offset = sign * number;
+    }
+    Ok(Some(CurrentIterationMacro { start, end: index, team, offset }))
+}
+
+fn macro_team_name(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches(['[', ']']).trim();
+    trimmed.rsplit('\\').next().unwrap_or(trimmed).trim().to_string()
+}
+
+fn iteration_macro_is_used(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    let Some(field) = lower.find("system.iterationpath") else {
+        return false;
+    };
+    let Some(macro_at) = lower.find("@currentiteration") else {
+        return false;
+    };
+    if macro_at < field {
+        return false;
+    }
+    let between = lower[field + "system.iterationpath".len()..macro_at].trim();
+    let between = between.trim_start_matches(']').trim();
+    between == "=" || between.starts_with("under")
+}
+
+fn resolve_current_iteration_path(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    span: &CurrentIterationMacro,
+) -> Result<String, &'static str> {
+    let lookup = span.team.as_deref().or(team);
+    let Some(team_id) = resolve_team_id(state, org, project, lookup) else {
+        return Err(if span.team.is_some() { "équipe de la macro inconnue" } else { "équipe introuvable" });
+    };
+    let iterations = team_iterations(state, org, project, &team_id);
+    let dressed: Vec<Value> = iterations.iter().cloned().map(dress_iteration).collect();
+    let Some(anchor) = dressed.iter().position(|item| {
+        item.get("attributes")
+            .and_then(|value| value.get("timeFrame"))
+            .and_then(|value| value.as_str())
+            == Some("current")
+    }) else {
+        return Err("itération courante absente");
+    };
+    let mut order: Vec<usize> = (0..dressed.len()).collect();
+    order.sort_by(|&left, &right| {
+        let left_item = &dressed[left];
+        let right_item = &dressed[right];
+        iteration_start(left_item)
+            .cmp(&iteration_start(right_item))
+            .then_with(|| item_text(left_item, "name").unwrap_or_default().cmp(&item_text(right_item, "name").unwrap_or_default()))
+    });
+    let Some(place) = order.iter().position(|index| *index == anchor) else {
+        return Err("itération courante absente");
+    };
+    let target = place as i64 + span.offset;
+    if target < 0 || target >= order.len() as i64 {
+        return Err("décalage d'itération hors limites");
+    }
+    let chosen = &iterations[order[target as usize]];
+    let stored = item_text(chosen, "path").unwrap_or_default();
+    Ok(iteration_field_path(project, &stored))
+}
+
+fn iteration_start(item: &Value) -> String {
+    item.get("attributes")
+        .and_then(|value| value.get("startDate"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn resolve_team_id(state: &AppState, org: &str, project_key: &str, team: Option<&str>) -> Option<String> {
     let project_name = state.read(|db| db.project_name(org, project_key))?;
     state.write(|db| {
