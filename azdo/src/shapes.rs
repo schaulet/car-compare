@@ -9289,6 +9289,166 @@ fn dress_build_compteur(org: &str, project: &str, build_id: &str, build_number: 
     item
 }
 
+fn build_captures(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    build_id: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    let tail = if rest.len() > 4 { &rest[4..] } else { &[] };
+    if tail.len() > 1 {
+        return if method == Method::DELETE {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        } else {
+            fail(StatusCode::NOT_FOUND, "capture introuvable")
+        };
+    }
+    let Some(build) = get_item(state, org, project, "build/builds", build_id) else {
+        return fail(StatusCode::NOT_FOUND, "build introuvable");
+    };
+    let stored_build = value_key(&build["id"]);
+    let build_number = text_of(&build, "buildNumber")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stored_build.clone());
+    let bucket = format!("build/builds/{stored_build}/captures");
+    if tail.is_empty() {
+        if method == Method::GET {
+            let mut rows = list(state, org, project, &bucket);
+            rows.sort_by(|left, right| value_key(&left["id"]).cmp(&value_key(&right["id"])));
+            let value = rows
+                .into_iter()
+                .map(|item| dress_build_capture(org, project, &stored_build, &build_number, item))
+                .collect();
+            return Json(page(value)).into_response();
+        }
+        if method == Method::POST {
+            let parsed = match build_capture_payload(body) {
+                Ok(parsed) => parsed,
+                Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+            };
+            return match build_capture_create(state, org, project, &stored_build, &build_number, &bucket, &parsed) {
+                Ok(item) => Json(item).into_response(),
+                Err(message) => fail(StatusCode::BAD_REQUEST, message),
+            };
+        }
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let wanted = pct_decode(&tail[0]);
+    let Some(found) = locate_build_capture(state, org, project, &bucket, wanted.trim()) else {
+        return fail(StatusCode::NOT_FOUND, "capture introuvable");
+    };
+    if method == Method::GET {
+        return Json(dress_build_capture(org, project, &stored_build, &build_number, found)).into_response();
+    }
+    if method == Method::DELETE {
+        let stored_item = value_key(&found["id"]);
+        return if delete_item(state, org, project, &bucket, &stored_item) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            fail(StatusCode::NOT_FOUND, "capture introuvable")
+        };
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn build_capture_payload(body: &[u8]) -> Result<String, &'static str> {
+    let Some(payload) = parse_json(body) else {
+        return Err("JSON illisible");
+    };
+    let Some(object) = payload.as_object() else {
+        return Err("capture illisible");
+    };
+    match object.get("name") {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("nom absent");
+            }
+            Ok(text.to_string())
+        }
+        _ => Err("nom absent"),
+    }
+}
+
+fn locate_build_capture(state: &AppState, org: &str, project: &str, bucket: &str, key: &str) -> Option<Value> {
+    list(state, org, project, bucket).into_iter().find(|item| {
+        value_key(&item["id"]) == key || text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(key))
+    })
+}
+
+fn next_build_capture_id(state: &AppState, org: &str) -> i64 {
+    state
+        .read(|db| {
+            let Some(organization) = db.orgs.get(org) else {
+                return Vec::new();
+            };
+            let mut rows = Vec::new();
+            for project in organization.projects.values() {
+                for (key, bucket) in &project.buckets {
+                    if build_capture_bucket(key) {
+                        rows.extend(bucket.items.values().cloned());
+                    }
+                }
+            }
+            rows
+        })
+        .iter()
+        .filter_map(|item| value_key(&item["id"]).strip_prefix("ca-")?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn build_capture_bucket(key: &str) -> bool {
+    let mut parts = key.split('/');
+    parts.next() == Some("build")
+        && parts.next() == Some("builds")
+        && parts.next().is_some()
+        && parts.next() == Some("captures")
+        && parts.next().is_none()
+}
+
+fn build_capture_create(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    build_id: &str,
+    build_number: &str,
+    bucket: &str,
+    name: &str,
+) -> Result<Value, &'static str> {
+    if list(state, org, project, bucket)
+        .iter()
+        .any(|item| text_of(item, "name").is_some_and(|stored| stored.eq_ignore_ascii_case(name)))
+    {
+        return Err("capture existante");
+    }
+    let item = json!({
+        "id": format!("ca-{}", next_build_capture_id(state, org)),
+        "name": name,
+        "buildId": build_id
+    });
+    put_item(state, org, project, bucket, item.clone());
+    Ok(dress_build_capture(org, project, build_id, build_number, item))
+}
+
+fn dress_build_capture(org: &str, project: &str, build_id: &str, build_number: &str, mut item: Value) -> Value {
+    let id = value_key(&item["id"]);
+    if let Some(object) = item.as_object_mut() {
+        object.insert("buildId".into(), json!(build_id));
+        object.insert("buildNumber".into(), json!(build_number));
+        object.insert("project".into(), json!(project));
+        object.insert(
+            "url".into(),
+            json!(format!("/{org}/{project}/_apis/build/builds/{build_id}/captures/{id}")),
+        );
+    }
+    item
+}
+
 fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[String], query: &str, body: &[u8]) -> Response {
     let key = "build/builds";
     if rest.len() == 2 && method == Method::GET {
@@ -9414,6 +9574,9 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("compteurs")) {
         return build_compteurs(state, method, org, project, id, rest, body);
     }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("captures")) {
+        return build_captures(state, method, org, project, id, rest, body);
+    }
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("timeline") {
         return build_timeline(state, method, org, project, id, body);
     }
@@ -9479,6 +9642,7 @@ fn builds(state: &AppState, method: &Method, org: &str, project: &str, rest: &[S
                 stored.buckets.remove(&format!("build/builds/{stored_id}/seuils"));
                 stored.buckets.remove(&format!("build/builds/{stored_id}/bornes"));
                 stored.buckets.remove(&format!("build/builds/{stored_id}/compteurs"));
+                stored.buckets.remove(&format!("build/builds/{stored_id}/captures"));
             }
         });
         return StatusCode::NO_CONTENT.into_response();
