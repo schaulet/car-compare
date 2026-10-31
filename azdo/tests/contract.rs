@@ -45794,3 +45794,252 @@ async fn team_iterations_stay_with_the_team_that_selected_them() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(names(&body).iter().any(|name| name == "Suivi"), "{body}");
 }
+
+#[tokio::test]
+async fn backlog_visibility_stays_with_the_team_that_hid_the_level() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let visible = |body: &str, level: &str| {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["backlogVisibilities"][level]
+            .as_bool()
+            .unwrap()
+    };
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["bugsBehavior"], "off");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let story = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":{"Microsoft.EpicCategory":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["workingDays"].as_array().unwrap().len(), 5);
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":{"microsoft.featurecategory":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(!visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids = serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&story), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":{"Microsoft.RequirementCategory":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(!visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["bugsBehavior"], "off");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":{"Microsoft.CustomCategory":false}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("backlog inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":{"Microsoft.EpicCategory":"oui"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("visibilité illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"backlogVisibilities":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("visibilité illisible"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(!visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.FeatureCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!visible(&body, "Microsoft.RequirementCategory"), "{body}");
+    assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
+}

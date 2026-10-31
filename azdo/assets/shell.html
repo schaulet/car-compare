@@ -785,11 +785,31 @@
           const items = await workItems();
           const heading = hub === "/_backlogs" ? "Backlogs" : "Éléments de travail";
           let backlogItems = items;
+          let visibilityBlock = "";
+          let requirementVisible = true;
+          let backlogTeamName = project + " Team";
           if (hub === "/_backlogs") {
-            const teamName = project + " Team";
-            const listed = await api("GET", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1");
+            const teams = await api("GET", "/" + org + "/_apis/projects/" + encodeURIComponent(project) + "/teams?api-version=7.1");
+            const teamRows = teams.value || [];
+            const remembered = sessionStorage.getItem("backlog-team");
+            backlogTeamName = teamRows.some((team) => team.name === remembered) ? remembered : backlogTeamName;
+            const teamOptions = teamRows.map((team) => "<option" + (team.name === backlogTeamName ? " selected" : "") + ">" + esc(team.name) + "</option>").join("");
+            const teamRoot = "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis";
+            const settings = await api("GET", teamRoot + "/work/teamsettings?api-version=7.1");
+            const listed = await api("GET", teamRoot + "/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1");
             const byId = new Map(items.map((item) => [item.id, item]));
             backlogItems = (listed.value || []).map((row) => byId.get(row.id)).filter(Boolean);
+            const vis = settings.backlogVisibilities || {};
+            requirementVisible = vis["Microsoft.RequirementCategory"] !== false;
+            const levels = [
+              ["vis-epics", "Microsoft.EpicCategory", "Epics"],
+              ["vis-features", "Microsoft.FeatureCategory", "Fonctionnalités"],
+              ["vis-requirements", "Microsoft.RequirementCategory", "Exigences"],
+            ];
+            visibilityBlock = "<div class='command' id='backlog-visibility'><label for='backlog-team'>Équipe</label><select id='backlog-team'>" + teamOptions + "</select>" + levels.map((level) => {
+              const checked = vis[level[1]] === false ? "" : " checked";
+              return "<label for='" + level[0] + "'>" + level[2] + "</label><input id='" + level[0] + "' class='backlog-visible' type='checkbox' data-category='" + level[1] + "'" + checked + " />";
+            }).join("") + "</div>";
           }
           function backlogTable(rows) {
             if (!rows.length) return "<p class='sub'>Aucun élément de travail.</p>";
@@ -829,7 +849,8 @@
             const reactionTable = reactions.length ? "<table id='wit-reactions'><thead><tr><th></th><th>Type</th></tr></thead><tbody>" + reactions.map((item) => "<tr><td><button type='button' class='wreact-remove' data-id='" + esc(item.id) + "' data-type='" + esc(item.type) + "' data-item='" + esc(first.id) + "' data-comment='" + esc(commentId) + "'>Retirer</button></td><td>" + esc(item.type) + "</td></tr>").join("") + "</tbody></table>" : "<p id='wreact-empty' class='sub'>Aucune réaction.</p>";
             reactionBlock = "<h2>Réactions</h2><div class='command'><input id='wreact-item' placeholder='1' value='" + esc(first ? first.id : "") + "' /><input id='wreact-comment' placeholder='1' value='" + esc(commentId) + "' /><select id='wreact-type'><option value='like'>like</option><option value='dislike'>dislike</option><option value='heart'>heart</option><option value='hooray'>hooray</option><option value='smile'>smile</option><option value='confused'>confused</option></select><button id='wreact-add' type='button'>Ajouter</button></div>" + reactionTable + "<p id='wreact-error' class='sub'></p>";
           }
-          view.innerHTML = "<h1>" + heading + "</h1>" + reactionBlock + tagBlock + "<div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div><p id='backlog-error' class='error' hidden></p>" + (hub === "/_backlogs" ? backlogTable(backlogItems) : rows(items)) + "<h2>Corbeille</h2>" + bin;
+          const backlogView = requirementVisible ? backlogTable(backlogItems) : "<p id='backlog-hidden' class='sub'>Backlog masqué.</p>";
+          view.innerHTML = "<h1>" + heading + "</h1>" + visibilityBlock + reactionBlock + tagBlock + "<div class='command'><select id='kind'><option>User Story</option><option>Bug</option><option>Task</option><option>Feature</option><option>Epic</option></select><input id='new-title' placeholder='Titre' /><button id='create' type='button'>Nouvel élément de travail</button></div><p id='backlog-error' class='error' hidden></p>" + (hub === "/_backlogs" ? backlogView : rows(items)) + "<h2>Corbeille</h2>" + bin;
           async function moveBacklog(body) {
             const error = document.getElementById("backlog-error");
             error.hidden = true;
@@ -842,6 +863,29 @@
               error.textContent = failure.message;
             }
           }
+          const backlogTeam = document.getElementById("backlog-team");
+          if (backlogTeam) {
+            backlogTeam.onchange = () => {
+              sessionStorage.setItem("backlog-team", backlogTeam.value);
+              location.reload();
+            };
+          }
+          document.querySelectorAll(".backlog-visible").forEach((box) => {
+            box.onchange = async () => {
+              const error = document.getElementById("backlog-error");
+              error.hidden = true;
+              const payload = { backlogVisibilities: {} };
+              payload.backlogVisibilities[box.dataset.category] = box.checked;
+              try {
+                await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis/work/teamsettings?api-version=7.1", payload);
+                location.reload();
+              } catch (failure) {
+                box.checked = !box.checked;
+                error.hidden = false;
+                error.textContent = failure.message;
+              }
+            };
+          });
           document.querySelectorAll(".backlog-up").forEach((button) => {
             button.onclick = () => moveBacklog({ ids: [Number(button.dataset.id)], nextId: Number(button.dataset.next) });
           });

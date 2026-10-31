@@ -770,10 +770,11 @@ fn resolve_team_id(state: &AppState, org: &str, project_key: &str, team: Option<
 
 fn team_settings_document(state: &AppState, org: &str, project: &str, team_id: &str) -> Value {
     let key = settings_key(team_id);
-    state
+    let stored = state
         .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, team_id)))
         .map(settings_body)
-        .unwrap_or_else(|| default_team_settings(project))
+        .unwrap_or_else(|| default_team_settings(project));
+    ensure_visibilities(stored)
 }
 
 fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str, body: &[u8]) -> Response {
@@ -807,6 +808,11 @@ fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str
             object.insert("backlogIteration".into(), iteration.clone());
         }
     }
+    if let Some(visibilities) = payload.get("backlogVisibilities") {
+        if let Err(message) = apply_visibilities(&mut current, visibilities) {
+            return fail(StatusCode::BAD_REQUEST, message);
+        }
+    }
     if let Some(object) = current.as_object_mut() {
         object.insert("id".into(), json!(team_id));
     }
@@ -825,8 +831,59 @@ fn default_team_settings(project: &str) -> Value {
         "defaultIteration": {"name": "Sprint 1"},
         "defaultIterationMacro": "@currentIteration",
         "bugsBehavior": "off",
-        "workingDays": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+        "workingDays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+        "backlogVisibilities": default_visibilities()
     })
+}
+
+const BACKLOG_LEVELS: [&str; 3] = ["Microsoft.EpicCategory", "Microsoft.FeatureCategory", "Microsoft.RequirementCategory"];
+
+fn default_visibilities() -> Value {
+    json!({
+        "Microsoft.EpicCategory": true,
+        "Microsoft.FeatureCategory": true,
+        "Microsoft.RequirementCategory": true
+    })
+}
+
+fn ensure_visibilities(mut item: Value) -> Value {
+    let incoming = item.get("backlogVisibilities").cloned().unwrap_or_else(|| json!({}));
+    let mut visibilities = Map::new();
+    for level in BACKLOG_LEVELS {
+        let visible = incoming.get(level).and_then(|value| value.as_bool()).unwrap_or(true);
+        visibilities.insert(level.to_string(), json!(visible));
+    }
+    if let Some(object) = item.as_object_mut() {
+        object.insert("backlogVisibilities".into(), Value::Object(visibilities));
+    }
+    item
+}
+
+fn apply_visibilities(current: &mut Value, incoming: &Value) -> Result<(), &'static str> {
+    let Some(object) = incoming.as_object() else {
+        return Err("visibilité illisible");
+    };
+    let mut updates = Vec::new();
+    for (key, value) in object {
+        let Some(canonical) = BACKLOG_LEVELS.iter().copied().find(|name| name.eq_ignore_ascii_case(key)) else {
+            return Err("backlog inconnu");
+        };
+        let Some(flag) = value.as_bool() else {
+            return Err("visibilité illisible");
+        };
+        updates.push((canonical, flag));
+    }
+    let Some(map) = current
+        .as_object_mut()
+        .and_then(|document| document.get_mut("backlogVisibilities"))
+        .and_then(|value| value.as_object_mut())
+    else {
+        return Err("visibilité illisible");
+    };
+    for (key, flag) in updates {
+        map.insert(key.to_string(), json!(flag));
+    }
+    Ok(())
 }
 
 fn settings_key(team_id: &str) -> String {
