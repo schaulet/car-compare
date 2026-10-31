@@ -1411,14 +1411,14 @@
           const remembered = sessionStorage.getItem("query-team");
           const queryTeamName = teamRows.some((team) => team.name === remembered) ? remembered : project + " Team";
           const teamOptions = teamRows.map((team) => "<option" + (team.name === queryTeamName ? " selected" : "") + ">" + esc(team.name) + "</option>").join("");
-          view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><label for='query-team'>Équipe</label><select id='query-team'>" + teamOptions + "</select><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration</textarea><div class='command'><button id='query-areas' type='button'>Zones de l'équipe</button><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><p id='query-error' class='error' hidden></p><div id='result'></div>";
+          view.innerHTML = "<h1>Requêtes</h1>" + list + "<div class='command'><label for='query-team'>Équipe</label><select id='query-team'>" + teamOptions + "</select><input id='query-name' placeholder='Nom' /><input id='folder-name' placeholder='Nouveau dossier' /><button id='folder-add' type='button'>Créer le dossier</button></div><textarea id='wiql' rows='4'>SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration</textarea><div class='command'><button id='query-me' type='button'>Mes éléments</button><button id='query-areas' type='button'>Zones de l'équipe</button><button id='query-save' type='button'>Enregistrer</button><button id='run' type='button'>Exécuter</button></div><p id='query-error' class='error' hidden></p><div id='result'></div>";
           let currentId = "";
           document.getElementById("query-team").onchange = () => {
             sessionStorage.setItem("query-team", document.getElementById("query-team").value);
           };
           function queryRows(items) {
             if (!items.length) return "<p id='query-empty-result' class='sub'>Aucun élément de travail.</p>";
-            return "<table id='query-result'><thead><tr><th>ID</th><th>Titre</th><th>Zone</th><th>Itération</th></tr></thead><tbody>" + items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='area'>" + esc(item.fields?.["System.AreaPath"] || "") + "</td><td class='iteration'>" + esc(item.fields?.["System.IterationPath"] || "") + "</td></tr>").join("") + "</tbody></table>";
+            return "<table id='query-result'><thead><tr><th>ID</th><th>Titre</th><th>Assigné</th><th>Zone</th><th>Itération</th></tr></thead><tbody>" + items.map((item) => "<tr class='click' data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='assignee'>" + esc(assignedName(item)) + "</td><td class='area'>" + esc(item.fields?.["System.AreaPath"] || "") + "</td><td class='iteration'>" + esc(item.fields?.["System.IterationPath"] || "") + "</td></tr>").join("") + "</tbody></table>";
           }
           async function runQuery(text) {
             const error = document.getElementById("query-error");
@@ -1446,6 +1446,9 @@
               runQuery(button.dataset.wiql || "");
             };
           });
+          document.getElementById("query-me").onclick = () => {
+            document.getElementById("wiql").value = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me";
+          };
           document.getElementById("query-areas").onclick = () => {
             document.getElementById("wiql").value = "SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas";
           };

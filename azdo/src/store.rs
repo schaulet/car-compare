@@ -646,9 +646,14 @@ pub fn slug(name: &str) -> String {
         .collect()
 }
 
-pub fn apply_wiql_areas<'a>(items: impl Iterator<Item = &'a Value>, query: &str, areas: &[(String, bool)]) -> Vec<Value> {
+pub fn apply_wiql_areas<'a>(
+    items: impl Iterator<Item = &'a Value>,
+    query: &str,
+    areas: &[(String, bool)],
+    me: Option<&str>,
+) -> Vec<Value> {
     items
-        .filter(|item| wiql_match(item.get("fields").and_then(|value| value.as_object()), query, areas))
+        .filter(|item| wiql_match(item.get("fields").and_then(|value| value.as_object()), query, areas, me))
         .filter_map(|item| {
             item.get("id").map(|id| {
                 json!({
@@ -660,7 +665,7 @@ pub fn apply_wiql_areas<'a>(items: impl Iterator<Item = &'a Value>, query: &str,
         .collect()
 }
 
-fn wiql_match(fields: Option<&Map<String, Value>>, query: &str, areas: &[(String, bool)]) -> bool {
+fn wiql_match(fields: Option<&Map<String, Value>>, query: &str, areas: &[(String, bool)], me: Option<&str>) -> bool {
     let Some(fields) = fields else {
         return false;
     };
@@ -712,7 +717,54 @@ fn wiql_match(fields: Option<&Map<String, Value>>, query: &str, areas: &[(String
             return false;
         }
     }
+    if let Some((negated, expected)) = assigned_clause(query) {
+        let name = if expected.eq_ignore_ascii_case("@Me") { me.unwrap_or("") } else { expected.as_str() };
+        let matched = identity_matches(fields.get("System.AssignedTo"), name);
+        if negated == matched {
+            return false;
+        }
+    }
     true
+}
+
+fn assigned_clause(query: &str) -> Option<(bool, String)> {
+    let lower = query.to_ascii_lowercase();
+    let field = "system.assignedto";
+    let start = lower.find(field)?;
+    let mut rest = query[start + field.len()..].trim_start();
+    if rest.starts_with(']') {
+        rest = rest[1..].trim_start();
+    }
+    let negated = rest.starts_with("<>");
+    let exact = rest.starts_with('=');
+    if !negated && !exact {
+        return None;
+    }
+    let rest = if negated { rest[2..].trim_start() } else { rest[1..].trim_start() };
+    if rest.len() >= "@me".len() && rest[.."@me".len()].eq_ignore_ascii_case("@me") {
+        let boundary = rest["@me".len()..].chars().next();
+        if boundary.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '(') {
+            return Some((negated, "@Me".to_string()));
+        }
+    }
+    let rest = rest.trim_start_matches('\'').trim_start_matches('"');
+    let end = rest.find(['\'', '"']).unwrap_or(rest.len());
+    Some((negated, rest[..end].trim().to_string()))
+}
+
+fn identity_matches(value: Option<&Value>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    match value {
+        Some(Value::String(text)) => text.eq_ignore_ascii_case(expected),
+        Some(Value::Object(object)) => {
+            let display = object.get("displayName").and_then(|item| item.as_str()).unwrap_or("");
+            let unique = object.get("uniqueName").and_then(|item| item.as_str()).unwrap_or("");
+            display.eq_ignore_ascii_case(expected) || unique.eq_ignore_ascii_case(expected)
+        }
+        _ => false,
+    }
 }
 
 fn area_clause(query: &str) -> Option<(bool, String)> {

@@ -817,6 +817,71 @@ pub fn expand_team_areas(
     Ok((expanded, rules))
 }
 
+pub fn expand_me(query: &str, user: &str) -> Result<(String, Option<String>), (&'static str, StatusCode)> {
+    let Some(span) = parse_me_macro(query).map_err(|message| (message, StatusCode::BAD_REQUEST))? else {
+        return Ok((query.to_string(), None));
+    };
+    if !me_macro_is_used(query, span.start) {
+        return Err(("macro d'identité inutilisée", StatusCode::BAD_REQUEST));
+    }
+    let mut expanded = String::new();
+    expanded.push_str(&query[..span.start]);
+    expanded.push_str("@Me");
+    expanded.push_str(&query[span.end..]);
+    Ok((expanded, Some(user.to_string())))
+}
+
+struct MeMacro {
+    start: usize,
+    end: usize,
+}
+
+fn parse_me_macro(query: &str) -> Result<Option<MeMacro>, &'static str> {
+    let lower = query.to_ascii_lowercase();
+    let bytes = query.as_bytes();
+    let mut search = 0usize;
+    let mut found = None;
+    while search < lower.len() {
+        let Some(rel) = lower[search..].find("@me") else {
+            break;
+        };
+        let start = search + rel;
+        let marker_end = start + "@me".len();
+        let boundary = lower[marker_end..].chars().next();
+        if boundary.is_some_and(|ch| ch.is_ascii_alphanumeric()) {
+            search = marker_end;
+            continue;
+        }
+        if found.is_some() {
+            return Err("macro d'identité répétée");
+        }
+        let mut look = marker_end;
+        while look < bytes.len() && bytes[look].is_ascii_whitespace() {
+            look += 1;
+        }
+        if look < bytes.len() && bytes[look] == b'(' {
+            return Err("macro d'identité illisible");
+        }
+        if look < bytes.len() && (bytes[look] == b'+' || bytes[look] == b'-') {
+            return Err("décalage d'identité inconnu");
+        }
+        found = Some(MeMacro { start, end: marker_end });
+        search = marker_end;
+    }
+    Ok(found)
+}
+
+fn me_macro_is_used(query: &str, macro_at: usize) -> bool {
+    let lower = query.to_ascii_lowercase();
+    let head = lower[..macro_at].trim_end();
+    let Some(field) = head.rfind("system.assignedto") else {
+        return false;
+    };
+    let between = head[field + "system.assignedto".len()..].trim();
+    let between = between.trim_start_matches(']').trim();
+    between == "=" || between == "<>"
+}
+
 struct TeamAreasMacro {
     start: usize,
     end: usize,

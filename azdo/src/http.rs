@@ -35,10 +35,10 @@ pub async fn dispatch(
 
     let auth = state.identify(&headers);
     if path_is_api(&path) {
-        if !matches!(auth, Identity::User(_)) {
+        let Identity::User(user) = auth else {
             return fail(StatusCode::UNAUTHORIZED, "PAT refusé");
-        }
-        return state.api(method, &path, &query, &body);
+        };
+        return state.api(method, &path, &query, &body, &user);
     }
     match auth {
         Identity::User(user) => {
@@ -215,7 +215,7 @@ pub fn fail(status: StatusCode, message: &str) -> Response {
 }
 
 impl AppState {
-    pub fn api(&self, method: Method, path: &str, query: &str, body: &[u8]) -> Response {
+    pub fn api(&self, method: Method, path: &str, query: &str, body: &[u8], user: &str) -> Response {
         if path.split('/').any(|part| part == "_packaging") {
             return crate::surface::packaging(self, &method, path, body);
         }
@@ -266,7 +266,7 @@ impl AppState {
             return fail(StatusCode::NOT_FOUND, "projet absent");
         };
         if head == "wit" {
-            return self.wit(&method, &org, &project, team.as_deref(), &rest, query, body);
+            return self.wit(&method, &org, &project, team.as_deref(), &rest, query, body, user);
         }
         if let Some(response) = crate::surface::project(self, &method, &org, &project, &rest, query, body) {
             return response;
@@ -351,6 +351,7 @@ impl AppState {
         rest: &[String],
         query: &str,
         body: &[u8],
+        user: &str,
     ) -> Response {
         let resource = rest.get(1).map(|value| value.to_ascii_lowercase());
         if resource.as_deref() == Some("classificationnodes") {
@@ -395,9 +396,13 @@ impl AppState {
                 Ok(expanded) => expanded,
                 Err((message, status)) => return fail(status, message),
             };
+            let (text, me) = match crate::tracking::expand_me(&text, user) {
+                Ok(expanded) => expanded,
+                Err((message, status)) => return fail(status, message),
+            };
             let work_items = self.read(|db| {
                 db.project(org, project)
-                    .map(|stored| apply_wiql_areas(stored.work_items.values(), &text, &areas))
+                    .map(|stored| apply_wiql_areas(stored.work_items.values(), &text, &areas, me.as_deref()))
                     .unwrap_or_default()
             });
             return Json(json!({"queryType": "flat", "workItems": work_items})).into_response();
