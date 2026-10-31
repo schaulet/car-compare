@@ -43846,3 +43846,281 @@ async fn agile_categories_keep_bug_off_the_requirement_backlog_until_the_team_as
     assert_eq!(requirement["workItemTypes"].as_array().unwrap().len(), 1);
     assert_eq!(requirement["workItemTypes"][0]["name"], "User Story");
 }
+
+#[tokio::test]
+async fn team_areas_keep_a_story_on_the_owning_backlog_and_off_the_sibling_path() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let areas = "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1";
+    for name in ["Pompe", "Relais"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            areas,
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Machine"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let project_areas = "/azurz/AzurzDemo/_apis/work/teamsettings/teamfieldvalues?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", project_areas, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fields: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fields["field"]["referenceName"], "System.AreaPath");
+    assert_eq!(fields["field"]["url"], "/azurz/_apis/wit/fields/System.AreaPath");
+    assert_eq!(fields["defaultValue"], "AzurzDemo");
+    assert_eq!(fields["values"][0]["value"], "AzurzDemo");
+    assert_eq!(fields["values"][0]["includeChildren"], true);
+    assert_eq!(fields["url"], "/azurz/AzurzDemo/_apis/work/teamsettings/teamfieldvalues");
+
+    let sonde = "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", sonde, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["defaultValue"], "AzurzDemo");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"azurzdemo\\pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fields: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fields["defaultValue"], "AzurzDemo\\Pompe");
+    assert_eq!(fields["values"].as_array().unwrap().len(), 1);
+    assert_eq!(fields["values"][0]["includeChildren"], true);
+    assert_eq!(fields["url"], "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues");
+
+    let (status, body, _) = call(&app, "GET", project_areas, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["defaultValue"], "AzurzDemo");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["bugsBehavior"], "off");
+
+    async fn story(app: &axum::Router, auth: &str, title: &str, area: &str) -> i64 {
+        let patch = serde_json::json!([
+            {"op": "add", "path": "/fields/System.Title", "value": title},
+            {"op": "add", "path": "/fields/System.AreaPath", "value": area}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap()
+    }
+    let pompe = story(&app, &auth, "Corps", "AzurzDemo\\Pompe").await;
+    let machine = story(&app, &auth, "Roue", "AzurzDemo\\Pompe\\Machine").await;
+    let relais = story(&app, &auth, "Contact", "AzurzDemo\\Relais").await;
+    let root = story(&app, &auth, "Atelier", "AzurzDemo").await;
+
+    let ids = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body)
+            .unwrap()["value"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["id"].as_i64())
+            .collect::<Vec<_>>()
+    };
+    let sonde_backlog = "/azurz/AzurzDemo/Sonde/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+    let default_backlog = "/azurz/AzurzDemo/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", sonde_backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&pompe) && found.contains(&machine), "{body}");
+    assert!(!found.contains(&relais) && !found.contains(&root), "{body}");
+    let (status, body, _) = call(&app, "GET", default_backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&pompe) && found.contains(&machine) && found.contains(&relais) && found.contains(&root), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":false}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", sonde_backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&pompe), "{body}");
+    assert!(!found.contains(&machine) && !found.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo","values":[{"value":"AzurzDemo\\Pompe","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("valeur par défaut hors des zones"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Inconnue","values":[{"value":"AzurzDemo\\Inconnue","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("zone inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":true},{"value":"azurzdemo\\pompe","includeChildren":false}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("zone déjà présente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("zone absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        sonde,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":"oui"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("inclusion illisible"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", sonde, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("zones illisibles"), "{body}");
+    let (status, body, _) = call(&app, "POST", sonde, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("zones d'équipe introuvables"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", sonde, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fields: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fields["defaultValue"], "AzurzDemo\\Pompe");
+    assert_eq!(fields["values"][0]["includeChildren"], false);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier["defaultValue"], "Atelier");
+    assert_eq!(atelier["values"][0]["value"], "Atelier");
+    assert_eq!(atelier["values"][0]["includeChildren"], true);
+}

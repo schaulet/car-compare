@@ -86,6 +86,7 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
     let behavior = team_bugs_behavior(state, org, project, team);
+    let areas = team_area_rules(state, org, project, team);
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("workitems") {
         let backlog = &rest[2];
         let rows = state.read(|db| {
@@ -94,7 +95,7 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
                     stored
                         .work_items
                         .values()
-                        .filter(|item| backlog_matches(backlog, item, &behavior))
+                        .filter(|item| backlog_matches(backlog, item, &behavior) && area_covered(&item_area(item, project), &areas))
                         .filter_map(|item| item.get("id").cloned())
                         .map(|id| json!({"target": {"id": id}, "id": id}))
                         .collect::<Vec<_>>()
@@ -260,6 +261,9 @@ fn team_settings(
             };
         }
         return Json(page(value.into_iter().map(dress_iteration).collect())).into_response();
+    }
+    if rest.get(2).is_some_and(|part| part.eq_ignore_ascii_case("teamfieldvalues")) {
+        return team_field_values(state, method, org, project, team, rest, body);
     }
     let Some(team_id) = resolve_team_id(state, org, project, team) else {
         return fail(StatusCode::NOT_FOUND, "équipe introuvable");
@@ -545,6 +549,216 @@ fn settings_body(mut item: Value) -> Value {
         object.remove("id");
     }
     item
+}
+
+fn team_field_values(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    if rest.len() != 3 {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "zones d'équipe introuvables")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if method == Method::GET {
+        return Json(team_field_document(state, org, project, team, &team_id)).into_response();
+    }
+    if method == Method::PATCH {
+        return patch_team_fields(state, org, project, team, &team_id, body);
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn team_field_document(state: &AppState, org: &str, project: &str, team: Option<&str>, team_id: &str) -> Value {
+    dress_team_fields(org, project, team, stored_team_fields(state, org, project, team_id))
+}
+
+fn stored_team_fields(state: &AppState, org: &str, project: &str, team_id: &str) -> Value {
+    let key = team_fields_key(team_id);
+    state
+        .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, team_id)))
+        .filter(|item| item.get("values").and_then(|value| value.as_array()).is_some_and(|rows| !rows.is_empty()))
+        .unwrap_or_else(|| default_team_fields(project))
+}
+
+fn patch_team_fields(state: &AppState, org: &str, project: &str, team: Option<&str>, team_id: &str, body: &[u8]) -> Response {
+    let payload = if body.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        match parse_json(body) {
+            Some(value) if value.is_object() => value,
+            _ => return fail(StatusCode::BAD_REQUEST, "zones illisibles"),
+        }
+    } else {
+        json!({})
+    };
+    let current = stored_team_fields(state, org, project, team_id);
+    let (default_value, values) = match normalize_team_fields(state, org, project, &current, &payload) {
+        Ok(fields) => fields,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let item = json!({
+        "id": team_id,
+        "defaultValue": default_value,
+        "values": values
+            .iter()
+            .map(|(value, children)| json!({"value": value, "includeChildren": children}))
+            .collect::<Vec<_>>()
+    });
+    let key = team_fields_key(team_id);
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket(&key, item);
+        }
+    });
+    Json(team_field_document(state, org, project, team, team_id)).into_response()
+}
+
+fn normalize_team_fields(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    current: &Value,
+    payload: &Value,
+) -> Result<(String, Vec<(String, bool)>), &'static str> {
+    let known = crate::shapes::area_paths(state, org, project);
+    let values = if payload.get("values").is_some() {
+        let rows = payload.get("values").and_then(|value| value.as_array()).ok_or("zones illisibles")?;
+        if rows.is_empty() {
+            return Err("zone absente");
+        }
+        let mut values = Vec::new();
+        for row in rows {
+            let object = row.as_object().ok_or("zone illisible")?;
+            let path = canonical_area(&known, object.get("value").ok_or("chemin de zone absent")?)?;
+            if values.iter().any(|(existing, _): &(String, bool)| existing.eq_ignore_ascii_case(&path)) {
+                return Err("zone déjà présente");
+            }
+            let children = match object.get("includeChildren") {
+                None => true,
+                Some(Value::Bool(flag)) => *flag,
+                Some(_) => return Err("inclusion illisible"),
+            };
+            values.push((path, children));
+        }
+        values
+    } else {
+        area_rules_of(current, project)
+    };
+    let default_value = if payload.get("defaultValue").is_some() {
+        canonical_area(&known, payload.get("defaultValue").ok_or("chemin de zone absent")?)?
+    } else {
+        current
+            .get("defaultValue")
+            .and_then(|value| value.as_str())
+            .unwrap_or(project)
+            .to_string()
+    };
+    let default_value = values
+        .iter()
+        .find(|(value, _)| value.eq_ignore_ascii_case(&default_value))
+        .map(|(value, _)| value.clone())
+        .ok_or("valeur par défaut hors des zones")?;
+    Ok((default_value, values))
+}
+
+fn canonical_area(known: &[String], value: &Value) -> Result<String, &'static str> {
+    let text = value.as_str().unwrap_or("").trim();
+    if text.is_empty() {
+        return Err("chemin de zone absent");
+    }
+    known
+        .iter()
+        .find(|path| path.eq_ignore_ascii_case(text))
+        .cloned()
+        .ok_or("zone inconnue")
+}
+
+fn dress_team_fields(org: &str, project: &str, team: Option<&str>, item: Value) -> Value {
+    let url = match team {
+        Some(team) => format!("/{org}/{project}/{team}/_apis/work/teamsettings/teamfieldvalues"),
+        None => format!("/{org}/{project}/_apis/work/teamsettings/teamfieldvalues"),
+    };
+    let default_value = item.get("defaultValue").and_then(|value| value.as_str()).unwrap_or(project);
+    let values = item.get("values").cloned().unwrap_or_else(|| json!([{"value": project, "includeChildren": true}]));
+    json!({
+        "field": {
+            "referenceName": "System.AreaPath",
+            "url": format!("/{org}/_apis/wit/fields/System.AreaPath")
+        },
+        "defaultValue": default_value,
+        "values": values,
+        "url": url
+    })
+}
+
+fn default_team_fields(project: &str) -> Value {
+    json!({
+        "defaultValue": project,
+        "values": [{"value": project, "includeChildren": true}]
+    })
+}
+
+fn team_fields_key(team_id: &str) -> String {
+    format!("work/teamsettings/areas/{team_id}")
+}
+
+fn team_area_rules(state: &AppState, org: &str, project: &str, team: Option<&str>) -> Vec<(String, bool)> {
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return vec![(project.to_string(), true)];
+    };
+    area_rules_of(&stored_team_fields(state, org, project, &team_id), project)
+}
+
+fn area_rules_of(item: &Value, project: &str) -> Vec<(String, bool)> {
+    let rows = item.get("values").and_then(|value| value.as_array());
+    let Some(rows) = rows else {
+        return vec![(project.to_string(), true)];
+    };
+    let rules = rows
+        .iter()
+        .filter_map(|row| {
+            let value = row.get("value").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty())?;
+            let children = row.get("includeChildren").and_then(|value| value.as_bool()).unwrap_or(true);
+            Some((value.to_string(), children))
+        })
+        .collect::<Vec<_>>();
+    if rules.is_empty() {
+        vec![(project.to_string(), true)]
+    } else {
+        rules
+    }
+}
+
+fn item_area(item: &Value, project: &str) -> String {
+    item.get("fields")
+        .and_then(|fields| fields.get("System.AreaPath"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(project)
+        .to_string()
+}
+
+fn area_covered(area: &str, rules: &[(String, bool)]) -> bool {
+    rules.iter().any(|(value, children)| {
+        if area.eq_ignore_ascii_case(value) {
+            return true;
+        }
+        if !*children || value.len() >= area.len() {
+            return false;
+        }
+        let boundary = area.as_bytes().get(value.len()).copied();
+        area[..value.len()].eq_ignore_ascii_case(value) && boundary == Some(b'\\')
+    })
 }
 
 fn team_rows(state: &AppState, org: &str, project: &str) -> Vec<Value> {

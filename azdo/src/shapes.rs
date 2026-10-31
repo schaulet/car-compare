@@ -24161,6 +24161,11 @@ pub fn prepare_work_item_ops(state: &AppState, org: &str, project: &str, kind: &
     Ok(prepared)
 }
 
+pub fn area_paths(state: &AppState, org: &str, project: &str) -> Vec<String> {
+    ensure_classification(state, org, project);
+    work_item_paths(state, org, project, "areas")
+}
+
 fn work_item_paths(state: &AppState, org: &str, project: &str, kind: &str) -> Vec<String> {
     classification_nodes_of(state, org, project, kind)
         .iter()

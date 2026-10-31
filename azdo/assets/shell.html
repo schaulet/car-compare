@@ -120,6 +120,7 @@
       <a href="/__ORG__/__PROJECT__/_boards">Tableaux</a>
       <a href="/__ORG__/__PROJECT__/_backlogs">Backlogs</a>
       <a href="/__ORG__/__PROJECT__/_categories">Catégories</a>
+      <a href="/__ORG__/__PROJECT__/_teamareas">Zones d'équipe</a>
       <a href="/__ORG__/__PROJECT__/_delivery">Plans de livraison</a>
       <a href="/__ORG__/__PROJECT__/_sprints">Sprints</a>
       <a href="/__ORG__/__PROJECT__/_areas">Zones</a>
@@ -668,6 +669,76 @@
             try {
               await api("PATCH", "/" + org + "/" + project + "/" + team + "/_apis/work/teamsettings?api-version=7.1", {
                 bugsBehavior: document.getElementById("bug-behavior").value,
+              });
+            } catch (error) {
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_teamareas") {
+          const params = new URLSearchParams(location.search);
+          const asked = params.get("team") || "";
+          const [teams, tree, items] = await Promise.all([
+            api("GET", "/" + org + "/_apis/projects/" + encodeURIComponent(project) + "/teams?api-version=7.1"),
+            api("GET", root + "/wit/classificationnodes/areas?$depth=10&api-version=7.1"),
+            workItems(),
+          ]);
+          const teamRows = teams.value || [];
+          const selected = teamRows.find((team) => team.id === asked || team.name === asked) || teamRows[0];
+          if (!selected) {
+            view.innerHTML = "<h1>Zones d'équipe</h1><p class='sub'>Aucune équipe.</p>";
+            return;
+          }
+          function workPath(nodePath) {
+            const rootPath = "\\" + project + "\\Area";
+            if (String(nodePath).toLowerCase() === rootPath.toLowerCase()) return project;
+            const prefix = rootPath + "\\";
+            if (String(nodePath).toLowerCase().startsWith(prefix.toLowerCase())) return project + "\\" + nodePath.slice(prefix.length);
+            return nodePath;
+          }
+          const paths = [];
+          function walk(node) {
+            if (!node || !node.path) return;
+            paths.push(workPath(node.path));
+            (node.children || []).forEach(walk);
+          }
+          walk(tree);
+          const fieldUrl = "/" + org + "/" + project + "/" + encodeURIComponent(selected.name) + "/_apis/work/teamsettings/teamfieldvalues?api-version=7.1";
+          const backlogUrl = "/" + org + "/" + project + "/" + encodeURIComponent(selected.name) + "/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+          const [fields, backlog] = await Promise.all([
+            api("GET", fieldUrl),
+            api("GET", backlogUrl),
+          ]);
+          const owned = new Set((backlog.value || []).map((row) => row.id));
+          const visible = items.filter((item) => owned.has(item.id) && item.fields && item.fields["System.WorkItemType"] === "User Story");
+          const areaRows = fields.values || [];
+          const table = areaRows.length
+            ? "<table id='team-areas'><thead><tr><th>Chemin</th><th>Enfants</th></tr></thead><tbody>" + areaRows.map((row) => "<tr data-path='" + esc(row.value) + "'><td>" + esc(row.value) + "</td><td class='area-children'>" + (row.includeChildren ? "oui" : "non") + "</td></tr>").join("") + "</tbody></table>"
+            : "<p id='team-area-empty' class='sub'>Aucune zone.</p>";
+          const backlogTable = visible.length
+            ? "<table id='team-backlog'><thead><tr><th>ID</th><th>Titre</th><th>Zone</th></tr></thead><tbody>" + visible.map((item) => "<tr data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='story-area'>" + esc(item.fields["System.AreaPath"] || project) + "</td></tr>").join("") + "</tbody></table>"
+            : "<p id='team-backlog-empty' class='sub'>Aucune user story sur ce backlog.</p>";
+          const teamOptions = teamRows.map((team) => "<option value='" + esc(team.id) + "'" + (team.id === selected.id ? " selected" : "") + ">" + esc(team.name) + "</option>").join("");
+          const pathOptions = paths.map((path) => "<option value='" + esc(path) + "'>" + esc(path) + "</option>").join("");
+          view.innerHTML = "<h1>Zones d'équipe</h1><div class='command'><label for='team-area-team'>Équipe</label><select id='team-area-team'>" + teamOptions + "</select></div>" + table + "<p id='team-area-default'>Zone par défaut : " + esc(fields.defaultValue) + "</p><div class='command'><label for='team-area-path'>Chemin</label><select id='team-area-path'>" + pathOptions + "</select><label for='team-area-children'><input id='team-area-children' type='checkbox' checked /> Inclure les enfants</label><button id='team-area-save' type='button'>Enregistrer</button></div><p id='team-area-error' class='error' hidden></p><h2>Backlog d'exigences</h2>" + backlogTable;
+          document.getElementById("team-area-path").value = fields.defaultValue || project;
+          const current = areaRows.find((row) => row.value === fields.defaultValue);
+          document.getElementById("team-area-children").checked = !current || current.includeChildren !== false;
+          document.getElementById("team-area-team").onchange = () => {
+            location.href = "/" + org + "/" + project + "/_teamareas?team=" + encodeURIComponent(document.getElementById("team-area-team").value);
+          };
+          document.getElementById("team-area-save").onclick = async () => {
+            const note = document.getElementById("team-area-error");
+            note.hidden = true;
+            const path = document.getElementById("team-area-path").value;
+            try {
+              await api("PATCH", fieldUrl, {
+                defaultValue: path,
+                values: [{ value: path, includeChildren: document.getElementById("team-area-children").checked }],
               });
             } catch (error) {
               note.hidden = false;
