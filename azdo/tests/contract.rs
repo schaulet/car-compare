@@ -44396,3 +44396,325 @@ async fn board_cards_show_story_points_for_one_team_and_keep_the_sibling() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("champ inconnu"), "{body}");
 }
+
+#[tokio::test]
+async fn board_card_rules_color_active_cards_for_one_team_and_keep_the_sibling() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"name":"Sonde"}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let stories = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardrulesettings?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", stories, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rules: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rules["url"], "/azurz/AzurzDemo/AzurzDemo Team/_apis/work/boards/Stories/cardrulesettings");
+    assert_eq!(rules["rules"]["fill"].as_array().unwrap().len(), 0);
+    assert_eq!(rules["rules"]["tagStyle"].as_array().unwrap().len(), 0);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["rules"]["fill"].as_array().unwrap().len(), 0);
+
+    let replacement = r##"{
+        "rules": {
+            "fill": [
+                {"name":"  Inactif  ","isEnabled":"false","filter":"[system.state] = 'New'","settings":{"background-color":"#ABC"}},
+                {"name":"actif","isEnabled":"true","filter":"[system.state] = 'Active'","settings":{"background-color":"#FFF4CE"}}
+            ],
+            "tagStyle": [
+                {"name":"Bloqué","isEnabled":false,"filter":"[system.tags] CONTAINS 'atelier'","settings":{"background-color":"#deecf9","color":"#123456"}}
+            ]
+        }
+    }"##;
+    let (status, body, _) = call(&app, "PUT", stories, Some(&auth), None, "application/json", Some(replacement)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rules: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let fill = rules["rules"]["fill"].as_array().unwrap();
+    assert_eq!(fill.len(), 2);
+    assert_eq!(fill[0]["name"], "Inactif");
+    assert_eq!(fill[0]["isEnabled"], false);
+    assert_eq!(fill[0]["filter"], "[System.State] = 'New'");
+    assert_eq!(fill[0]["settings"]["background-color"], "#abc");
+    assert_eq!(fill[1]["name"], "actif");
+    assert_eq!(fill[1]["isEnabled"], true);
+    assert_eq!(fill[1]["filter"], "[System.State] = 'Active'");
+    assert_eq!(fill[1]["settings"]["background-color"], "#fff4ce");
+    let tags = rules["rules"]["tagStyle"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["filter"], "[System.Tags] CONTAINS 'atelier'");
+    assert_eq!(tags[0]["settings"]["background-color"], "#deecf9");
+    assert_eq!(tags[0]["settings"]["color"], "#123456");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["rules"]["fill"].as_array().unwrap().len(), 0);
+    assert_eq!(sonde["rules"]["tagStyle"].as_array().unwrap().len(), 0);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Epics/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["rules"]["fill"].as_array().unwrap().len(), 0);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cards: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cards["cards"]["User Story"][0]["fieldIdentifier"], "System.AssignedTo");
+    assert_eq!(cards["cards"]["User Story"].as_array().unwrap().len(), 2);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 4);
+
+    let (status, body, _) = call(&app, "PUT", stories, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("règles illisibles"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"stroke":[]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("groupe de règle inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":["Actif"]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("règle illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"  ","isEnabled":true,"filter":"[System.State] = 'Active'","settings":{"background-color":"#fff4ce"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de règle absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"actif","isEnabled":true,"filter":"[System.State] = 'Active'","settings":{"background-color":"#fff4ce"}},{"name":"Actif","isEnabled":true,"filter":"[System.State] = 'Resolved'","settings":{"background-color":"#fff"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("règle déjà présente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":"oui","filter":"[System.State] = 'Active'","settings":{"background-color":"#fff4ce"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("activation illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":true,"filter":"  ","settings":{"background-color":"#fff4ce"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre de carte absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":true,"filter":"[System.State] = 'Active' AND [System.Title] CONTAINS 'Pompe'","settings":{"background-color":"#fff4ce"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("filtre de carte illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":true,"filter":"[System.State] = 'Active'"}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("réglage de couleur absent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":true,"filter":"[System.State] = 'Active'","settings":{"background-color":"red"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("couleur illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"autre","isEnabled":true,"filter":"[System.State] = 'Active'","settings":{"background-color":"#fff4ce","color":"#000"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("couleur illisible"), "{body}");
+    let (status, body, _) = call(&app, "POST", stories, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardrulesettings/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réglage de règle introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", stories, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rules: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rules["rules"]["fill"][1]["settings"]["background-color"], "#fff4ce");
+    assert_eq!(rules["rules"]["tagStyle"][0]["name"], "Bloqué");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"name":"Atelier","description":"Deuxième projet"}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["rules"]["fill"].as_array().unwrap().len(), 0);
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/Atelier/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r##"{"rules":{"fill":[{"name":"Atelier","isEnabled":true,"filter":"[System.Title] CONTAINS 'Relais'","settings":{"background-color":"#fde7e9"}}]}}"##),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier["rules"]["fill"][0]["filter"], "[System.Title] CONTAINS 'Relais'");
+    let (status, body, _) = call(&app, "GET", stories, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rules: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rules["rules"]["fill"][1]["name"], "actif");
+    assert_eq!(rules["rules"]["fill"][1]["settings"]["background-color"], "#fff4ce");
+}

@@ -71,6 +71,9 @@ fn boards(
     if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("cardsettings")) {
         return card_settings(state, method, org, project, team, &rest[2], rest, body);
     }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("cardrulesettings")) {
+        return card_rule_settings(state, method, org, project, team, &rest[2], rest, body);
+    }
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
@@ -2126,6 +2129,260 @@ fn default_card_fields(kind: &str) -> Vec<Value> {
 
 fn card_settings_key(team_id: &str, board: &str) -> String {
     format!("work/boards/{team_id}/cardsettings/{}", board.to_ascii_lowercase())
+}
+
+fn card_rule_settings(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    board: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    if rest.len() != 4 || board.trim().is_empty() {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "réglage de règle introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if method == Method::GET {
+        return Json(card_rule_document(state, org, project, team, &team_id, board)).into_response();
+    }
+    if method == Method::PUT {
+        return put_card_rules(state, org, project, team, &team_id, board, body);
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn card_rule_document(state: &AppState, org: &str, project: &str, team: Option<&str>, team_id: &str, board: &str) -> Value {
+    dress_card_rules(org, project, team, board, stored_card_rules(state, org, project, team_id, board))
+}
+
+fn stored_card_rules(state: &AppState, org: &str, project: &str, team_id: &str, board: &str) -> Value {
+    let key = card_rules_key(team_id, board);
+    state
+        .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, "cardrules")))
+        .filter(|item| item.get("rules").is_some_and(|value| value.is_object()))
+        .unwrap_or_else(default_card_rules)
+}
+
+fn put_card_rules(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    team_id: &str,
+    board: &str,
+    body: &[u8],
+) -> Response {
+    let payload = match parse_json(body) {
+        Some(value) if value.is_object() => value,
+        _ => return fail(StatusCode::BAD_REQUEST, "règles illisibles"),
+    };
+    let rules = match normalize_card_rules(&payload) {
+        Ok(rules) => rules,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let item = json!({"id": "cardrules", "rules": rules});
+    let key = card_rules_key(team_id, board);
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket(&key, item);
+        }
+    });
+    Json(card_rule_document(state, org, project, team, team_id, board)).into_response()
+}
+
+fn normalize_card_rules(payload: &Value) -> Result<Value, &'static str> {
+    let rows = payload.get("rules").and_then(|value| value.as_object()).ok_or("règles illisibles")?;
+    let mut fill_source = None;
+    let mut tag_source = None;
+    for (key, value) in rows {
+        if key.eq_ignore_ascii_case("fill") {
+            if fill_source.is_some() {
+                return Err("règles illisibles");
+            }
+            fill_source = Some(value);
+        } else if key.eq_ignore_ascii_case("tagStyle") {
+            if tag_source.is_some() {
+                return Err("règles illisibles");
+            }
+            tag_source = Some(value);
+        } else {
+            return Err("groupe de règle inconnu");
+        }
+    }
+    Ok(json!({
+        "fill": normalize_rule_group(fill_source, false)?,
+        "tagStyle": normalize_rule_group(tag_source, true)?,
+    }))
+}
+
+fn normalize_rule_group(source: Option<&Value>, tag_style: bool) -> Result<Vec<Value>, &'static str> {
+    let Some(source) = source else {
+        return Ok(Vec::new());
+    };
+    let rows = source.as_array().ok_or("règles illisibles")?;
+    let mut seen = Vec::new();
+    let mut rules = Vec::new();
+    for row in rows {
+        rules.push(normalize_card_rule(row, tag_style, &mut seen)?);
+    }
+    Ok(rules)
+}
+
+fn normalize_card_rule(row: &Value, tag_style: bool, seen: &mut Vec<String>) -> Result<Value, &'static str> {
+    let object = row.as_object().ok_or("règle illisible")?;
+    let name = match object.get("name") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("nom de règle absent");
+            }
+            value.to_string()
+        }
+        _ => return Err("nom de règle absent"),
+    };
+    if seen.iter().any(|current| current.eq_ignore_ascii_case(&name)) {
+        return Err("règle déjà présente");
+    }
+    seen.push(name.clone());
+    let enabled = match object.get("isEnabled") {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err("activation illisible"),
+        },
+        _ => return Err("activation illisible"),
+    };
+    let filter = match object.get("filter") {
+        None => return Err("filtre de carte absent"),
+        Some(Value::String(value)) => canonicalize_card_filter(value)?,
+        Some(_) => return Err("filtre de carte illisible"),
+    };
+    let settings = normalize_color_settings(object.get("settings"), tag_style)?;
+    Ok(json!({"name": name, "isEnabled": enabled, "filter": filter, "settings": settings}))
+}
+
+fn canonicalize_card_filter(raw: &str) -> Result<String, &'static str> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("filtre de carte absent");
+    }
+    let Some(body) = text.strip_prefix('[') else {
+        return Err("filtre de carte illisible");
+    };
+    let Some((field, after)) = body.split_once(']') else {
+        return Err("filtre de carte illisible");
+    };
+    let field = field.trim();
+    let (canonical, operator) = if field.eq_ignore_ascii_case("System.State") {
+        ("System.State", "=")
+    } else if field.eq_ignore_ascii_case("System.WorkItemType") {
+        ("System.WorkItemType", "=")
+    } else if field.eq_ignore_ascii_case("System.Tags") {
+        ("System.Tags", "CONTAINS")
+    } else if field.eq_ignore_ascii_case("System.Title") {
+        ("System.Title", "CONTAINS")
+    } else {
+        return Err("filtre de carte illisible");
+    };
+    let after = after.trim();
+    let value_src = if operator == "=" {
+        let Some(rest) = after.strip_prefix('=') else {
+            return Err("filtre de carte illisible");
+        };
+        rest
+    } else {
+        let mut parts = after.splitn(2, char::is_whitespace);
+        let head = parts.next().unwrap_or("");
+        if !head.eq_ignore_ascii_case("CONTAINS") {
+            return Err("filtre de carte illisible");
+        }
+        parts.next().unwrap_or("")
+    };
+    let value = quoted_card_filter(value_src)?;
+    Ok(format!("[{canonical}] {operator} '{value}'"))
+}
+
+fn quoted_card_filter(rest: &str) -> Result<String, &'static str> {
+    let rest = rest.trim();
+    let Some(inner) = rest.strip_prefix('\'') else {
+        return Err("filtre de carte illisible");
+    };
+    let Some(end) = inner.find('\'') else {
+        return Err("filtre de carte illisible");
+    };
+    if !inner[end + 1..].trim().is_empty() || end == 0 {
+        return Err("filtre de carte illisible");
+    }
+    Ok(inner[..end].to_string())
+}
+
+fn normalize_color_settings(value: Option<&Value>, tag_style: bool) -> Result<Value, &'static str> {
+    let Some(object) = value.and_then(|item| item.as_object()) else {
+        return Err("réglage de couleur absent");
+    };
+    if !object.keys().any(|key| key.eq_ignore_ascii_case("background-color")) {
+        return Err("réglage de couleur absent");
+    }
+    let mut background = None;
+    let mut color = None;
+    for (key, raw) in object {
+        if key.eq_ignore_ascii_case("background-color") {
+            if background.is_some() {
+                return Err("couleur illisible");
+            }
+            background = Some(parse_card_color(raw)?);
+        } else if tag_style && key.eq_ignore_ascii_case("color") {
+            if color.is_some() {
+                return Err("couleur illisible");
+            }
+            color = Some(parse_card_color(raw)?);
+        } else {
+            return Err("couleur illisible");
+        }
+    }
+    let background = background.ok_or("réglage de couleur absent")?;
+    if let Some(color) = color {
+        return Ok(json!({"background-color": background, "color": color}));
+    }
+    Ok(json!({"background-color": background}))
+}
+
+fn parse_card_color(value: &Value) -> Result<String, &'static str> {
+    let text = value.as_str().map(str::trim).ok_or("couleur illisible")?;
+    let Some(hex) = text.strip_prefix('#') else {
+        return Err("couleur illisible");
+    };
+    if !matches!(hex.len(), 3 | 6) || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("couleur illisible");
+    }
+    Ok(format!("#{}", hex.to_ascii_lowercase()))
+}
+
+fn dress_card_rules(org: &str, project: &str, team: Option<&str>, board: &str, item: Value) -> Value {
+    let url = match team {
+        Some(team) => format!("/{org}/{project}/{team}/_apis/work/boards/{board}/cardrulesettings"),
+        None => format!("/{org}/{project}/_apis/work/boards/{board}/cardrulesettings"),
+    };
+    let rules = item.get("rules").cloned().unwrap_or_else(|| default_card_rules()["rules"].clone());
+    json!({"rules": rules, "url": url})
+}
+
+fn default_card_rules() -> Value {
+    json!({"rules": {"fill": [], "tagStyle": []}})
+}
+
+fn card_rules_key(team_id: &str, board: &str) -> String {
+    format!("work/boards/{team_id}/cardrules/{}", board.to_ascii_lowercase())
 }
 
 fn board_columns() -> Vec<Value> {

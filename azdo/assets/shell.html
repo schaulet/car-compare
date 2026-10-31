@@ -877,10 +877,12 @@
           const teamName = project + " Team";
           const boardApi = "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis/work/boards/Stories/columns?api-version=7.1";
           const cardUrl = boardApi.replace("/columns?", "/cardsettings?");
-          const [listed, cardSettings, fieldPage] = await Promise.all([
+          const ruleUrl = boardApi.replace("/columns?", "/cardrulesettings?");
+          const [listed, cardSettings, fieldPage, ruleSettings] = await Promise.all([
             api("GET", boardApi),
             api("GET", cardUrl),
             api("GET", root + "/wit/fields?api-version=7.1"),
+            api("GET", ruleUrl),
           ]);
           const columns = listed.value || [];
           const items = await workItems();
@@ -906,6 +908,29 @@
               const text = fieldText(item, field.fieldIdentifier);
               return text ? field.name + " : " + text : "";
             }).filter(Boolean).join(" · ");
+          }
+          function matchesCardRule(item, filter) {
+            const text = String(filter || "").trim();
+            const equal = text.match(/^\[(System\.State|System\.WorkItemType)\] = '([^']+)'$/);
+            if (equal) {
+              const field = equal[1];
+              const current = item.fields?.[field] || (field === "System.WorkItemType" ? "User Story" : "");
+              return current === equal[2];
+            }
+            const contains = text.match(/^\[(System\.Tags|System\.Title)\] CONTAINS '([^']+)'$/);
+            if (contains) {
+              const raw = contains[1] === "System.Tags" ? String(item.fields?.["System.Tags"] || "") : String(titleOf(item) || "");
+              return raw.toLowerCase().includes(contains[2].toLowerCase());
+            }
+            return false;
+          }
+          function cardFill(item) {
+            const rules = (ruleSettings.rules && ruleSettings.rules.fill) || [];
+            for (const rule of rules) {
+              if (!rule.isEnabled) continue;
+              if (matchesCardRule(item, rule.filter)) return (rule.settings && rule.settings["background-color"]) || "";
+            }
+            return "";
           }
           const placed = new Set();
           function mappedState(column, item) {
@@ -938,7 +963,15 @@
           const known = new Set((fieldPage.value || []).map((field) => field.referenceName));
           const fieldOptions = (fieldPage.value || []).concat(extras.filter((field) => !known.has(field.referenceName))).filter((field) => field.referenceName !== "System.Id" && field.referenceName !== "System.Title").map((field) => "<option value='" + esc(field.referenceName) + "' data-name='" + esc(field.name) + "' data-format='" + esc(displayFormat(field.type)) + "'>" + esc(field.name) + "</option>").join("");
           const cardForm = "<h2>Champs de carte</h2>" + cardTable + "<div class='command'><label for='card-type'>Type</label><select id='card-type'>" + typeOptions + "</select><label for='card-field'>Champ</label><select id='card-field'>" + fieldOptions + "</select><button id='card-add' type='button'>Afficher</button></div><p id='card-error' class='error' hidden></p>";
-          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état et la ligne, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button><input id='lane-name' placeholder='Nouvelle ligne' /><button id='lane-add' type='button'>Ajouter une ligne</button></div>" + note + cardForm + "<div class='lanes'>" + lanes.map((lane) => {
+          const fillRules = (ruleSettings.rules && ruleSettings.rules.fill) || [];
+          const tagRules = (ruleSettings.rules && ruleSettings.rules.tagStyle) || [];
+          const ruleTable = fillRules.length
+            ? "<table id='card-rules'><thead><tr><th>Nom</th><th>Filtre</th><th>Couleur</th><th></th></tr></thead><tbody>" + fillRules.map((rule) => "<tr data-name='" + esc(rule.name) + "'><td>" + esc(rule.name) + "</td><td>" + esc(rule.filter) + "</td><td class='rule-color'>" + esc((rule.settings && rule.settings["background-color"]) || "") + "</td><td><button type='button' class='rule-remove'>Retirer</button></td></tr>").join("") + "</tbody></table>"
+            : "<p id='card-rules-empty' class='sub'>Aucune couleur de carte.</p>";
+          const stateOptions = ["New", "Active", "Resolved", "Closed"].map((state) => "<option value='" + state + "'" + (state === "Active" ? " selected" : "") + ">" + state + "</option>").join("");
+          const colorOptions = [["#fff4ce", "Ambre"], ["#e8f5e9", "Vert"], ["#fde7e9", "Rose"], ["#deecf9", "Bleu"]].map((pair) => "<option value='" + pair[0] + "'>" + pair[1] + "</option>").join("");
+          const ruleForm = "<h2>Couleurs de carte</h2>" + ruleTable + "<div class='command'><label for='rule-name'>Nom</label><input id='rule-name' placeholder='Actif' /><label for='rule-state'>État</label><select id='rule-state'>" + stateOptions + "</select><label for='rule-color'>Couleur</label><select id='rule-color'>" + colorOptions + "</select><button id='rule-save' type='button'>Colorer</button></div><p id='rule-error' class='error' hidden></p>";
+          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état et la ligne, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button><input id='lane-name' placeholder='Nouvelle ligne' /><button id='lane-add' type='button'>Ajouter une ligne</button></div>" + note + cardForm + ruleForm + "<div class='lanes'>" + lanes.map((lane) => {
             const label = lane.name || "Par défaut";
             const remove = lane.name ? "<button class='lane-remove' type='button'>Retirer</button>" : "";
             const board = "<div class='board'>" + columns.map((column) => {
@@ -948,7 +981,9 @@
                 return true;
               }).map((item) => {
               const meta = cardLine(item);
-              return "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div>" + (meta ? "<div class='sub card-fields'>" + esc(meta) + "</div>" : "") + "</article>";
+              const fill = cardFill(item);
+              const tint = fill ? " style='background:" + esc(fill) + "' data-fill='" + esc(fill) + "'" : "";
+              return "<article class='card' draggable='true'" + tint + " data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div>" + (meta ? "<div class='sub card-fields'>" + esc(meta) + "</div>" : "") + "</article>";
             }).join("") || "<p class='sub empty'>Vide</p>";
               const columnRemove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
               return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + columnRemove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
@@ -1023,6 +1058,38 @@
               typeNames.forEach((name) => { next[name] = (cards[name] || []).map((field) => ({ name: field.name, fieldIdentifier: field.fieldIdentifier, displayFormat: field.displayFormat })); });
               next[row.dataset.type] = next[row.dataset.type].filter((field) => field.fieldIdentifier !== row.dataset.field);
               saveCards(next);
+            };
+          });
+          function rulePayload(rule) {
+            return { name: rule.name, isEnabled: rule.isEnabled !== false, filter: rule.filter, settings: rule.settings };
+          }
+          async function saveRules(nextFill) {
+            const error = document.getElementById("rule-error");
+            error.hidden = true;
+            try {
+              await api("PUT", ruleUrl, { rules: { fill: nextFill, tagStyle: tagRules } });
+              location.reload();
+            } catch (failure) {
+              error.hidden = false;
+              error.textContent = failure.message;
+            }
+          }
+          document.getElementById("rule-save").onclick = () => {
+            const name = document.getElementById("rule-name").value.trim();
+            const error = document.getElementById("rule-error");
+            if (!name) {
+              error.hidden = false;
+              error.textContent = "nom de règle absent";
+              return;
+            }
+            const state = document.getElementById("rule-state").value;
+            const color = document.getElementById("rule-color").value;
+            saveRules(fillRules.map(rulePayload).concat([{ name, isEnabled: true, filter: "[System.State] = '" + state + "'", settings: { "background-color": color } }]));
+          };
+          document.querySelectorAll(".rule-remove").forEach((button) => {
+            button.onclick = () => {
+              const name = button.closest("tr").dataset.name;
+              saveRules(fillRules.filter((rule) => rule.name !== name).map(rulePayload));
             };
           });
           let draggedId = "";
