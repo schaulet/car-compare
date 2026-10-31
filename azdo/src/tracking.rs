@@ -789,6 +789,120 @@ pub fn expand_current_iteration(
     Ok(expanded)
 }
 
+pub fn expand_team_areas(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    query: &str,
+) -> Result<(String, Vec<(String, bool)>), (&'static str, StatusCode)> {
+    let Some(span) = parse_team_areas_macro(query).map_err(|message| (message, StatusCode::BAD_REQUEST))? else {
+        return Ok((query.to_string(), Vec::new()));
+    };
+    if !area_macro_is_used(query) {
+        return Err(("macro de zone inutilisée", StatusCode::BAD_REQUEST));
+    }
+    let lookup = span.team.as_deref().or(team);
+    let Some(team_id) = resolve_team_id(state, org, project, lookup) else {
+        return Err((
+            if span.team.is_some() { "équipe de la macro inconnue" } else { "équipe introuvable" },
+            StatusCode::BAD_REQUEST,
+        ));
+    };
+    let rules = area_rules_of(&stored_team_fields(state, org, project, &team_id), project);
+    let mut expanded = String::new();
+    expanded.push_str(&query[..span.start]);
+    expanded.push_str("@TeamAreas");
+    expanded.push_str(&query[span.end..]);
+    Ok((expanded, rules))
+}
+
+struct TeamAreasMacro {
+    start: usize,
+    end: usize,
+    team: Option<String>,
+}
+
+fn parse_team_areas_macro(query: &str) -> Result<Option<TeamAreasMacro>, &'static str> {
+    let lower = query.to_ascii_lowercase();
+    let Some(start) = lower.find("@teamareas") else {
+        return Ok(None);
+    };
+    let marker = "@teamareas".len();
+    if lower[start + marker..].contains("@teamareas") {
+        return Err("macro de zone répétée");
+    }
+    let bytes = query.as_bytes();
+    let mut index = start + marker;
+    let mut look = index;
+    while look < bytes.len() && bytes[look].is_ascii_whitespace() {
+        look += 1;
+    }
+    let mut team = None;
+    if look < bytes.len() && bytes[look] == b'(' {
+        index = look + 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let Some(quote) = bytes.get(index).copied() else {
+            return Err("macro de zone illisible");
+        };
+        if quote != b'\'' && quote != b'"' {
+            return Err("macro de zone illisible");
+        }
+        index += 1;
+        let name_start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return Err("macro de zone illisible");
+        }
+        let raw = query[name_start..index].trim();
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b')' {
+            return Err("macro de zone illisible");
+        }
+        index += 1;
+        if raw.is_empty() {
+            return Err("équipe de la macro absente");
+        }
+        team = Some(macro_team_name(raw));
+        if team.as_deref().unwrap_or("").is_empty() {
+            return Err("équipe de la macro absente");
+        }
+        look = index;
+        while look < bytes.len() && bytes[look].is_ascii_whitespace() {
+            look += 1;
+        }
+        if look < bytes.len() && (bytes[look] == b'+' || bytes[look] == b'-') {
+            return Err("décalage de zone inconnu");
+        }
+    } else if look < bytes.len() && (bytes[look] == b'+' || bytes[look] == b'-') {
+        return Err("décalage de zone inconnu");
+    }
+    Ok(Some(TeamAreasMacro { start, end: index, team }))
+}
+
+fn area_macro_is_used(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    let Some(field) = lower.find("system.areapath") else {
+        return false;
+    };
+    let Some(macro_at) = lower.find("@teamareas") else {
+        return false;
+    };
+    if macro_at < field {
+        return false;
+    }
+    let between = lower[field + "system.areapath".len()..macro_at].trim();
+    let between = between.trim_start_matches(']').trim();
+    between == "=" || between.starts_with("under")
+}
+
 struct CurrentIterationMacro {
     start: usize,
     end: usize,

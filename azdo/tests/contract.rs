@@ -46922,3 +46922,373 @@ async fn current_iteration_query_keeps_the_sprint_story_and_drops_the_neighbor()
     let still = ids(&body);
     assert!(still.contains(&relais) && !still.contains(&pompe), "{body}");
 }
+
+#[tokio::test]
+async fn team_areas_query_keeps_the_owned_story_and_drops_the_neighbor() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let ids = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["workItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    async fn story(app: &axum::Router, auth: &str, title: &str, area: &str, iteration: &str) -> i64 {
+        let patch = serde_json::json!([
+            {"op": "add", "path": "/fields/System.Title", "value": title},
+            {"op": "add", "path": "/fields/System.AreaPath", "value": area},
+            {"op": "add", "path": "/fields/System.IterationPath", "value": iteration}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap()
+    }
+
+    for name in ["Pompe", "Relais"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json",
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas/Pompe?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Machine"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Suivi","attributes":{"startDate":"2026-11-09","finishDate":"2026-11-20"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Courant","attributes":{"startDate":"2026-10-20","finishDate":"2026-11-02"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let pompe = story(&app, &auth, "Pompe", "AzurzDemo\\Pompe", "AzurzDemo\\Courant").await;
+    let machine = story(&app, &auth, "Machine", "AzurzDemo\\Pompe\\Machine", "AzurzDemo\\Courant").await;
+    let relais = story(&app, &auth, "Relais", "AzurzDemo\\Relais", "AzurzDemo\\Sprint 1").await;
+    let vanne = story(&app, &auth, "Vanne", "AzurzDemo\\Pompe", "AzurzDemo\\Suivi").await;
+
+    let under = r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas AND [System.State] = 'New'"}"#;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(under),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let owned = ids(&body);
+    assert!(owned.contains(&pompe) && owned.contains(&machine) && owned.contains(&vanne), "{body}");
+    assert!(!owned.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"Courant"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let both = r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] UNDER @CurrentIteration AND [System.AreaPath] UNDER @TeamAreas"}"#;
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(both),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sprint = ids(&body);
+    assert!(sprint.contains(&pompe) && sprint.contains(&machine), "{body}");
+    assert!(!sprint.contains(&vanne) && !sprint.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(both),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let project = ids(&body);
+    assert!(project.contains(&relais), "{body}");
+    assert!(!project.contains(&pompe) && !project.contains(&machine) && !project.contains(&vanne), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Pompe","values":[{"value":"AzurzDemo\\Pompe","includeChildren":false}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let exact_tree = ids(&body);
+    assert!(exact_tree.contains(&pompe) && exact_tree.contains(&vanne), "{body}");
+    assert!(!exact_tree.contains(&machine) && !exact_tree.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] = @TeamAreas('[Sonde]')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = ids(&body);
+    assert!(named.contains(&pompe) && named.contains(&vanne), "{body}");
+    assert!(!named.contains(&machine) && !named.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] = 'AzurzDemo\\Relais'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let literal = ids(&body);
+    assert!(literal.contains(&relais) && !literal.contains(&pompe), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas AND [System.State] = 'Active'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).is_empty(), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas + 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("décalage de zone inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Inconnue/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas('[Inconnue]')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("équipe de la macro inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas('')"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("équipe de la macro absente"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas('Sonde'"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro de zone illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT @TeamAreas FROM WorkItems"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro de zone inutilisée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas AND [System.AreaPath] UNDER @TeamAreas"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro de zone répétée"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let still = ids(&body);
+    assert!(still.contains(&pompe) && !still.contains(&machine) && !still.contains(&relais), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/wit/wiql?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"query":"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER @TeamAreas"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(ids(&body).is_empty(), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["defaultValue"], "AzurzDemo");
+}

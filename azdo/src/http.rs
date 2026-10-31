@@ -6,7 +6,7 @@ use axum::Json;
 use base64::Engine;
 use serde_json::{json, Map, Value};
 
-use crate::store::{apply_wiql, fields_from_patch, Bucket, RESOURCE_AREAS};
+use crate::store::{apply_wiql_areas, fields_from_patch, Bucket, RESOURCE_AREAS};
 use crate::web::{login_page, shell_page};
 use crate::AppState;
 
@@ -391,9 +391,13 @@ impl AppState {
                 Ok(text) => text,
                 Err((message, status)) => return fail(status, message),
             };
+            let (text, areas) = match crate::tracking::expand_team_areas(self, org, project, team, &text) {
+                Ok(expanded) => expanded,
+                Err((message, status)) => return fail(status, message),
+            };
             let work_items = self.read(|db| {
                 db.project(org, project)
-                    .map(|stored| apply_wiql(stored.work_items.values(), &text))
+                    .map(|stored| apply_wiql_areas(stored.work_items.values(), &text, &areas))
                     .unwrap_or_default()
             });
             return Json(json!({"queryType": "flat", "workItems": work_items})).into_response();

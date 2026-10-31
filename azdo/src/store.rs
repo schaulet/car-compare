@@ -646,9 +646,9 @@ pub fn slug(name: &str) -> String {
         .collect()
 }
 
-pub fn apply_wiql<'a>(items: impl Iterator<Item = &'a Value>, query: &str) -> Vec<Value> {
+pub fn apply_wiql_areas<'a>(items: impl Iterator<Item = &'a Value>, query: &str, areas: &[(String, bool)]) -> Vec<Value> {
     items
-        .filter(|item| wiql_match(item.get("fields").and_then(|value| value.as_object()), query))
+        .filter(|item| wiql_match(item.get("fields").and_then(|value| value.as_object()), query, areas))
         .filter_map(|item| {
             item.get("id").map(|id| {
                 json!({
@@ -660,7 +660,7 @@ pub fn apply_wiql<'a>(items: impl Iterator<Item = &'a Value>, query: &str) -> Ve
         .collect()
 }
 
-fn wiql_match(fields: Option<&Map<String, Value>>, query: &str) -> bool {
+fn wiql_match(fields: Option<&Map<String, Value>>, query: &str, areas: &[(String, bool)]) -> bool {
     let Some(fields) = fields else {
         return false;
     };
@@ -695,7 +695,62 @@ fn wiql_match(fields: Option<&Map<String, Value>>, query: &str) -> bool {
             return false;
         }
     }
+    if let Some((under, expected)) = area_clause(query) {
+        let current = fields.get("System.AreaPath").and_then(|value| value.as_str()).unwrap_or("");
+        let matched = if expected.eq_ignore_ascii_case("@TeamAreas") {
+            if under {
+                area_rules_cover(current, areas)
+            } else {
+                areas.iter().any(|(path, _)| current.eq_ignore_ascii_case(path))
+            }
+        } else if under {
+            iteration_under(current, &expected)
+        } else {
+            current.eq_ignore_ascii_case(&expected)
+        };
+        if !matched {
+            return false;
+        }
+    }
     true
+}
+
+fn area_clause(query: &str) -> Option<(bool, String)> {
+    let lower = query.to_ascii_lowercase();
+    let field = "system.areapath";
+    let start = lower.find(field)?;
+    let mut rest = query[start + field.len()..].trim_start();
+    if rest.starts_with(']') {
+        rest = rest[1..].trim_start();
+    }
+    let under = {
+        let head = rest.to_ascii_lowercase();
+        head.starts_with("under") && rest[5..].chars().next().is_none_or(|ch| !ch.is_ascii_alphanumeric())
+    };
+    let exact = rest.starts_with('=');
+    if !under && !exact {
+        return None;
+    }
+    let rest = if under { rest[5..].trim_start() } else { rest[1..].trim_start() };
+    if rest.len() >= "@teamareas".len() && rest[.."@teamareas".len()].eq_ignore_ascii_case("@teamareas") {
+        let boundary = rest["@teamareas".len()..].chars().next();
+        if boundary.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '(') {
+            return Some((under, "@TeamAreas".to_string()));
+        }
+    }
+    let rest = rest.trim_start_matches('\'').trim_start_matches('"');
+    let end = rest.find(['\'', '"']).unwrap_or(rest.len());
+    Some((under, rest[..end].trim().to_string()))
+}
+
+fn area_rules_cover(area: &str, rules: &[(String, bool)]) -> bool {
+    rules.iter().any(|(value, children)| {
+        if *children {
+            iteration_under(area, value)
+        } else {
+            area.eq_ignore_ascii_case(value)
+        }
+    })
 }
 
 fn iteration_clause(query: &str) -> Option<(bool, String)> {
