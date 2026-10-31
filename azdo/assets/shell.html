@@ -808,12 +808,19 @@
               const selected = !usingCurrent && item.name === chosen.name ? " selected" : "";
               return "<option value='" + esc(item.id) + "'" + selected + ">" + esc(item.name) + "</option>";
             }).join("");
+            const backlogChosen = settings.backlogIteration || {};
+            const backlogPath = String(backlogChosen.path || project).replace(/\\+$/g, "");
+            const usingProject = backlogPath.toLowerCase() === String(project).toLowerCase();
+            const backlogIterationOptions = "<option value='@project'" + (usingProject ? " selected" : "") + ">Projet</option>" + (iterations.value || []).map((item) => {
+              const selected = !usingProject && (String(item.id) === String(backlogChosen.id) || item.name === backlogChosen.name) ? " selected" : "";
+              return "<option value='" + esc(item.id) + "'" + selected + ">" + esc(item.name) + "</option>";
+            }).join("");
             const levels = [
               ["vis-epics", "Microsoft.EpicCategory", "Epics"],
               ["vis-features", "Microsoft.FeatureCategory", "Fonctionnalités"],
               ["vis-requirements", "Microsoft.RequirementCategory", "Exigences"],
             ];
-            visibilityBlock = "<div class='command' id='backlog-visibility'><label for='backlog-team'>Équipe</label><select id='backlog-team'>" + teamOptions + "</select><label for='default-iteration'>Itération par défaut</label><select id='default-iteration'>" + iterationOptions + "</select><span id='default-iteration-path' class='sub'>" + esc(chosen.path || "") + "</span>" + levels.map((level) => {
+            visibilityBlock = "<div class='command' id='backlog-visibility'><label for='backlog-team'>Équipe</label><select id='backlog-team'>" + teamOptions + "</select><label for='default-iteration'>Itération par défaut</label><select id='default-iteration'>" + iterationOptions + "</select><span id='default-iteration-path' class='sub'>" + esc(chosen.path || "") + "</span><label for='backlog-iteration'>Itération de backlog</label><select id='backlog-iteration'>" + backlogIterationOptions + "</select><span id='backlog-iteration-path' class='sub'>" + esc(backlogChosen.path || "") + "</span>" + levels.map((level) => {
               const checked = vis[level[1]] === false ? "" : " checked";
               return "<label for='" + level[0] + "'>" + level[2] + "</label><input id='" + level[0] + "' class='backlog-visible' type='checkbox' data-category='" + level[1] + "'" + checked + " />";
             }).join("") + "</div>";
@@ -885,6 +892,24 @@
               const payload = choice === "@currentIteration"
                 ? { defaultIterationMacro: "@CurrentIteration" }
                 : { defaultIteration: { id: choice } };
+              try {
+                await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis/work/teamsettings?api-version=7.1", payload);
+                location.reload();
+              } catch (failure) {
+                error.hidden = false;
+                error.textContent = failure.message;
+              }
+            };
+          }
+          const backlogIteration = document.getElementById("backlog-iteration");
+          if (backlogIteration) {
+            backlogIteration.onchange = async () => {
+              const error = document.getElementById("backlog-error");
+              error.hidden = true;
+              const choice = backlogIteration.value;
+              const payload = choice === "@project"
+                ? { backlogIteration: { name: project } }
+                : { backlogIteration: { id: choice } };
               try {
                 await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis/work/teamsettings?api-version=7.1", payload);
                 location.reload();

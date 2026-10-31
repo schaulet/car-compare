@@ -94,6 +94,7 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
     }
     let behavior = team_bugs_behavior(state, org, project, team);
     let areas = team_area_rules(state, org, project, team);
+    let backlog_root = team_backlog_iteration_path(state, org, project, team);
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("workitems") {
         let backlog = &rest[2];
         let mut rows = state.read(|db| {
@@ -102,7 +103,11 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
                     stored
                         .work_items
                         .values()
-                        .filter(|item| backlog_matches(backlog, item, &behavior) && area_covered(&item_area(item, project), &areas))
+                        .filter(|item| {
+                            backlog_matches(backlog, item, &behavior)
+                                && area_covered(&item_area(item, project), &areas)
+                                && iteration_under(&item_iteration(item, project), &backlog_root)
+                        })
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -821,9 +826,9 @@ fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str
             object.insert("workingDays".into(), json!(normalized));
         }
     }
-    if let Some(iteration) = payload.get("backlogIteration").filter(|value| value.is_object()) {
-        if let Some(object) = current.as_object_mut() {
-            object.insert("backlogIteration".into(), iteration.clone());
+    if let Some(iteration) = payload.get("backlogIteration") {
+        if let Err(message) = apply_backlog_iteration(state, org, project, team_id, &mut current, iteration) {
+            return fail(StatusCode::BAD_REQUEST, message);
         }
     }
     if let Some(visibilities) = payload.get("backlogVisibilities") {
@@ -851,6 +856,74 @@ fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str
         }
     });
     Json(dress_default_iteration(state, org, project, team_id, settings_body(current))).into_response()
+}
+
+fn team_backlog_iteration_path(state: &AppState, org: &str, project: &str, team: Option<&str>) -> String {
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return project.to_string();
+    };
+    let settings = stored_team_settings(state, org, project, &team_id);
+    let raw = settings
+        .get("backlogIteration")
+        .and_then(|value| value.get("path"))
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.trim_matches('\\').is_empty())
+        .unwrap_or(project);
+    let normalized = iteration_field_path(project, raw);
+    if normalized.is_empty() {
+        project.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn iteration_under(path: &str, root: &str) -> bool {
+    let path = path.trim_matches('\\');
+    let root = root.trim_matches('\\');
+    if root.is_empty() {
+        return true;
+    }
+    if path.eq_ignore_ascii_case(root) {
+        return true;
+    }
+    if root.len() >= path.len() {
+        return false;
+    }
+    path[..root.len()].eq_ignore_ascii_case(root) && path.as_bytes().get(root.len()) == Some(&b'\\')
+}
+
+fn apply_backlog_iteration(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team_id: &str,
+    current: &mut Value,
+    iteration: &Value,
+) -> Result<(), &'static str> {
+    let Some(object) = iteration.as_object() else {
+        return Err("itération de backlog illisible");
+    };
+    let Some(token) = ["id", "path", "name", "identifier"].iter().find_map(|key| {
+        object.get(*key).map(value_text).filter(|text| !text.trim().is_empty())
+    }) else {
+        return Err("itération de backlog absente");
+    };
+    let token = token.trim();
+    let Some(document) = current.as_object_mut() else {
+        return Err("itération de backlog illisible");
+    };
+    if let Some(found) = team_iterations(state, org, project, team_id)
+        .into_iter()
+        .find(|item| iteration_token_matches(item, project, token))
+    {
+        document.insert("backlogIteration".into(), iteration_reference(project, &found));
+        return Ok(());
+    }
+    if iteration_field_path(project, token).eq_ignore_ascii_case(project) {
+        document.insert("backlogIteration".into(), json!({"name": project, "path": format!("{project}\\")}));
+        return Ok(());
+    }
+    Err("itération de backlog inconnue")
 }
 
 fn apply_default_iteration(
