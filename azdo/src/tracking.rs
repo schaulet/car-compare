@@ -68,6 +68,9 @@ fn boards(
         }
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
+    if rest.get(3).is_some_and(|part| part.eq_ignore_ascii_case("cardsettings")) {
+        return card_settings(state, method, org, project, team, &rest[2], rest, body);
+    }
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
@@ -1897,6 +1900,232 @@ fn board_document(org: &str, project: &str, team: &str, name: &str, columns: Vec
         "rows": rows,
         "allowedMappings": allowed
     })
+}
+
+struct CardField {
+    reference: &'static str,
+    name: &'static str,
+    format: &'static str,
+}
+
+const CARD_FIELDS: &[CardField] = &[
+    CardField { reference: "System.Id", name: "Identifiant", format: "Number" },
+    CardField { reference: "System.Title", name: "Titre", format: "String" },
+    CardField { reference: "System.State", name: "État", format: "String" },
+    CardField { reference: "System.AssignedTo", name: "Assigné à", format: "Identity" },
+    CardField { reference: "System.Tags", name: "Étiquettes", format: "String" },
+    CardField { reference: "System.AreaPath", name: "Chemin de zone", format: "String" },
+    CardField { reference: "System.IterationPath", name: "Chemin d'itération", format: "String" },
+    CardField { reference: "Microsoft.VSTS.Scheduling.StoryPoints", name: "Story Points", format: "Number" },
+    CardField { reference: "Microsoft.VSTS.Scheduling.RemainingWork", name: "Remaining Work", format: "Number" },
+    CardField { reference: "Microsoft.VSTS.Common.Priority", name: "Priority", format: "Number" },
+    CardField { reference: "Microsoft.VSTS.Common.StackRank", name: "Stack Rank", format: "Number" },
+    CardField { reference: "Microsoft.VSTS.Common.Activity", name: "Activity", format: "String" },
+];
+
+const CARD_TYPES: &[&str] = &["Epic", "Feature", "User Story", "Bug", "Task", "Issue", "Test Case"];
+
+fn card_settings(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    board: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    if rest.len() != 4 || board.trim().is_empty() {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "réglage de carte introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if method == Method::GET {
+        return Json(card_settings_document(state, org, project, team, &team_id, board)).into_response();
+    }
+    if method == Method::PUT {
+        return put_card_settings(state, org, project, team, &team_id, board, body);
+    }
+    fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn card_settings_document(state: &AppState, org: &str, project: &str, team: Option<&str>, team_id: &str, board: &str) -> Value {
+    let stored = stored_card_settings(state, org, project, team_id, board);
+    dress_card_settings(org, project, team, board, stored)
+}
+
+fn stored_card_settings(state: &AppState, org: &str, project: &str, team_id: &str, board: &str) -> Value {
+    let key = card_settings_key(team_id, board);
+    state
+        .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, "cardsettings")))
+        .filter(|item| item.get("cards").is_some_and(|value| value.is_object()))
+        .unwrap_or_else(default_card_settings)
+}
+
+fn put_card_settings(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    team_id: &str,
+    board: &str,
+    body: &[u8],
+) -> Response {
+    let payload = match parse_json(body) {
+        Some(value) if value.is_object() => value,
+        _ => return fail(StatusCode::BAD_REQUEST, "cartes illisibles"),
+    };
+    let cards = match normalize_cards(state, org, project, &payload) {
+        Ok(cards) => cards,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let item = json!({"id": "cardsettings", "cards": cards});
+    let key = card_settings_key(team_id, board);
+    state.write(|db| {
+        if let Some(stored) = db.project_mut(org, project) {
+            stored.put_bucket(&key, item);
+        }
+    });
+    Json(card_settings_document(state, org, project, team, team_id, board)).into_response()
+}
+
+fn normalize_cards(state: &AppState, org: &str, project: &str, payload: &Value) -> Result<Value, &'static str> {
+    let rows = payload.get("cards").and_then(|value| value.as_object()).ok_or("cartes illisibles")?;
+    let catalog = card_field_catalog(state, org, project);
+    let mut cards = Map::new();
+    for (kind, fields) in rows {
+        let kind = CARD_TYPES
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(kind))
+            .copied()
+            .ok_or("type de carte inconnu")?;
+        if cards.contains_key(kind) {
+            return Err("type de carte déjà présent");
+        }
+        let fields = fields.as_array().ok_or("champs de carte illisibles")?;
+        let mut normalized = Vec::new();
+        for field in fields {
+            let object = field.as_object().ok_or("champ de carte illisible")?;
+            let identifier = object.get("fieldIdentifier").and_then(|value| value.as_str()).unwrap_or("").trim();
+            if identifier.is_empty() {
+                return Err("champ absent");
+            }
+            let known = catalog
+                .iter()
+                .find(|(reference, _, _)| reference.eq_ignore_ascii_case(identifier))
+                .ok_or("champ inconnu")?;
+            if normalized.iter().any(|item: &Value| {
+                item.get("fieldIdentifier")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|current| current.eq_ignore_ascii_case(&known.0))
+            }) {
+                return Err("champ déjà présent");
+            }
+            let format = match object.get("displayFormat") {
+                None => known.2.clone(),
+                Some(Value::String(value)) => {
+                    let value = value.trim();
+                    if !matches!(value.to_ascii_lowercase().as_str(), "string" | "number" | "datetime" | "identity") {
+                        return Err("format de champ inconnu");
+                    }
+                    if !value.eq_ignore_ascii_case(&known.2) {
+                        return Err("format incompatible");
+                    }
+                    known.2.clone()
+                }
+                Some(_) => return Err("format de champ inconnu"),
+            };
+            let name = match object.get("name") {
+                None => known.1.clone(),
+                Some(Value::String(value)) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err("nom de champ absent");
+                    }
+                    value.to_string()
+                }
+                Some(_) => return Err("nom de champ absent"),
+            };
+            normalized.push(json!({"name": name, "fieldIdentifier": known.0, "displayFormat": format}));
+        }
+        cards.insert(kind.to_string(), json!(normalized));
+    }
+    Ok(Value::Object(cards))
+}
+
+fn card_field_catalog(state: &AppState, org: &str, project: &str) -> Vec<(String, String, String)> {
+    let mut fields = CARD_FIELDS
+        .iter()
+        .map(|field| (field.reference.to_string(), field.name.to_string(), field.format.to_string()))
+        .collect::<Vec<_>>();
+    let custom = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket("wit/fields")).unwrap_or_default());
+    for item in custom {
+        let Some(reference) = item.get("referenceName").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if fields.iter().any(|(existing, _, _)| existing.eq_ignore_ascii_case(reference)) {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(reference)
+            .to_string();
+        let format = match item.get("type").and_then(|value| value.as_str()).unwrap_or("string") {
+            "integer" | "double" | "number" => "Number",
+            "dateTime" | "date" => "DateTime",
+            "identity" => "Identity",
+            _ => "String",
+        };
+        fields.push((reference.to_string(), name, format.to_string()));
+    }
+    fields
+}
+
+fn dress_card_settings(org: &str, project: &str, team: Option<&str>, board: &str, item: Value) -> Value {
+    let url = match team {
+        Some(team) => format!("/{org}/{project}/{team}/_apis/work/boards/{board}/cardsettings"),
+        None => format!("/{org}/{project}/_apis/work/boards/{board}/cardsettings"),
+    };
+    let cards = item.get("cards").cloned().unwrap_or_else(|| default_card_settings()["cards"].clone());
+    json!({"cards": cards, "url": url})
+}
+
+fn default_card_settings() -> Value {
+    let mut cards = Map::new();
+    for kind in CARD_TYPES {
+        cards.insert((*kind).to_string(), json!(default_card_fields(kind)));
+    }
+    json!({"cards": cards})
+}
+
+fn default_card_fields(kind: &str) -> Vec<Value> {
+    let fields: &[(&str, &str, &str)] = if kind == "Task" {
+        &[
+            ("System.AssignedTo", "Assigné à", "Identity"),
+            ("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work", "Number"),
+        ]
+    } else {
+        &[
+            ("System.AssignedTo", "Assigné à", "Identity"),
+            ("System.Tags", "Étiquettes", "String"),
+        ]
+    };
+    fields
+        .iter()
+        .map(|(reference, name, format)| json!({"name": name, "fieldIdentifier": reference, "displayFormat": format}))
+        .collect()
+}
+
+fn card_settings_key(team_id: &str, board: &str) -> String {
+    format!("work/boards/{team_id}/cardsettings/{}", board.to_ascii_lowercase())
 }
 
 fn board_columns() -> Vec<Value> {

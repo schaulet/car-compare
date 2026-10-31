@@ -44124,3 +44124,275 @@ async fn team_areas_keep_a_story_on_the_owning_backlog_and_off_the_sibling_path(
     assert_eq!(atelier["values"][0]["value"], "Atelier");
     assert_eq!(atelier["values"][0]["includeChildren"], true);
 }
+
+#[tokio::test]
+async fn board_cards_show_story_points_for_one_team_and_keep_the_sibling() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/fields?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Débit","referenceName":"Custom.Debit","type":"integer"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let stories = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardsettings?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", stories, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(settings["url"], "/azurz/AzurzDemo/AzurzDemo Team/_apis/work/boards/Stories/cardsettings");
+    let story_fields = settings["cards"]["User Story"].as_array().unwrap();
+    assert_eq!(story_fields.len(), 2);
+    assert_eq!(story_fields[0]["fieldIdentifier"], "System.AssignedTo");
+    assert_eq!(story_fields[0]["displayFormat"], "Identity");
+    assert_eq!(story_fields[1]["fieldIdentifier"], "System.Tags");
+    assert_eq!(settings["cards"]["Task"][1]["fieldIdentifier"], "Microsoft.VSTS.Scheduling.RemainingWork");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["cards"]["User Story"][0]["fieldIdentifier"],
+        "System.AssignedTo"
+    );
+
+    let replacement = r#"{
+        "cards": {
+            "user story": [
+                {"fieldIdentifier":"System.AssignedTo"},
+                {"name":"Étiquettes","fieldIdentifier":"system.tags","displayFormat":"string"},
+                {"name":"Points","fieldIdentifier":"microsoft.vsts.scheduling.storypoints","displayFormat":"number"},
+                {"fieldIdentifier":"Custom.Debit","displayFormat":"Number"}
+            ],
+            "Bug": [{"name":"Assigné à","fieldIdentifier":"System.AssignedTo","displayFormat":"Identity"}]
+        }
+    }"#;
+    let (status, body, _) = call(&app, "PUT", stories, Some(&auth), None, "application/json", Some(replacement)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let story_fields = settings["cards"]["User Story"].as_array().unwrap();
+    assert_eq!(story_fields.len(), 4);
+    assert_eq!(story_fields[1]["fieldIdentifier"], "System.Tags");
+    assert_eq!(story_fields[1]["displayFormat"], "String");
+    assert_eq!(story_fields[2]["name"], "Points");
+    assert_eq!(story_fields[2]["fieldIdentifier"], "Microsoft.VSTS.Scheduling.StoryPoints");
+    assert_eq!(story_fields[2]["displayFormat"], "Number");
+    assert_eq!(story_fields[3]["name"], "Débit");
+    assert_eq!(story_fields[3]["fieldIdentifier"], "Custom.Debit");
+    assert_eq!(settings["cards"]["Bug"].as_array().unwrap().len(), 1);
+    assert!(settings["cards"].get("Task").is_none(), "{settings}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["cards"]["User Story"].as_array().unwrap().len(), 2);
+    assert!(sonde["cards"]["User Story"].as_array().unwrap().iter().all(|field| field["fieldIdentifier"] != "Microsoft.VSTS.Scheduling.StoryPoints"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Epics/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let epics: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(epics["cards"]["Task"][1]["fieldIdentifier"], "Microsoft.VSTS.Scheduling.RemainingWork");
+    assert!(epics["cards"]["User Story"].as_array().unwrap().iter().all(|field| field["fieldIdentifier"] != "Custom.Debit"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/columns?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 4);
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"fieldIdentifier":"System.AssignedTo","displayFormat":"Number"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("format incompatible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"fieldIdentifier":"System.AssignedTo","displayFormat":"Couleur"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("format de champ inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"Pompe":[{"fieldIdentifier":"System.State"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("type de carte inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"fieldIdentifier":"Custom.Absent"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("champ inconnu"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"fieldIdentifier":"System.State"},{"fieldIdentifier":"system.state"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("champ déjà présent"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        stories,
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"name":"  ","fieldIdentifier":"System.State"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("nom de champ absent"), "{body}");
+    let (status, body, _) = call(&app, "PUT", stories, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("cartes illisibles"), "{body}");
+    let (status, body, _) = call(&app, "POST", stories, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardsettings/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("réglage de carte introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "GET", stories, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(settings["cards"]["User Story"][2]["fieldIdentifier"], "Microsoft.VSTS.Scheduling.StoryPoints");
+    assert_eq!(settings["cards"]["User Story"][3]["fieldIdentifier"], "Custom.Debit");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier["cards"]["User Story"].as_array().unwrap().len(), 2);
+    assert!(atelier["cards"]["User Story"].as_array().unwrap().iter().all(|field| field["fieldIdentifier"] != "Custom.Debit"));
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/Atelier/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"cards":{"User Story":[{"fieldIdentifier":"Custom.Debit"}]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("champ inconnu"), "{body}");
+}

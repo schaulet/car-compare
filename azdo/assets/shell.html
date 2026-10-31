@@ -876,9 +876,37 @@
         if (hub === "/_boards") {
           const teamName = project + " Team";
           const boardApi = "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis/work/boards/Stories/columns?api-version=7.1";
-          const listed = await api("GET", boardApi);
+          const cardUrl = boardApi.replace("/columns?", "/cardsettings?");
+          const [listed, cardSettings, fieldPage] = await Promise.all([
+            api("GET", boardApi),
+            api("GET", cardUrl),
+            api("GET", root + "/wit/fields?api-version=7.1"),
+          ]);
           const columns = listed.value || [];
           const items = await workItems();
+          const cards = cardSettings.cards || {};
+          function displayFormat(type) {
+            const name = String(type || "string").toLowerCase();
+            if (name === "integer" || name === "double" || name === "number") return "Number";
+            if (name === "datetime" || name === "date") return "DateTime";
+            if (name === "identity") return "Identity";
+            return "String";
+          }
+          function fieldText(item, identifier) {
+            const value = item.fields ? item.fields[identifier] : null;
+            if (value == null || value === "") return "";
+            if (typeof value === "object") return value.displayName || value.uniqueName || "";
+            return String(value);
+          }
+          function cardLine(item) {
+            const kind = item.fields?.["System.WorkItemType"] || "User Story";
+            const fields = cards[kind] || [];
+            return fields.map((field) => {
+              if (field.fieldIdentifier === "System.Title" || field.fieldIdentifier === "System.Id") return "";
+              const text = fieldText(item, field.fieldIdentifier);
+              return text ? field.name + " : " + text : "";
+            }).filter(Boolean).join(" · ");
+          }
           const placed = new Set();
           function mappedState(column, item) {
             const kind = item.fields?.["System.WorkItemType"] || "User Story";
@@ -894,7 +922,23 @@
             return knownLanes.has(name) ? name : "";
           }
           const note = "<p id='board-limit' class='error' hidden></p>";
-          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état et la ligne, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button><input id='lane-name' placeholder='Nouvelle ligne' /><button id='lane-add' type='button'>Ajouter une ligne</button></div>" + note + "<div class='lanes'>" + lanes.map((lane) => {
+          const cardRows = Object.keys(cards).flatMap((kind) => (cards[kind] || []).map((field) => ({ kind, field })));
+          const cardTable = cardRows.length
+            ? "<table id='card-fields'><thead><tr><th>Type</th><th>Champ</th><th>Format</th><th></th></tr></thead><tbody>" + cardRows.map((row) => "<tr data-type='" + esc(row.kind) + "' data-field='" + esc(row.field.fieldIdentifier) + "'><td>" + esc(row.kind) + "</td><td>" + esc(row.field.name) + "</td><td class='card-format'>" + esc(row.field.displayFormat) + "</td><td><button type='button' class='card-remove'>Retirer</button></td></tr>").join("") + "</tbody></table>"
+            : "<p id='card-fields-empty' class='sub'>Le titre reste affiché.</p>";
+          const typeNames = ["Epic", "Feature", "User Story", "Bug", "Task", "Issue", "Test Case"];
+          const typeOptions = typeNames.map((kind) => "<option value='" + esc(kind) + "'" + (kind === "User Story" ? " selected" : "") + ">" + esc(kind) + "</option>").join("");
+          const extras = [
+            { referenceName: "Microsoft.VSTS.Scheduling.StoryPoints", name: "Story Points", type: "double" },
+            { referenceName: "Microsoft.VSTS.Scheduling.RemainingWork", name: "Remaining Work", type: "double" },
+            { referenceName: "Microsoft.VSTS.Common.Priority", name: "Priority", type: "integer" },
+            { referenceName: "Microsoft.VSTS.Common.StackRank", name: "Stack Rank", type: "double" },
+            { referenceName: "Microsoft.VSTS.Common.Activity", name: "Activity", type: "string" },
+          ];
+          const known = new Set((fieldPage.value || []).map((field) => field.referenceName));
+          const fieldOptions = (fieldPage.value || []).concat(extras.filter((field) => !known.has(field.referenceName))).filter((field) => field.referenceName !== "System.Id" && field.referenceName !== "System.Title").map((field) => "<option value='" + esc(field.referenceName) + "' data-name='" + esc(field.name) + "' data-format='" + esc(displayFormat(field.type)) + "'>" + esc(field.name) + "</option>").join("");
+          const cardForm = "<h2>Champs de carte</h2>" + cardTable + "<div class='command'><label for='card-type'>Type</label><select id='card-type'>" + typeOptions + "</select><label for='card-field'>Champ</label><select id='card-field'>" + fieldOptions + "</select><button id='card-add' type='button'>Afficher</button></div><p id='card-error' class='error' hidden></p>";
+          view.innerHTML = "<h1>Tableaux</h1><p class='sub'>Glisser une carte change l'état et la ligne, comme sur un board.</p><div class='command'><input id='col-name' placeholder='Nouvelle colonne' /><button id='col-add' type='button'>Ajouter une colonne</button><input id='lane-name' placeholder='Nouvelle ligne' /><button id='lane-add' type='button'>Ajouter une ligne</button></div>" + note + cardForm + "<div class='lanes'>" + lanes.map((lane) => {
             const label = lane.name || "Par défaut";
             const remove = lane.name ? "<button class='lane-remove' type='button'>Retirer</button>" : "";
             const board = "<div class='board'>" + columns.map((column) => {
@@ -903,8 +947,8 @@
                 placed.add(item.id);
                 return true;
               }).map((item) => {
-              const meta = [assignedName(item), item.fields?.["System.Tags"] || ""].filter(Boolean).join(" · ");
-              return "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div>" + (meta ? "<div class='sub'>" + esc(meta) + "</div>" : "") + "</article>";
+              const meta = cardLine(item);
+              return "<article class='card' draggable='true' data-id='" + item.id + "' data-type='" + esc(item.fields?.["System.WorkItemType"] || "User Story") + "'><b>#" + item.id + "</b><div>" + esc(titleOf(item)) + "</div>" + (meta ? "<div class='sub card-fields'>" + esc(meta) + "</div>" : "") + "</article>";
             }).join("") || "<p class='sub empty'>Vide</p>";
               const columnRemove = column.columnType === "inProgress" ? "<button class='col-remove' type='button'>Retirer</button>" : "";
               return "<section class='col' data-name='" + esc(column.name) + "' data-limit='" + Number(column.itemLimit || 0) + "' data-map='" + esc(JSON.stringify(column.stateMappings || {})) + "'><h2><span>" + esc(column.name) + columnRemove + "</span><input class='col-limit' type='number' min='0' value='" + Number(column.itemLimit || 0) + "' aria-label='Limite " + esc(column.name) + "' /></h2>" + cards + "</section>";
@@ -950,6 +994,35 @@
               event.stopPropagation();
               const lane = button.closest(".lane").dataset.lane;
               saveRows(lanes.filter((item) => item.name !== lane));
+            };
+          });
+          async function saveCards(next) {
+            const error = document.getElementById("card-error");
+            error.hidden = true;
+            try {
+              await api("PUT", cardUrl, { cards: next });
+              location.reload();
+            } catch (failure) {
+              error.hidden = false;
+              error.textContent = failure.message;
+            }
+          }
+          document.getElementById("card-add").onclick = () => {
+            const kind = document.getElementById("card-type").value;
+            const option = document.getElementById("card-field").selectedOptions[0];
+            if (!option) return;
+            const next = {};
+            typeNames.forEach((name) => { next[name] = (cards[name] || []).map((field) => ({ name: field.name, fieldIdentifier: field.fieldIdentifier, displayFormat: field.displayFormat })); });
+            next[kind] = next[kind].concat([{ name: option.dataset.name, fieldIdentifier: option.value, displayFormat: option.dataset.format }]);
+            saveCards(next);
+          };
+          document.querySelectorAll(".card-remove").forEach((button) => {
+            button.onclick = () => {
+              const row = button.closest("tr");
+              const next = {};
+              typeNames.forEach((name) => { next[name] = (cards[name] || []).map((field) => ({ name: field.name, fieldIdentifier: field.fieldIdentifier, displayFormat: field.displayFormat })); });
+              next[row.dataset.type] = next[row.dataset.type].filter((field) => field.fieldIdentifier !== row.dataset.field);
+              saveCards(next);
             };
           });
           let draggedId = "";
