@@ -45312,6 +45312,17 @@ async fn iteration_work_items_list_the_story_and_its_task_and_keep_the_sibling()
 
     let (status, body, _) = call(
         &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"Sprint 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
         "GET",
         "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/Sprint%201/workitems?api-version=7.1",
         Some(&auth),
@@ -45480,4 +45491,306 @@ async fn iteration_work_items_list_the_story_and_its_task_and_keep_the_sibling()
         .collect();
     assert_eq!(kept, found);
     let _ = suivi;
+}
+
+#[tokio::test]
+async fn team_iterations_stay_with_the_team_that_selected_them() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let names = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body)
+            .unwrap()["value"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), vec!["Sprint 1".to_string()]);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 0);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Suivi","attributes":{"startDate":"2026-11-09","finishDate":"2026-11-20"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let suivi = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identifier"].as_str().unwrap().to_string();
+    let adopt = format!(r#"{{"id":"{suivi}"}}"#);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&adopt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Suivi");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["count"], 0);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept = names(&body);
+    assert!(kept.iter().any(|name| name == "Sprint 1"), "{kept:?}");
+    assert!(kept.iter().any(|name| name == "Suivi"), "{kept:?}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"Sprint 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde_added: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let sonde_sprint = sonde_added["id"].as_str().map(str::to_string).or_else(|| sonde_added["id"].as_i64().map(|id| id.to_string())).unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"id":"Sprint 1"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération déjà retenue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), vec!["Sprint 1".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/Suivi?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("itération introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(names(&body).iter().any(|name| name == "Suivi"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/capacities/azurz?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"teamMember":{"displayName":"azurz","uniqueName":"azurz"},"activities":[{"name":"Development","capacityPerDay":6}],"daysOff":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/{sonde_sprint}/capacities/azurz?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"teamMember":{"displayName":"azurz","uniqueName":"azurz"},"activities":[{"name":"Testing","capacityPerDay":3}],"daysOff":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/capacities?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let capacities: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(capacities["count"], 1);
+    assert_eq!(capacities["value"][0]["activities"][0]["capacityPerDay"], 6);
+    assert_eq!(capacities["value"][0]["activities"][0]["name"], "Development");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/{sonde_sprint}/capacities?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde_capacities: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde_capacities["count"], 1);
+    assert_eq!(sonde_capacities["value"][0]["activities"][0]["capacityPerDay"], 3);
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/teamdaysoff?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"daysOff":[{"start":"2026-10-30T00:00:00Z","end":"2026-10-30T00:00:00Z"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/{sonde_sprint}/teamdaysoff?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["daysOff"].as_array().unwrap().len(), 0);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/teamdaysoff?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["daysOff"][0]["start"], "2026-10-30T00:00:00Z");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), vec!["Sprint 1".to_string()]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(names(&body).iter().any(|name| name == "Suivi"), "{body}");
 }

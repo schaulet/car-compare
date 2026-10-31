@@ -586,11 +586,20 @@
           return;
         }
         if (hub === "/_sprints") {
-          const iterations = await collection("work/teamsettings/iterations");
+          const teams = (await api("GET", "/" + org + "/_apis/projects/" + encodeURIComponent(project) + "/teams?api-version=7.1")).value || [];
+          const teamNames = teams.map((item) => item.name).filter(Boolean);
+          const remembered = sessionStorage.getItem("sprint-team");
+          const teamName = teamNames.includes(remembered) ? remembered : (project + " Team");
+          const teamRoot = "/" + org + "/" + project + "/" + encodeURIComponent(teamName) + "/_apis";
+          async function teamCollection(area) {
+            const data = await api("GET", teamRoot + "/" + area + "?api-version=7.1");
+            return data.value || [];
+          }
+          const iterations = await teamCollection("work/teamsettings/iterations");
           const sprint = iterations.find((item) => item.attributes && item.attributes.timeFrame === "current") || iterations[0];
-          const capacities = sprint ? await collection("work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities") : [];
-          const days = sprint ? await api("GET", root + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/teamdaysoff?api-version=7.1") : { daysOff: [] };
-          const relations = sprint ? ((await api("GET", root + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/workitems?api-version=7.1")).workItemRelations || []) : [];
+          const capacities = sprint ? await teamCollection("work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities") : [];
+          const days = sprint ? await api("GET", teamRoot + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/teamdaysoff?api-version=7.1") : { daysOff: [] };
+          const relations = sprint ? ((await api("GET", teamRoot + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/workitems?api-version=7.1")).workItemRelations || []) : [];
           const byId = new Map((await workItems()).map((item) => [item.id, item]));
           const sprintItems = relations.map((link) => {
             const id = link.target && link.target.id;
@@ -616,27 +625,32 @@
             const action = frame === "current" ? "" : "<button type='button' class='sprint-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "'>Retirer</button>";
             return "<tr><td>" + esc(item.name) + "</td><td class='sprint-frame'>" + esc(frame) + "</td><td>" + action + "</td></tr>";
           }).join("") + "</tbody></table>" : "<p id='sprint-empty' class='sub'>Aucune itération.</p>";
-          view.innerHTML = "<h1>Sprints</h1><div class='command'><input id='iteration-name' placeholder='Pompe' /><button id='iteration-add' type='button'>Ajouter l'itération</button></div>" + sprintRows + "<p class='sub' id='sprint-name'>" + esc(sprint ? sprint.name : "Aucune itération") + " · " + esc(String(start).slice(0, 10)) + " → " + esc(String(finish).slice(0, 10)) + " · " + esc((days.daysOff || []).length) + " jour d'équipe off</p><h2>Capacité</h2><div class='command'><input id='cap-member' placeholder='Membre' value='" + esc(user) + "' /><select id='cap-activity'><option>Development</option><option>Testing</option><option>Design</option><option>Requirements</option></select><input id='cap-hours' type='number' min='0' step='0.5' value='6' /><button id='cap-save' type='button'>Enregistrer la capacité</button></div>" + people + "<h2>Éléments du sprint</h2><div class='command'><input id='sprint-title' placeholder='Tâche du sprint' /><button id='sprint-create' type='button'>Ajouter</button></div>" + sprintTable(sprintItems);
+          const teamOptions = teamNames.map((name) => "<option" + (name === teamName ? " selected" : "") + ">" + esc(name) + "</option>").join("");
+          view.innerHTML = "<h1>Sprints</h1><div class='command'><label for='sprint-team'>Équipe</label><select id='sprint-team'>" + teamOptions + "</select><input id='iteration-name' placeholder='Pompe' /><button id='iteration-add' type='button'>Ajouter l'itération</button></div>" + sprintRows + "<p class='sub' id='sprint-name'>" + esc(sprint ? sprint.name : "Aucune itération") + " · " + esc(String(start).slice(0, 10)) + " → " + esc(String(finish).slice(0, 10)) + " · " + esc((days.daysOff || []).length) + " jour d'équipe off</p><h2>Capacité</h2><div class='command'><input id='cap-member' placeholder='Membre' value='" + esc(user) + "' /><select id='cap-activity'><option>Development</option><option>Testing</option><option>Design</option><option>Requirements</option></select><input id='cap-hours' type='number' min='0' step='0.5' value='6' /><button id='cap-save' type='button'>Enregistrer la capacité</button></div>" + people + "<h2>Éléments du sprint</h2><div class='command'><input id='sprint-title' placeholder='Tâche du sprint' /><button id='sprint-create' type='button'>Ajouter</button></div>" + sprintTable(sprintItems);
           bindRows();
+          document.getElementById("sprint-team").onchange = () => {
+            sessionStorage.setItem("sprint-team", document.getElementById("sprint-team").value);
+            location.reload();
+          };
           document.getElementById("iteration-add").onclick = async () => {
             const name = document.getElementById("iteration-name").value || "Pompe";
             const created = await api("POST", root + "/wit/classificationnodes/iterations?api-version=7.1", {
               name: name,
               attributes: { startDate: "2026-11-09", finishDate: "2026-11-20" },
             });
-            await api("POST", root + "/work/teamsettings/iterations?api-version=7.1", { id: created.identifier });
+            await api("POST", teamRoot + "/work/teamsettings/iterations?api-version=7.1", { id: created.identifier });
             location.reload();
           };
           document.querySelectorAll("button.sprint-remove").forEach((button) => {
             button.onclick = async () => {
-              await api("DELETE", root + "/work/teamsettings/iterations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+              await api("DELETE", teamRoot + "/work/teamsettings/iterations/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
               location.reload();
             };
           });
           document.getElementById("cap-save").onclick = async () => {
             if (!sprint) return;
             const member = document.getElementById("cap-member").value || user;
-            await api("PUT", root + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities/" + encodeURIComponent(member) + "?api-version=7.1", {
+            await api("PUT", teamRoot + "/work/teamsettings/iterations/" + encodeURIComponent(sprint.id) + "/capacities/" + encodeURIComponent(member) + "?api-version=7.1", {
               teamMember: { displayName: member, uniqueName: member },
               activities: [{ name: document.getElementById("cap-activity").value, capacityPerDay: Number(document.getElementById("cap-hours").value || 0) }],
               daysOff: [],

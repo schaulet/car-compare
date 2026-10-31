@@ -517,28 +517,31 @@ fn team_settings(
     body: &[u8],
 ) -> Response {
     if rest.len() >= 3 && rest[2].eq_ignore_ascii_case("iterations") {
+        let Some(team_id) = resolve_team_id(state, org, project, team) else {
+            return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+        };
         if rest.len() >= 5 {
             let iteration = &rest[3];
             if rest[4].eq_ignore_ascii_case("capacities") {
-                return capacities(state, method, org, project, iteration, rest, body);
+                return capacities(state, method, org, project, &team_id, iteration, rest, body);
             }
             if rest[4].eq_ignore_ascii_case("teamdaysoff") {
-                return team_days_off(state, method, org, project, iteration, body);
+                return team_days_off(state, method, org, project, &team_id, iteration, body);
             }
             if rest[4].eq_ignore_ascii_case("workitems") {
-                return iteration_work_items(state, method, org, project, team, iteration, rest);
+                return iteration_work_items(state, method, org, project, &team_id, iteration, rest);
             }
         }
         if rest.len() == 3 && method == Method::POST {
-            return add_team_iteration(state, org, project, body);
+            return add_team_iteration(state, org, project, &team_id, body);
         }
         if rest.len() == 4 && method == Method::DELETE {
-            return remove_team_iteration(state, org, project, &rest[3]);
+            return remove_team_iteration(state, org, project, &team_id, &rest[3]);
         }
         if method != Method::GET {
             return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
         }
-        let value = team_iterations(state, org, project);
+        let value = team_iterations(state, org, project, &team_id);
         if rest.len() >= 4 {
             let id = &rest[3];
             return match value.into_iter().find(|item| iteration_matches(item, id)) {
@@ -1074,11 +1077,20 @@ fn member_item(display: &str, unique: &str, admin: bool) -> Value {
     })
 }
 
-fn capacities(state: &AppState, method: &Method, org: &str, project: &str, iteration: &str, rest: &[String], body: &[u8]) -> Response {
-    if iteration_by_id(state, org, project, iteration).is_none() {
+fn capacities(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team_id: &str,
+    iteration: &str,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    if iteration_by_id(state, org, project, team_id, iteration).is_none() {
         return fail(StatusCode::NOT_FOUND, "itération introuvable");
     }
-    let key = format!("work/teamsettings/iterations/{iteration}/capacities");
+    let key = format!("work/teamsettings/{team_id}/iterations/{iteration}/capacities");
     let member = rest.get(5).map(String::as_str);
     if member.is_none() && method == Method::GET {
         let value = state.read(|db| db.project(org, project).map(|stored| stored.list_bucket(&key)).unwrap_or_default());
@@ -1161,13 +1173,10 @@ fn iteration_work_items(
     method: &Method,
     org: &str,
     project: &str,
-    team: Option<&str>,
+    team_id: &str,
     iteration: &str,
     rest: &[String],
 ) -> Response {
-    let Some(team_id) = resolve_team_id(state, org, project, team) else {
-        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
-    };
     if rest.len() != 5 {
         return if method == Method::GET {
             fail(StatusCode::NOT_FOUND, "éléments d'itération introuvables")
@@ -1175,7 +1184,7 @@ fn iteration_work_items(
             fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
         };
     }
-    let Some(selected) = team_iterations(state, org, project)
+    let Some(selected) = team_iterations(state, org, project, team_id)
         .into_iter()
         .find(|item| iteration_matches(item, iteration))
     else {
@@ -1283,11 +1292,11 @@ fn iteration_relations(org: &str, project: &str, items: &[Value]) -> Vec<Value> 
     relations
 }
 
-fn team_days_off(state: &AppState, method: &Method, org: &str, project: &str, iteration: &str, body: &[u8]) -> Response {
-    if iteration_by_id(state, org, project, iteration).is_none() {
+fn team_days_off(state: &AppState, method: &Method, org: &str, project: &str, team_id: &str, iteration: &str, body: &[u8]) -> Response {
+    if iteration_by_id(state, org, project, team_id, iteration).is_none() {
         return fail(StatusCode::NOT_FOUND, "itération introuvable");
     }
-    let key = format!("work/teamsettings/iterations/{iteration}/teamdaysoff");
+    let key = format!("work/teamsettings/{team_id}/iterations/{iteration}/teamdaysoff");
     if method == Method::GET {
         let stored = state.read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, "days")));
         let days_off = stored.and_then(|item| item.get("daysOff").cloned()).unwrap_or(json!([]));
@@ -1316,10 +1325,11 @@ fn team_days_off(state: &AppState, method: &Method, org: &str, project: &str, it
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
 }
 
-fn team_iterations(state: &AppState, org: &str, project: &str) -> Vec<Value> {
+fn team_iterations(state: &AppState, org: &str, project: &str, team_id: &str) -> Vec<Value> {
+    let key = format!("work/teamsettings/{team_id}/iterations");
     state.read(|db| {
         db.project(org, project)
-            .map(|stored| stored.list_bucket("work/teamsettings/iterations"))
+            .map(|stored| stored.list_bucket(&key))
             .unwrap_or_default()
     })
 }
@@ -1347,7 +1357,7 @@ fn iteration_matches(item: &Value, id: &str) -> bool {
         || item_text(item, "identifier").is_some_and(|name| name.eq_ignore_ascii_case(id))
 }
 
-fn add_team_iteration(state: &AppState, org: &str, project: &str, body: &[u8]) -> Response {
+fn add_team_iteration(state: &AppState, org: &str, project: &str, team_id: &str, body: &[u8]) -> Response {
     let Some(payload) = parse_json(body).filter(|value| value.is_object()) else {
         return fail(StatusCode::BAD_REQUEST, "itération illisible");
     };
@@ -1367,7 +1377,8 @@ fn add_team_iteration(state: &AppState, org: &str, project: &str, body: &[u8]) -
     if item_text(&node, "identifier").as_deref() == Some("iteration") {
         return fail(StatusCode::BAD_REQUEST, "itération racine");
     }
-    let selected = team_iterations(state, org, project);
+    let key = format!("work/teamsettings/{team_id}/iterations");
+    let selected = team_iterations(state, org, project, team_id);
     let name = item_text(&node, "name").unwrap_or_default();
     let identifier = item_text(&node, "identifier").unwrap_or_default();
     if selected.iter().any(|item| {
@@ -1393,7 +1404,7 @@ fn add_team_iteration(state: &AppState, org: &str, project: &str, body: &[u8]) -
             "identifier": identifier,
             "attributes": attributes
         });
-        Some(stored.put_bucket("work/teamsettings/iterations", item))
+        Some(stored.put_bucket(&key, item))
     });
     match created {
         Some(item) => Json(dress_iteration(item)).into_response(),
@@ -1401,8 +1412,9 @@ fn add_team_iteration(state: &AppState, org: &str, project: &str, body: &[u8]) -
     }
 }
 
-fn remove_team_iteration(state: &AppState, org: &str, project: &str, id: &str) -> Response {
-    let selected = team_iterations(state, org, project);
+fn remove_team_iteration(state: &AppState, org: &str, project: &str, team_id: &str, id: &str) -> Response {
+    let key = format!("work/teamsettings/{team_id}/iterations");
+    let selected = team_iterations(state, org, project, team_id);
     let Some(current) = selected.into_iter().find(|item| iteration_matches(item, id)) else {
         return fail(StatusCode::NOT_FOUND, "itération introuvable");
     };
@@ -1418,7 +1430,7 @@ fn remove_team_iteration(state: &AppState, org: &str, project: &str, id: &str) -
     let stored_id = item_id(&current);
     let removed = state.write(|db| {
         db.project_mut(org, project)
-            .and_then(|stored| stored.buckets.get_mut("work/teamsettings/iterations"))
+            .and_then(|stored| stored.buckets.get_mut(&key))
             .is_some_and(|bucket| bucket.remove(&stored_id))
     });
     if removed {
@@ -1467,15 +1479,10 @@ fn normalize_lab_date(value: &Value) -> Result<String, &'static str> {
     Err("date illisible")
 }
 
-fn iteration_by_id(state: &AppState, org: &str, project: &str, id: &str) -> Option<Value> {
-    state.read(|db| {
-        db.project(org, project).and_then(|stored| {
-            stored
-                .list_bucket("work/teamsettings/iterations")
-                .into_iter()
-                .find(|item| item_id(item) == id || item_text(item, "name").as_deref() == Some(id))
-        })
-    })
+fn iteration_by_id(state: &AppState, org: &str, project: &str, team_id: &str, id: &str) -> Option<Value> {
+    team_iterations(state, org, project, team_id)
+        .into_iter()
+        .find(|item| item_id(item) == id || item_text(item, "name").as_deref() == Some(id))
 }
 
 fn capacity_item(org: &str, project: &str, iteration: &str, payload: &Value) -> Value {

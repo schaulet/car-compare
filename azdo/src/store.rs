@@ -186,7 +186,7 @@ impl ProjectData {
             }))
         });
         self.buckets
-            .entry("work/teamsettings/iterations".into())
+            .entry("work/teamsettings/1/iterations".into())
             .or_insert_with(|| {
                 Bucket::with(json!({
                     "name": "Sprint 1",
