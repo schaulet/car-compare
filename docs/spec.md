@@ -1,5 +1,9 @@
 # Spécifications fonctionnelles
 
+## Environnement de vérification
+
+Les scénarios ci-dessous se rejouent sans les passerelles Ignition. Car Compare expose `POST /api/v1/vehicles` et `GET /health`. Azurz expose `POST /api/demands`, le bouton « Traiter », et `POST /mcp` (401 sans jeton Bearer, 200 avec `dust-lab-token`). L'Azure DevOps de laboratoire expose `GET /health` sans authentification et la création d'un work item avec le PAT `azurz-lab-pat`.
+
 ## Azurz
 
 ### Acteurs

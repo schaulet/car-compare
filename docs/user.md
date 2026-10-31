@@ -1,5 +1,17 @@
 # Guide utilisateur
 
+## Poste de développement
+
+Sans Docker :
+
+```bash
+uv sync --all-extras
+uv run uvicorn car_compare.main:app --host 0.0.0.0 --port 8000
+uv run azurz
+```
+
+Car Compare : http://localhost:8000/docs. Azurz : http://localhost:8080 (les tickets restent en mémoire). Si le dossier `azdo` est présent, `cargo build --manifest-path azdo/Cargo.toml` puis le binaire sur le port 8081, mot de passe `azurz-lab-pat`.
+
 ## Azurz, pour la démo
 
 ### Démarrer le lab

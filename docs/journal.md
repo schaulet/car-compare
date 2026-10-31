@@ -1,5 +1,12 @@
 # Journal de suivi
 
+## 2026-10-30 — Environnement de développement
+
+- **Demande**: préparer l'environnement pour que les agents puissent lancer et vérifier le dépôt, puis montrer que les applications répondent.
+- **Actions**: installation de uv 0.13.6, `uv sync --all-extras` (relancé une seconde fois), compilation de `azdo` quand `azdo/Cargo.toml` est présent, démarrage de Car Compare sur le port 8000, d'Azurz sur le port 8080 et d'Azure DevOps de laboratoire sur le port 8081.
+- **Vérification**: ruff sans écart, 27 tests pytest, 17 scénarios behave, 145 tests de contrat Rust. Création d'un véhicule Renault Clio, traitement de la demande « OEE Ligne 1 » jusqu'à l'artefact 1.0.0, work item « Environnement Cloud Agent », handshake MCP accepté avec le jeton et refusé sans jeton.
+- **Limite**: le lab Docker des trois passerelles Ignition n'est pas démarré ici. L'image de base n'a pas Docker, et ces images sont hors du cycle de développement quotidien. La branche par défaut `main` ne contient pas encore `azdo` : la compilation Rust ne part que si le manifeste est dans l'arbre.
+
 ## 2026-10-29 — Azure DevOps en Rust pour Linux
 
 - **Demande**: réimplémenter Azure DevOps en Rust, avec l'ensemble des API et une interface visuelle identique, pour tester des intégrations depuis Linux, puis l'utiliser dans le lab.
