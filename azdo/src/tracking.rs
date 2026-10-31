@@ -20,6 +20,7 @@ pub fn dispatch(
     let response = match (area.as_str(), resource.as_str()) {
         ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
+        ("work", "workitemsorder") => reorder_work_items(state, method, org, project, team, rest, body),
         ("work", "processconfiguration") => process_configuration(state, method, org, project, team, rest),
         ("work", "plans") => delivery_plans(state, method, org, project, rest, body),
         ("work", "processes") => {
@@ -95,19 +96,24 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
     let areas = team_area_rules(state, org, project, team);
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("workitems") {
         let backlog = &rest[2];
-        let rows = state.read(|db| {
+        let mut rows = state.read(|db| {
             db.project(org, project)
                 .map(|stored| {
                     stored
                         .work_items
                         .values()
                         .filter(|item| backlog_matches(backlog, item, &behavior) && area_covered(&item_area(item, project), &areas))
-                        .filter_map(|item| item.get("id").cloned())
-                        .map(|id| json!({"target": {"id": id}, "id": id}))
+                        .cloned()
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         });
+        rows.sort_by_key(backlog_rank);
+        let rows = rows
+            .into_iter()
+            .filter_map(|item| item.get("id").cloned())
+            .map(|id| json!({"target": {"id": id}, "id": id}))
+            .collect();
         return Json(page(rows)).into_response();
     }
     Json(page(vec![
@@ -117,6 +123,277 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
         json!({"id": "Microsoft.TaskCategory", "name": "Tasks", "rank": 4, "workItemTypes": named_types(&task_type_names(&behavior))}),
     ]))
     .into_response()
+}
+
+fn backlog_rank(item: &Value) -> (u8, i64, i64) {
+    let id = item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+    match stack_rank(item) {
+        Some(rank) => (0, rank, id),
+        None => (1, id, id),
+    }
+}
+
+fn stack_rank(item: &Value) -> Option<i64> {
+    let value = item.get("fields")?.get("Microsoft.VSTS.Common.StackRank")?;
+    value.as_i64().or_else(|| value.as_f64().and_then(|number| number.is_finite().then_some(number.round() as i64)))
+}
+
+fn reorder_work_items(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    rest: &[String],
+    body: &[u8],
+) -> Response {
+    if rest.len() != 2 {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "ordre introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if method != Method::PATCH {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let payload = match parse_json(body) {
+        Some(value) if value.is_object() => value,
+        _ => return fail(StatusCode::BAD_REQUEST, "ordre illisible"),
+    };
+    let ids = match moved_ids(&payload) {
+        Ok(ids) => ids,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let previous = match neighbor_id(payload.get("previousId")) {
+        Ok(id) => id,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let next = match neighbor_id(payload.get("nextId")) {
+        Ok(id) => id,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    if previous.is_none() && next.is_none() {
+        return fail(StatusCode::BAD_REQUEST, "position absente");
+    }
+    if previous.is_some() && previous == next {
+        return fail(StatusCode::BAD_REQUEST, "position illisible");
+    }
+    let parent = match parent_id(payload.get("parentId")) {
+        Ok(id) => id,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let iteration = match requested_iteration(state, org, project, payload.get("iterationPath")) {
+        Ok(path) => path,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let areas = area_rules_of(&stored_team_fields(state, org, project, &team_id), project);
+    let placed = match place_ids(state, org, project, &areas, &ids, previous, next, parent, iteration.as_deref()) {
+        Ok(placed) => placed,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    state.write(|db| {
+        let Some(stored) = db.project_mut(org, project) else {
+            return;
+        };
+        for (index, id) in placed.iter().enumerate() {
+            let rank = (index as i64) + 1;
+            let current = stored.work_items.get(id).and_then(stack_rank);
+            if current == Some(rank) {
+                continue;
+            }
+            let ops = vec![json!({"op": "add", "path": "/fields/Microsoft.VSTS.Common.StackRank", "value": rank})];
+            let _ = stored.patch_work_item(*id, &ops);
+        }
+    });
+    let value = ids
+        .iter()
+        .filter_map(|id| placed.iter().position(|current| current == id).map(|index| json!({"id": id, "order": index as i64 + 1})))
+        .collect();
+    Json(page(value)).into_response()
+}
+
+fn moved_ids(payload: &Value) -> Result<Vec<i64>, &'static str> {
+    let rows = payload.get("ids").and_then(|value| value.as_array()).ok_or("ordre illisible")?;
+    if rows.is_empty() {
+        return Err("ordre illisible");
+    }
+    let mut ids = Vec::new();
+    for row in rows {
+        let id = row.as_i64().filter(|id| *id > 0).ok_or("élément introuvable")?;
+        if ids.contains(&id) {
+            return Err("élément déjà présent");
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+fn neighbor_id(value: Option<&Value>) -> Result<Option<i64>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_i64().filter(|id| *id > 0).map(Some).ok_or("voisin introuvable")
+}
+
+fn parent_id(value: Option<&Value>) -> Result<Option<i64>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_i64().filter(|id| *id > 0).map(Some).ok_or("parent introuvable")
+}
+
+fn requested_iteration(state: &AppState, org: &str, project: &str, value: Option<&Value>) -> Result<Option<String>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(text) = value.as_str().map(str::trim) else {
+        return Err("itération inconnue");
+    };
+    if text.is_empty() {
+        return Err("itération inconnue");
+    }
+    crate::shapes::iteration_paths(state, org, project)
+        .into_iter()
+        .find(|path| path.eq_ignore_ascii_case(text))
+        .ok_or("itération inconnue")
+        .map(Some)
+}
+
+fn place_ids(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    areas: &[(String, bool)],
+    ids: &[i64],
+    previous: Option<i64>,
+    next: Option<i64>,
+    parent: Option<i64>,
+    iteration: Option<&str>,
+) -> Result<Vec<i64>, &'static str> {
+    let items = state.read(|db| db.project(org, project).map(|stored| stored.work_items.clone()).unwrap_or_default());
+    if let Some(parent_id) = parent {
+        if !items.contains_key(&parent_id) {
+            return Err("parent introuvable");
+        }
+    }
+    let membership = |id: i64| -> Result<(), &'static str> {
+        let Some(item) = items.get(&id) else {
+            return Err("élément introuvable");
+        };
+        if !area_covered(&item_area(item, project), areas) {
+            return Err("élément introuvable");
+        }
+        if let Some(path) = iteration {
+            let current = item_iteration(item, project);
+            if !current.eq_ignore_ascii_case(path) {
+                return Err("itération incompatible");
+            }
+        }
+        if let Some(parent_id) = parent {
+            let parent_item = items.get(&parent_id).ok_or("parent introuvable")?;
+            if !linked_parent(item, parent_item) {
+                return Err("parent incompatible");
+            }
+        }
+        Ok(())
+    };
+    for id in ids {
+        membership(*id)?;
+    }
+    let neighbor = |id: i64| -> Result<(), &'static str> {
+        if ids.contains(&id) {
+            return Err("position illisible");
+        }
+        match membership(id) {
+            Ok(()) => Ok(()),
+            Err("élément introuvable") => Err("voisin introuvable"),
+            Err("itération incompatible") => Err("itération incompatible"),
+            Err("parent incompatible") => Err("parent incompatible"),
+            Err(message) => Err(message),
+        }
+    };
+    if let Some(id) = previous {
+        neighbor(id)?;
+    }
+    if let Some(id) = next {
+        neighbor(id)?;
+    }
+    let mut ordered = items
+        .values()
+        .filter(|item| {
+            let id = item.get("id").and_then(|value| value.as_i64()).unwrap_or(0);
+            membership(id).is_ok()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(backlog_rank);
+    let mut remaining = ordered
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+        .filter(|id| !ids.contains(id))
+        .collect::<Vec<_>>();
+    let index = match (previous, next) {
+        (Some(previous_id), Some(next_id)) => {
+            let previous_at = remaining.iter().position(|id| *id == previous_id).ok_or("voisin introuvable")?;
+            let next_at = remaining.iter().position(|id| *id == next_id).ok_or("voisin introuvable")?;
+            if next_at != previous_at + 1 {
+                return Err("position illisible");
+            }
+            previous_at + 1
+        }
+        (Some(previous_id), None) => remaining.iter().position(|id| *id == previous_id).ok_or("voisin introuvable")? + 1,
+        (None, Some(next_id)) => remaining.iter().position(|id| *id == next_id).ok_or("voisin introuvable")?,
+        (None, None) => return Err("position absente"),
+    };
+    remaining.splice(index..index, ids.iter().copied());
+    Ok(remaining)
+}
+
+fn item_iteration(item: &Value, project: &str) -> String {
+    item.get("fields")
+        .and_then(|fields| fields.get("System.IterationPath"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(project)
+        .to_string()
+}
+
+fn linked_parent(child: &Value, parent: &Value) -> bool {
+    let Some(parent_id) = parent.get("id").and_then(|value| value.as_i64()) else {
+        return false;
+    };
+    let Some(child_id) = child.get("id").and_then(|value| value.as_i64()) else {
+        return false;
+    };
+    relation_points(child, "System.LinkTypes.Hierarchy-Reverse", parent_id) || relation_points(parent, "System.LinkTypes.Hierarchy-Forward", child_id)
+}
+
+fn relation_points(item: &Value, relation: &str, target: i64) -> bool {
+    item.get("relations")
+        .and_then(|value| value.as_array())
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("rel").and_then(|value| value.as_str()).is_some_and(|name| name.eq_ignore_ascii_case(relation))
+                    && row
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|url| url.trim_end_matches('/').ends_with(&format!("/{target}")))
+            })
+        })
 }
 
 fn process_configuration(

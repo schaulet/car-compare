@@ -44718,3 +44718,332 @@ async fn board_card_rules_color_active_cards_for_one_team_and_keep_the_sibling()
     assert_eq!(rules["rules"]["fill"][1]["name"], "actif");
     assert_eq!(rules["rules"]["fill"][1]["settings"]["background-color"], "#fff4ce");
 }
+
+
+#[tokio::test]
+async fn backlog_order_places_a_story_before_its_neighbor_and_keeps_the_sibling() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Sonde","values":[{"value":"AzurzDemo\\Sonde","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    async fn story(app: &axum::Router, auth: &str, title: &str, area: &str) -> i64 {
+        let patch = serde_json::json!([
+            {"op": "add", "path": "/fields/System.Title", "value": title},
+            {"op": "add", "path": "/fields/System.AreaPath", "value": area}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap()
+    }
+    let pompe = story(&app, &auth, "Pompe", "AzurzDemo").await;
+    let relais = story(&app, &auth, "Relais", "AzurzDemo").await;
+    let alpha = story(&app, &auth, "Alpha", "AzurzDemo\\Sonde").await;
+    let beta = story(&app, &auth, "Beta", "AzurzDemo\\Sonde").await;
+
+    let backlog = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+    let sonde_backlog = "/azurz/AzurzDemo/Sonde/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+    let order = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/workitemsorder?api-version=7.1";
+    let sonde_order = "/azurz/AzurzDemo/Sonde/_apis/work/workitemsorder?api-version=7.1";
+    let ids = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body)
+            .unwrap()["value"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["id"].as_i64())
+            .collect::<Vec<_>>()
+    };
+    let (status, body, _) = call(&app, "GET", backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec![pompe, relais, alpha, beta]);
+
+    let move_relais = serde_json::json!({"ids": [relais], "nextId": pompe}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&move_relais)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let moved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(moved["count"], 1);
+    assert_eq!(moved["value"][0]["id"], relais);
+    assert_eq!(moved["value"][0]["order"], 1);
+    let (status, body, _) = call(&app, "GET", backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec![relais, pompe, alpha, beta]);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{relais}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["fields"]["Microsoft.VSTS.Common.StackRank"], 1);
+
+    let apart = serde_json::json!({"ids": [alpha], "previousId": relais, "nextId": beta}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&apart)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("position illisible"), "{body}");
+
+    let steal = serde_json::json!({"ids": [pompe], "nextId": relais}).to_string();
+    let (status, body, _) = call(&app, "PATCH", sonde_order, Some(&auth), None, "application/json", Some(&steal)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("élément introuvable"), "{body}");
+    let (status, body, _) = call(&app, "GET", backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec![relais, pompe, alpha, beta]);
+
+    let move_beta = serde_json::json!({"ids": [beta], "nextId": alpha}).to_string();
+    let (status, body, _) = call(&app, "PATCH", sonde_order, Some(&auth), None, "application/json", Some(&move_beta)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"][0]["order"], 1);
+    let (status, body, _) = call(&app, "GET", sonde_backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec![beta, alpha]);
+    let (status, body, _) = call(&app, "GET", backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.iter().position(|id| *id == relais) < found.iter().position(|id| *id == pompe), "{body}");
+
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some("[]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("ordre illisible"), "{body}");
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(r#"{"ids":[]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("ordre illisible"), "{body}");
+    let duplicated = serde_json::json!({"ids": [pompe, pompe], "nextId": relais}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&duplicated)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("élément déjà présent"), "{body}");
+    let missing = serde_json::json!({"ids": [pompe]}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&missing)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("position absente"), "{body}");
+    let itself = serde_json::json!({"ids": [pompe], "previousId": pompe}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&itself)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("position illisible"), "{body}");
+    let unknown_iteration = serde_json::json!({"ids": [pompe], "previousId": relais, "iterationPath": "AzurzDemo\\Inconnue"}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&unknown_iteration)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération inconnue"), "{body}");
+    let other_iteration = serde_json::json!({"ids": [pompe], "previousId": relais, "iterationPath": "AzurzDemo"}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&other_iteration)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération incompatible"), "{body}");
+    let (status, body, _) = call(&app, "POST", order, Some(&auth), None, "application/json", Some(&move_relais)).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/workitemsorder/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("ordre introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/workitemsorder?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&move_relais),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+    let absent_parent = serde_json::json!({"ids": [pompe], "nextId": relais, "parentId": 99999}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&absent_parent)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("parent introuvable"), "{body}");
+
+    let feature = serde_json::json!([{"op":"add","path":"/fields/System.Title","value":"Groupe"}]).to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Feature?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&feature),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parent = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    let other = serde_json::json!([{"op":"add","path":"/fields/System.Title","value":"Autre"}]).to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Feature?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&other),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other_parent = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    async fn child(app: &axum::Router, auth: &str, title: &str, parent: i64) -> i64 {
+        let patch = serde_json::json!([{"op": "add", "path": "/fields/System.Title", "value": title}]).to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+        let link = serde_json::json!([
+            {"op": "add", "path": "/relations/-", "value": {"rel": "System.LinkTypes.Hierarchy-Reverse", "url": format!("/{parent}")}}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "PATCH",
+            &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&link),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        id
+    }
+    let un = child(&app, &auth, "Un", parent).await;
+    let deux = child(&app, &auth, "Deux", parent).await;
+    let move_child = serde_json::json!({"ids": [deux], "nextId": un, "parentId": parent}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&move_child)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"][0]["id"], deux);
+    let wrong_parent = serde_json::json!({"ids": [deux], "nextId": un, "parentId": other_parent}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&wrong_parent)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("parent incompatible"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cards: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cards["cards"]["User Story"].as_array().unwrap().len(), 2);
+    assert_eq!(cards["cards"]["User Story"][0]["fieldIdentifier"], "System.AssignedTo");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/boards/Stories/cardrulesettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["rules"]["fill"].as_array().unwrap().len(), 0);
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_story = serde_json::json!([{"op":"add","path":"/fields/System.Title","value":"Atelier"}]).to_string();
+    let mut atelier_ids = Vec::new();
+    for _ in 0..2 {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/azurz/Atelier/_apis/wit/workitems/$User%20Story?api-version=7.1",
+            Some(&auth),
+            None,
+            "application/json-patch+json",
+            Some(&atelier_story),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        atelier_ids.push(serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap());
+    }
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), atelier_ids);
+    let (status, body, _) = call(&app, "GET", backlog, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.iter().position(|id| *id == relais) < found.iter().position(|id| *id == pompe), "{body}");
+    let sprint = serde_json::json!({"ids": [pompe], "previousId": relais, "iterationPath": "azurzdemo\\sprint 1"}).to_string();
+    let (status, body, _) = call(&app, "PATCH", order, Some(&auth), None, "application/json", Some(&sprint)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"][0]["order"], 2);
+}
