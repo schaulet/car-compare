@@ -769,6 +769,10 @@ fn resolve_team_id(state: &AppState, org: &str, project_key: &str, team: Option<
 }
 
 fn team_settings_document(state: &AppState, org: &str, project: &str, team_id: &str) -> Value {
+    dress_default_iteration(state, org, project, team_id, stored_team_settings(state, org, project, team_id))
+}
+
+fn stored_team_settings(state: &AppState, org: &str, project: &str, team_id: &str) -> Value {
     let key = settings_key(team_id);
     let stored = state
         .read(|db| db.project(org, project).and_then(|stored| stored.get_bucket(&key, team_id)))
@@ -777,9 +781,23 @@ fn team_settings_document(state: &AppState, org: &str, project: &str, team_id: &
     ensure_visibilities(stored)
 }
 
+pub fn team_default_iteration_path(state: &AppState, org: &str, project: &str, team: &str) -> Result<String, &'static str> {
+    let Some(team_id) = resolve_team_id(state, org, project, Some(team)) else {
+        return Err("équipe introuvable");
+    };
+    let settings = team_settings_document(state, org, project, &team_id);
+    Ok(settings
+        .get("defaultIteration")
+        .and_then(|value| value.get("path"))
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(project)
+        .to_string())
+}
+
 fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str, body: &[u8]) -> Response {
     let payload = parse_json(body).unwrap_or(json!({}));
-    let mut current = team_settings_document(state, org, project, team_id);
+    let mut current = stored_team_settings(state, org, project, team_id);
     if let Some(behavior) = payload.get("bugsBehavior").and_then(|value| value.as_str()) {
         if !matches!(behavior, "off" | "asTasks" | "asRequirements") {
             return fail(StatusCode::BAD_REQUEST, "comportement des bugs inconnu");
@@ -813,6 +831,16 @@ fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str
             return fail(StatusCode::BAD_REQUEST, message);
         }
     }
+    if let Some(iteration) = payload.get("defaultIteration") {
+        if let Err(message) = apply_default_iteration(state, org, project, team_id, &mut current, iteration) {
+            return fail(StatusCode::BAD_REQUEST, message);
+        }
+    }
+    if let Some(macro_name) = payload.get("defaultIterationMacro") {
+        if let Err(message) = apply_iteration_macro(&mut current, macro_name) {
+            return fail(StatusCode::BAD_REQUEST, message);
+        }
+    }
     if let Some(object) = current.as_object_mut() {
         object.insert("id".into(), json!(team_id));
     }
@@ -822,7 +850,102 @@ fn patch_team_settings(state: &AppState, org: &str, project: &str, team_id: &str
             stored.put_bucket(&key, current.clone());
         }
     });
-    Json(settings_body(current)).into_response()
+    Json(dress_default_iteration(state, org, project, team_id, settings_body(current))).into_response()
+}
+
+fn apply_default_iteration(
+    state: &AppState,
+    org: &str,
+    project: &str,
+    team_id: &str,
+    current: &mut Value,
+    iteration: &Value,
+) -> Result<(), &'static str> {
+    let Some(object) = iteration.as_object() else {
+        return Err("itération illisible");
+    };
+    let Some(token) = ["id", "path", "name", "identifier"].iter().find_map(|key| {
+        object.get(*key).map(value_text).filter(|text| !text.trim().is_empty())
+    }) else {
+        return Err("itération absente");
+    };
+    let Some(found) = team_iterations(state, org, project, team_id).into_iter().find(|item| iteration_token_matches(item, project, token.trim())) else {
+        return Err("itération inconnue");
+    };
+    let Some(document) = current.as_object_mut() else {
+        return Err("itération illisible");
+    };
+    document.insert("defaultIteration".into(), iteration_reference(project, &found));
+    document.insert("defaultIterationMacro".into(), Value::Null);
+    Ok(())
+}
+
+fn apply_iteration_macro(current: &mut Value, macro_name: &Value) -> Result<(), &'static str> {
+    let stored = if macro_name.is_null() {
+        Value::Null
+    } else if let Some(text) = macro_name.as_str() {
+        let text = text.trim();
+        if text.is_empty() {
+            Value::Null
+        } else if text.eq_ignore_ascii_case("@currentIteration") {
+            json!("@currentIteration")
+        } else {
+            return Err("macro d'itération inconnue");
+        }
+    } else {
+        return Err("macro d'itération inconnue");
+    };
+    let Some(document) = current.as_object_mut() else {
+        return Err("macro d'itération inconnue");
+    };
+    if stored.as_str().is_some() {
+        document.remove("defaultIteration");
+    }
+    document.insert("defaultIterationMacro".into(), stored);
+    Ok(())
+}
+
+fn dress_default_iteration(state: &AppState, org: &str, project: &str, team_id: &str, mut item: Value) -> Value {
+    let current_macro = item.get("defaultIterationMacro").and_then(|value| value.as_str()).unwrap_or("");
+    if current_macro.eq_ignore_ascii_case("@currentIteration") {
+        let resolved = current_team_iteration(state, org, project, team_id)
+            .map(|iteration| iteration_reference(project, &iteration))
+            .unwrap_or_else(|| json!({"name": project, "path": project}));
+        if let Some(object) = item.as_object_mut() {
+            object.insert("defaultIteration".into(), resolved);
+        }
+    } else if item.get("defaultIteration").is_none() || item.get("defaultIteration").is_some_and(|value| value.is_null()) {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("defaultIteration".into(), json!({"name": project, "path": project}));
+        }
+    }
+    item
+}
+
+fn current_team_iteration(state: &AppState, org: &str, project: &str, team_id: &str) -> Option<Value> {
+    team_iterations(state, org, project, team_id).into_iter().find(|item| {
+        dress_iteration(item.clone())
+            .get("attributes")
+            .and_then(|value| value.get("timeFrame"))
+            .and_then(|value| value.as_str())
+            == Some("current")
+    })
+}
+
+fn iteration_reference(project: &str, item: &Value) -> Value {
+    let path = item_text(item, "path").unwrap_or_default();
+    json!({
+        "id": item_id(item),
+        "name": item_text(item, "name").unwrap_or_default(),
+        "path": iteration_field_path(project, &path)
+    })
+}
+
+fn iteration_token_matches(item: &Value, project: &str, token: &str) -> bool {
+    iteration_matches(item, token)
+        || item_text(item, "path").is_some_and(|path| {
+            path.eq_ignore_ascii_case(token) || iteration_field_path(project, &path).eq_ignore_ascii_case(token)
+        })
 }
 
 fn default_team_settings(project: &str) -> Value {

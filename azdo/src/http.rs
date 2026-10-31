@@ -266,7 +266,7 @@ impl AppState {
             return fail(StatusCode::NOT_FOUND, "projet absent");
         };
         if head == "wit" {
-            return self.wit(&method, &org, &project, &rest, query, body);
+            return self.wit(&method, &org, &project, team.as_deref(), &rest, query, body);
         }
         if let Some(response) = crate::surface::project(self, &method, &org, &project, &rest, query, body) {
             return response;
@@ -347,6 +347,7 @@ impl AppState {
         method: &Method,
         org: &str,
         project: &str,
+        team: Option<&str>,
         rest: &[String],
         query: &str,
         body: &[u8],
@@ -409,7 +410,21 @@ impl AppState {
         if rest.len() >= 3 && rest[2].starts_with('$') && method == Method::POST {
             let kind = rest[2].trim_start_matches('$').replace("%20", " ");
             let ops = parse_json(body).unwrap_or(json!([]));
-            let ops = ops.as_array().cloned().unwrap_or_default();
+            let mut ops = ops.as_array().cloned().unwrap_or_default();
+            if let Some(team) = team {
+                let sets_iteration = ops.iter().any(|op| {
+                    op.get("path")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|path| path.to_ascii_lowercase().contains("system.iterationpath"))
+                });
+                if !sets_iteration {
+                    let path = match crate::tracking::team_default_iteration_path(self, org, project, team) {
+                        Ok(path) => path,
+                        Err(message) => return fail(StatusCode::NOT_FOUND, message),
+                    };
+                    ops.push(json!({"op": "add", "path": "/fields/System.IterationPath", "value": path}));
+                }
+            }
             let ops = match crate::shapes::prepare_work_item_ops(self, org, project, &kind, "", &ops) {
                 Ok(ops) => ops,
                 Err(message) => return fail(StatusCode::BAD_REQUEST, message),

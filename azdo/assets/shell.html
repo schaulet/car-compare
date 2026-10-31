@@ -799,25 +799,32 @@
             const listed = await api("GET", teamRoot + "/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1");
             const byId = new Map(items.map((item) => [item.id, item]));
             backlogItems = (listed.value || []).map((row) => byId.get(row.id)).filter(Boolean);
+            const iterations = await api("GET", teamRoot + "/work/teamsettings/iterations?api-version=7.1");
             const vis = settings.backlogVisibilities || {};
             requirementVisible = vis["Microsoft.RequirementCategory"] !== false;
+            const usingCurrent = String(settings.defaultIterationMacro || "").toLowerCase() === "@currentiteration";
+            const chosen = settings.defaultIteration || {};
+            const iterationOptions = "<option value='@currentIteration'" + (usingCurrent ? " selected" : "") + ">Itération courante</option>" + (iterations.value || []).map((item) => {
+              const selected = !usingCurrent && item.name === chosen.name ? " selected" : "";
+              return "<option value='" + esc(item.id) + "'" + selected + ">" + esc(item.name) + "</option>";
+            }).join("");
             const levels = [
               ["vis-epics", "Microsoft.EpicCategory", "Epics"],
               ["vis-features", "Microsoft.FeatureCategory", "Fonctionnalités"],
               ["vis-requirements", "Microsoft.RequirementCategory", "Exigences"],
             ];
-            visibilityBlock = "<div class='command' id='backlog-visibility'><label for='backlog-team'>Équipe</label><select id='backlog-team'>" + teamOptions + "</select>" + levels.map((level) => {
+            visibilityBlock = "<div class='command' id='backlog-visibility'><label for='backlog-team'>Équipe</label><select id='backlog-team'>" + teamOptions + "</select><label for='default-iteration'>Itération par défaut</label><select id='default-iteration'>" + iterationOptions + "</select><span id='default-iteration-path' class='sub'>" + esc(chosen.path || "") + "</span>" + levels.map((level) => {
               const checked = vis[level[1]] === false ? "" : " checked";
               return "<label for='" + level[0] + "'>" + level[2] + "</label><input id='" + level[0] + "' class='backlog-visible' type='checkbox' data-category='" + level[1] + "'" + checked + " />";
             }).join("") + "</div>";
           }
           function backlogTable(rows) {
             if (!rows.length) return "<p class='sub'>Aucun élément de travail.</p>";
-            return "<table id='backlog'><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th>État</th><th>Ordre</th><th></th></tr></thead><tbody>" + rows.map((item, index) => {
+            return "<table id='backlog'><thead><tr><th>ID</th><th>Titre</th><th>Type</th><th>État</th><th>Itération</th><th>Ordre</th><th></th></tr></thead><tbody>" + rows.map((item, index) => {
               const rank = item.fields?.["Microsoft.VSTS.Common.StackRank"];
               const up = index > 0 ? "<button type='button' class='backlog-up' data-id='" + item.id + "' data-next='" + rows[index - 1].id + "'>Monter</button>" : "";
               const down = index < rows.length - 1 ? "<button type='button' class='backlog-down' data-id='" + item.id + "' data-prev='" + rows[index + 1].id + "'>Descendre</button>" : "";
-              return "<tr data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='type'>" + esc(item.fields?.["System.WorkItemType"]) + "</td><td><span class='pill " + stateClass(item.fields?.["System.State"]) + "'>" + esc(item.fields?.["System.State"] || "New") + "</span></td><td class='rank'>" + esc(rank ?? "") + "</td><td>" + up + down + "</td></tr>";
+              return "<tr data-id='" + item.id + "'><td>" + item.id + "</td><td>" + esc(titleOf(item)) + "</td><td class='type'>" + esc(item.fields?.["System.WorkItemType"]) + "</td><td><span class='pill " + stateClass(item.fields?.["System.State"]) + "'>" + esc(item.fields?.["System.State"] || "New") + "</span></td><td class='iteration'>" + esc(item.fields?.["System.IterationPath"] || "") + "</td><td class='rank'>" + esc(rank ?? "") + "</td><td>" + up + down + "</td></tr>";
             }).join("") + "</tbody></table>";
           }
           const deleted = await api("GET", root + "/wit/recyclebin?api-version=7.1");
@@ -854,9 +861,8 @@
           async function moveBacklog(body) {
             const error = document.getElementById("backlog-error");
             error.hidden = true;
-            const teamName = project + " Team";
             try {
-              await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(teamName) + "/_apis/work/workitemsorder?api-version=7.1", body);
+              await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis/work/workitemsorder?api-version=7.1", body);
               location.reload();
             } catch (failure) {
               error.hidden = false;
@@ -868,6 +874,24 @@
             backlogTeam.onchange = () => {
               sessionStorage.setItem("backlog-team", backlogTeam.value);
               location.reload();
+            };
+          }
+          const defaultIteration = document.getElementById("default-iteration");
+          if (defaultIteration) {
+            defaultIteration.onchange = async () => {
+              const error = document.getElementById("backlog-error");
+              error.hidden = true;
+              const choice = defaultIteration.value;
+              const payload = choice === "@currentIteration"
+                ? { defaultIterationMacro: "@CurrentIteration" }
+                : { defaultIteration: { id: choice } };
+              try {
+                await api("PATCH", "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis/work/teamsettings?api-version=7.1", payload);
+                location.reload();
+              } catch (failure) {
+                error.hidden = false;
+                error.textContent = failure.message;
+              }
             };
           }
           document.querySelectorAll(".backlog-visible").forEach((box) => {
@@ -964,7 +988,10 @@
             const kind = document.getElementById("kind").value;
             const title = document.getElementById("new-title").value || "Sans titre";
             const patch = JSON.stringify([{ op: "add", path: "/fields/System.Title", value: title }]);
-            await api("POST", root + "/wit/workitems/$" + encodeURIComponent(kind) + "?api-version=7.1", patch, "application/json-patch+json");
+            const createRoot = hub === "/_backlogs"
+              ? "/" + org + "/" + encodeURIComponent(project) + "/" + encodeURIComponent(backlogTeamName) + "/_apis"
+              : root;
+            await api("POST", createRoot + "/wit/workitems/$" + encodeURIComponent(kind) + "?api-version=7.1", patch, "application/json-patch+json");
             location.reload();
           };
           document.querySelectorAll("button.bin-restore").forEach((button) => {

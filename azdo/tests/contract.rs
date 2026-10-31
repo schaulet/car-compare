@@ -46043,3 +46043,263 @@ async fn backlog_visibility_stays_with_the_team_that_hid_the_level() {
     assert!(!visible(&body, "Microsoft.RequirementCategory"), "{body}");
     assert!(visible(&body, "Microsoft.EpicCategory"), "{body}");
 }
+
+#[tokio::test]
+async fn default_iteration_places_a_new_story_on_the_team_that_chose_it() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let settings = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let initial = settings(&body);
+    assert_eq!(initial["defaultIterationMacro"], "@currentIteration");
+    assert_eq!(initial["defaultIteration"]["name"], "Sprint 1");
+    assert_eq!(initial["defaultIteration"]["path"], "AzurzDemo\\Sprint 1");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Suivi","attributes":{"startDate":"2026-11-09","finishDate":"2026-11-20"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let suivi = settings(&body)["identifier"].as_str().unwrap().to_string();
+    let adopt = format!(r#"{{"id":"{suivi}"}}"#);
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings/iterations?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&adopt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultIteration":{"name":"Suivi"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pinned = settings(&body);
+    assert!(pinned["defaultIterationMacro"].is_null(), "{body}");
+    assert_eq!(pinned["defaultIteration"]["name"], "Suivi");
+    assert_eq!(pinned["defaultIteration"]["path"], "AzurzDemo\\Suivi");
+    assert_eq!(pinned["bugsBehavior"], "off");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde = settings(&body);
+    assert_eq!(sonde["defaultIterationMacro"], "@currentIteration");
+    assert_eq!(sonde["defaultIteration"]["path"], "AzurzDemo");
+    assert_ne!(sonde["defaultIteration"]["name"], "Suivi");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultIteration":{"name":"Suivi"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération inconnue"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultIteration":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("itération illisible"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultIterationMacro":"demain"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("macro d'itération inconnue"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["defaultIteration"]["path"], "AzurzDemo\\Suivi");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Vanne"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["fields"]["System.IterationPath"], "AzurzDemo\\Suivi");
+    assert_eq!(settings(&body)["fields"]["System.Title"], "Vanne");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Sonde/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Relais"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["fields"]["System.IterationPath"], "AzurzDemo");
+    assert_eq!(settings(&body)["fields"]["System.Title"], "Relais");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["fields"]["System.IterationPath"], "AzurzDemo\\Sprint 1");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/wit/workitems/$Task?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Joint"},{"op":"add","path":"/fields/System.IterationPath","value":"AzurzDemo\\Sprint 1"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["fields"]["System.IterationPath"], "AzurzDemo\\Sprint 1");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultIterationMacro":"@CurrentIteration"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let restored = settings(&body);
+    assert_eq!(restored["defaultIterationMacro"], "@currentIteration");
+    assert_eq!(restored["defaultIteration"]["name"], "Sprint 1");
+    assert_eq!(restored["defaultIteration"]["path"], "AzurzDemo\\Sprint 1");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/Inconnue/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Perdue"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["defaultIteration"]["path"], "Atelier\\Sprint 1");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(settings(&body)["defaultIteration"]["path"], "AzurzDemo");
+}
