@@ -361,6 +361,9 @@ impl AppState {
         if resource.as_deref() == Some("fields") {
             return crate::shapes::custom_fields(self, method, org, Some(project), rest, body);
         }
+        if resource.as_deref() == Some("workitemtypecategories") {
+            return crate::shapes::work_item_type_categories(method, org, project, rest);
+        }
         if let Some(response) = crate::shapes::wit_catalog(self, method, org, project, rest) {
             return response;
         }

@@ -23334,6 +23334,104 @@ fn graph(state: &AppState, method: &Method, org: &str, key: &str, name: impl AsR
     Json(page(org_list(state, org, key))).into_response()
 }
 
+struct WorkItemCategory {
+    reference: &'static str,
+    name: &'static str,
+    default_type: &'static str,
+    types: &'static [&'static str],
+}
+
+const WORK_ITEM_CATEGORIES: &[WorkItemCategory] = &[
+    WorkItemCategory {
+        reference: "Microsoft.EpicCategory",
+        name: "Epic Category",
+        default_type: "Epic",
+        types: &["Epic"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.FeatureCategory",
+        name: "Feature Category",
+        default_type: "Feature",
+        types: &["Feature"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.RequirementCategory",
+        name: "Requirement Category",
+        default_type: "User Story",
+        types: &["User Story"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.TaskCategory",
+        name: "Task Category",
+        default_type: "Task",
+        types: &["Task"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.BugCategory",
+        name: "Bug Category",
+        default_type: "Bug",
+        types: &["Bug"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.IssueCategory",
+        name: "Issue Category",
+        default_type: "Issue",
+        types: &["Issue"],
+    },
+    WorkItemCategory {
+        reference: "Microsoft.TestCaseCategory",
+        name: "Test Case Category",
+        default_type: "Test Case",
+        types: &["Test Case"],
+    },
+];
+
+pub fn work_item_type_categories(method: &Method, org: &str, project: &str, rest: &[String]) -> Response {
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    if rest.len() == 2 {
+        let value = WORK_ITEM_CATEGORIES
+            .iter()
+            .map(|category| work_item_category_document(org, project, category))
+            .collect();
+        return Json(page(value)).into_response();
+    }
+    if rest.len() == 3 {
+        let key = pct_decode(&rest[2]);
+        let key = key.trim();
+        return match WORK_ITEM_CATEGORIES.iter().find(|category| {
+            category.reference.eq_ignore_ascii_case(key) || category.name.eq_ignore_ascii_case(key)
+        }) {
+            Some(category) => Json(work_item_category_document(org, project, category)).into_response(),
+            None => fail(StatusCode::NOT_FOUND, "catégorie introuvable"),
+        };
+    }
+    fail(StatusCode::NOT_FOUND, "catégorie introuvable")
+}
+
+fn work_item_category_document(org: &str, project: &str, category: &WorkItemCategory) -> Value {
+    let types = category
+        .types
+        .iter()
+        .map(|name| work_item_type_reference(org, project, name))
+        .collect::<Vec<_>>();
+    json!({
+        "name": category.name,
+        "referenceName": category.reference,
+        "defaultWorkItemType": work_item_type_reference(org, project, category.default_type),
+        "workItemTypes": types,
+        "url": format!("/{org}/{project}/_apis/wit/workitemtypecategories/{}", category.reference)
+    })
+}
+
+fn work_item_type_reference(org: &str, project: &str, name: &str) -> Value {
+    json!({
+        "name": name,
+        "url": format!("/{org}/{project}/_apis/wit/workitemtypes/{}", name.replace(' ', "%20"))
+    })
+}
+
 fn work_item_kind_rows() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
         ("Epic", "Microsoft.VSTS.WorkItemTypes.Epic", "E06C00"),

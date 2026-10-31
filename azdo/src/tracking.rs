@@ -20,6 +20,7 @@ pub fn dispatch(
     let response = match (area.as_str(), resource.as_str()) {
         ("work", "boards") => boards(state, method, org, project, team, rest, body),
         ("work", "backlogs") => backlogs(state, method, org, project, team, rest),
+        ("work", "processconfiguration") => process_configuration(state, method, org, project, team, rest),
         ("work", "plans") => delivery_plans(state, method, org, project, rest, body),
         ("work", "processes") => {
             if rest.iter().any(|part| part.eq_ignore_ascii_case("lists")) {
@@ -84,6 +85,7 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
     if method != Method::GET {
         return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
     }
+    let behavior = team_bugs_behavior(state, org, project, team);
     if rest.len() >= 4 && rest[3].eq_ignore_ascii_case("workitems") {
         let backlog = &rest[2];
         let rows = state.read(|db| {
@@ -92,7 +94,7 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
                     stored
                         .work_items
                         .values()
-                        .filter(|item| backlog_matches(backlog, item))
+                        .filter(|item| backlog_matches(backlog, item, &behavior))
                         .filter_map(|item| item.get("id").cloned())
                         .map(|id| json!({"target": {"id": id}, "id": id}))
                         .collect::<Vec<_>>()
@@ -101,14 +103,124 @@ fn backlogs(state: &AppState, method: &Method, org: &str, project: &str, team: O
         });
         return Json(page(rows)).into_response();
     }
-    let _ = team;
     Json(page(vec![
-        json!({"id": "Microsoft.EpicCategory", "name": "Epics", "rank": 1, "workItemTypes": [{"name": "Epic"}]}),
-        json!({"id": "Microsoft.FeatureCategory", "name": "Features", "rank": 2, "workItemTypes": [{"name": "Feature"}]}),
-        json!({"id": "Microsoft.RequirementCategory", "name": "Backlog items", "rank": 3, "url": format!("/{org}/{project}/_apis/work/backlogs/Microsoft.RequirementCategory"), "workItemTypes": [{"name": "User Story"}, {"name": "Bug"}]}),
-        json!({"id": "Microsoft.TaskCategory", "name": "Tasks", "rank": 4, "workItemTypes": [{"name": "Task"}]}),
+        json!({"id": "Microsoft.EpicCategory", "name": "Epics", "rank": 1, "workItemTypes": named_types(&["Epic"])}),
+        json!({"id": "Microsoft.FeatureCategory", "name": "Features", "rank": 2, "workItemTypes": named_types(&["Feature"])}),
+        json!({"id": "Microsoft.RequirementCategory", "name": "Stories", "rank": 3, "url": format!("/{org}/{project}/_apis/work/backlogs/Microsoft.RequirementCategory"), "workItemTypes": named_types(&requirement_type_names(&behavior))}),
+        json!({"id": "Microsoft.TaskCategory", "name": "Tasks", "rank": 4, "workItemTypes": named_types(&task_type_names(&behavior))}),
     ]))
     .into_response()
+}
+
+fn process_configuration(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    rest: &[String],
+) -> Response {
+    if rest.len() != 2 {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "configuration introuvable")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    let behavior = bugs_behavior_of(state, org, project, &team_id);
+    Json(process_configuration_document(org, project, team, &behavior)).into_response()
+}
+
+fn team_bugs_behavior(state: &AppState, org: &str, project: &str, team: Option<&str>) -> String {
+    match resolve_team_id(state, org, project, team) {
+        Some(team_id) => bugs_behavior_of(state, org, project, &team_id),
+        None => "off".into(),
+    }
+}
+
+fn bugs_behavior_of(state: &AppState, org: &str, project: &str, team_id: &str) -> String {
+    team_settings_document(state, org, project, team_id)
+        .get("bugsBehavior")
+        .and_then(|value| value.as_str())
+        .unwrap_or("off")
+        .to_string()
+}
+
+fn requirement_type_names(behavior: &str) -> Vec<&'static str> {
+    let mut names = vec!["User Story"];
+    if behavior == "asRequirements" {
+        names.push("Bug");
+    }
+    names
+}
+
+fn task_type_names(behavior: &str) -> Vec<&'static str> {
+    let mut names = vec!["Task"];
+    if behavior == "asTasks" {
+        names.push("Bug");
+    }
+    names
+}
+
+fn named_types(names: &[&str]) -> Vec<Value> {
+    names.iter().map(|name| json!({"name": name})).collect()
+}
+
+fn process_configuration_document(org: &str, project: &str, team: Option<&str>, behavior: &str) -> Value {
+    let url = match team {
+        Some(team) => format!("/{org}/{project}/{team}/_apis/work/processconfiguration"),
+        None => format!("/{org}/{project}/_apis/work/processconfiguration"),
+    };
+    let states = json!([
+        {"name": "New", "category": "Proposed"},
+        {"name": "Active", "category": "InProgress"},
+        {"name": "Resolved", "category": "Resolved"},
+        {"name": "Closed", "category": "Completed"}
+    ]);
+    let requirements = requirement_type_names(behavior);
+    let tasks = task_type_names(behavior);
+    json!({
+        "typeFields": {
+            "Effort": field_reference(org, project, "Microsoft.VSTS.Scheduling.StoryPoints", "Story Points"),
+            "Order": field_reference(org, project, "Microsoft.VSTS.Common.StackRank", "Stack Rank"),
+            "RemainingWork": field_reference(org, project, "Microsoft.VSTS.Scheduling.RemainingWork", "Remaining Work"),
+            "Activity": field_reference(org, project, "Microsoft.VSTS.Common.Activity", "Activity"),
+            "Team": field_reference(org, project, "System.AreaPath", "Area Path")
+        },
+        "bugWorkItems": {"workItemTypeNames": ["Bug"]},
+        "portfolioBacklogs": [
+            backlog_level("Epics", "Microsoft.EpicCategory", 1, &["Epic"], &states),
+            backlog_level("Features", "Microsoft.FeatureCategory", 2, &["Feature"], &states)
+        ],
+        "requirementBacklog": backlog_level("Stories", "Microsoft.RequirementCategory", 3, &requirements, &states),
+        "taskBacklog": backlog_level("Tasks", "Microsoft.TaskCategory", 4, &tasks, &states),
+        "url": url
+    })
+}
+
+fn field_reference(org: &str, project: &str, reference: &str, name: &str) -> Value {
+    json!({
+        "referenceName": reference,
+        "name": name,
+        "url": format!("/{org}/{project}/_apis/wit/fields/{reference}")
+    })
+}
+
+fn backlog_level(name: &str, id: &str, rank: i64, types: &[&str], states: &Value) -> Value {
+    json!({
+        "name": name,
+        "id": id,
+        "rank": rank,
+        "workItemCountLimit": 1000,
+        "workItemTypes": named_types(types),
+        "workItemStates": states
+    })
 }
 
 fn team_settings(
@@ -1588,18 +1700,25 @@ fn board_columns() -> Vec<Value> {
         .collect()
 }
 
-fn backlog_matches(backlog: &str, item: &Value) -> bool {
+fn backlog_matches(backlog: &str, item: &Value, behavior: &str) -> bool {
     let kind = item
         .get("fields")
         .and_then(|fields| fields.get("System.WorkItemType"))
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    match backlog {
-        "Microsoft.EpicCategory" => kind == "Epic",
-        "Microsoft.FeatureCategory" => kind == "Feature",
-        "Microsoft.TaskCategory" => kind == "Task",
-        "Microsoft.RequirementCategory" => kind == "User Story" || kind == "Bug",
-        _ => true,
+    let listed = match backlog {
+        "Microsoft.EpicCategory" => Some(vec!["Epic"]),
+        "Microsoft.FeatureCategory" => Some(vec!["Feature"]),
+        "Microsoft.RequirementCategory" => Some(requirement_type_names(behavior)),
+        "Microsoft.TaskCategory" => Some(task_type_names(behavior)),
+        "Microsoft.BugCategory" => Some(vec!["Bug"]),
+        "Microsoft.IssueCategory" => Some(vec!["Issue"]),
+        "Microsoft.TestCaseCategory" => Some(vec!["Test Case"]),
+        _ => None,
+    };
+    match listed {
+        Some(names) => names.iter().any(|name| name.eq_ignore_ascii_case(kind)),
+        None => true,
     }
 }
 

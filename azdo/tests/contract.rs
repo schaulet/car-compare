@@ -43551,3 +43551,298 @@ async fn removing_one_build_fenetre_keeps_the_sibling_the_build_periode_and_the_
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"], "Pompe");
 }
+
+#[tokio::test]
+async fn agile_categories_keep_bug_off_the_requirement_backlog_until_the_team_asks() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let categories_path = "/azurz/AzurzDemo/_apis/wit/workitemtypecategories?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", categories_path, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["count"], 7);
+    let requirement = page["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["referenceName"] == "Microsoft.RequirementCategory")
+        .unwrap();
+    assert_eq!(requirement["name"], "Requirement Category");
+    assert_eq!(requirement["defaultWorkItemType"]["name"], "User Story");
+    assert_eq!(requirement["workItemTypes"].as_array().unwrap().len(), 1);
+    assert_eq!(requirement["url"], "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory");
+    let bug = page["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["referenceName"] == "Microsoft.BugCategory")
+        .unwrap();
+    assert_eq!(bug["defaultWorkItemType"]["name"], "Bug");
+    assert!(page["value"].as_array().unwrap().iter().any(|item| item["referenceName"] == "Microsoft.TestCaseCategory"));
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/microsoft.bugcategory?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(one["referenceName"], "Microsoft.BugCategory");
+    assert_eq!(one["workItemTypes"][0]["name"], "Bug");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Bug%20Category?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["referenceName"], "Microsoft.BugCategory");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Microsoft.HiddenTypesCategory?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("catégorie introuvable"), "{body}");
+
+    let (status, body, _) = call(&app, "POST", categories_path, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "DELETE",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Microsoft.BugCategory?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Microsoft.BugCategory/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/processconfiguration?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let config: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(config["typeFields"]["Effort"]["referenceName"], "Microsoft.VSTS.Scheduling.StoryPoints");
+    assert_eq!(config["bugWorkItems"]["workItemTypeNames"][0], "Bug");
+    assert_eq!(config["requirementBacklog"]["name"], "Stories");
+    assert_eq!(config["requirementBacklog"]["id"], "Microsoft.RequirementCategory");
+    let requirement_names: Vec<&str> = config["requirementBacklog"]["workItemTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    assert_eq!(requirement_names, ["User Story"]);
+    let task_names: Vec<&str> = config["taskBacklog"]["workItemTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    assert_eq!(task_names, ["Task"]);
+    assert_eq!(config["portfolioBacklogs"][0]["id"], "Microsoft.EpicCategory");
+    assert_eq!(config["url"], "/azurz/AzurzDemo/_apis/work/processconfiguration");
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/work/processconfiguration?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/processconfiguration?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Pompe"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let story_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/workitems/$Bug?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(r#"[{"op":"add","path":"/fields/System.Title","value":"Relais"}]"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bug_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+
+    let requirement_items = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/backlogs/Microsoft.RequirementCategory/workItems?api-version=7.1";
+    let task_items = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/backlogs/Microsoft.TaskCategory/workItems?api-version=7.1";
+    let ids = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body)
+            .unwrap()["value"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["id"].as_i64())
+            .collect::<Vec<_>>()
+    };
+    let (status, body, _) = call(&app, "GET", requirement_items, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&story_id), "{body}");
+    assert!(!found.contains(&bug_id), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"bugsBehavior":"asRequirements"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/processconfiguration?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let config: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let requirement_names: Vec<&str> = config["requirementBacklog"]["workItemTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    assert_eq!(requirement_names, ["User Story", "Bug"]);
+    assert_eq!(config["taskBacklog"]["workItemTypes"][0]["name"], "Task");
+    assert_eq!(config["taskBacklog"]["workItemTypes"].as_array().unwrap().len(), 1);
+    let (status, body, _) = call(&app, "GET", requirement_items, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&story_id) && found.contains(&bug_id), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/processconfiguration?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier["requirementBacklog"]["workItemTypes"].as_array().unwrap().len(), 1);
+    assert_eq!(atelier["requirementBacklog"]["workItemTypes"][0]["name"], "User Story");
+
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"bugsBehavior":"asTasks"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(&app, "GET", requirement_items, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&story_id), "{body}");
+    assert!(!found.contains(&bug_id), "{body}");
+    let (status, body, _) = call(&app, "GET", task_items, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let found = ids(&body);
+    assert!(found.contains(&bug_id), "{body}");
+    assert!(!found.contains(&story_id), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/wit/workitemtypecategories/Microsoft.RequirementCategory?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let requirement: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(requirement["workItemTypes"].as_array().unwrap().len(), 1);
+    assert_eq!(requirement["workItemTypes"][0]["name"], "User Story");
+}

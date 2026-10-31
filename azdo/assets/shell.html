@@ -119,6 +119,7 @@
       <a href="/__ORG__/__PROJECT__/_workitems">Éléments de travail</a>
       <a href="/__ORG__/__PROJECT__/_boards">Tableaux</a>
       <a href="/__ORG__/__PROJECT__/_backlogs">Backlogs</a>
+      <a href="/__ORG__/__PROJECT__/_categories">Catégories</a>
       <a href="/__ORG__/__PROJECT__/_delivery">Plans de livraison</a>
       <a href="/__ORG__/__PROJECT__/_sprints">Sprints</a>
       <a href="/__ORG__/__PROJECT__/_areas">Zones</a>
@@ -637,6 +638,42 @@
               { op: "add", path: "/fields/System.IterationPath", value: sprint ? sprint.path : project },
             ]);
             await api("POST", root + "/wit/workitems/$Task?api-version=7.1", patch, "application/json-patch+json");
+            location.reload();
+          };
+          return;
+        }
+        if (hub === "/_categories") {
+          const team = encodeURIComponent(project + " Team");
+          const [categories, configuration] = await Promise.all([
+            api("GET", root + "/wit/workitemtypecategories?api-version=7.1"),
+            api("GET", "/" + org + "/" + project + "/" + team + "/_apis/work/processconfiguration?api-version=7.1"),
+          ]);
+          const rows = categories.value || [];
+          const table = rows.length
+            ? "<table id='wit-categories'><thead><tr><th>Référence</th><th>Nom</th><th>Type par défaut</th><th>Types</th></tr></thead><tbody>" + rows.map((item) => "<tr data-ref='" + esc(item.referenceName) + "'><td>" + esc(item.referenceName) + "</td><td>" + esc(item.name) + "</td><td>" + esc(item.defaultWorkItemType && item.defaultWorkItemType.name) + "</td><td class='cat-types'>" + esc((item.workItemTypes || []).map((type) => type.name).join(", ")) + "</td></tr>").join("") + "</tbody></table>"
+            : "<p id='wit-category-empty' class='sub'>Aucune catégorie.</p>";
+          function typeLine(level) {
+            return ((level && level.workItemTypes) || []).map((type) => type.name).join(", ");
+          }
+          const requirementLine = typeLine(configuration.requirementBacklog);
+          const taskLine = typeLine(configuration.taskBacklog);
+          const behavior = configuration.requirementBacklog && (configuration.requirementBacklog.workItemTypes || []).some((type) => type.name === "Bug")
+            ? "asRequirements"
+            : (configuration.taskBacklog && (configuration.taskBacklog.workItemTypes || []).some((type) => type.name === "Bug") ? "asTasks" : "off");
+          view.innerHTML = "<h1>Catégories</h1>" + table + "<h2>Configuration du processus</h2><p id='requirement-types'>Exigences : " + esc(requirementLine) + "</p><p id='task-types'>Tâches : " + esc(taskLine) + "</p><div class='command'><label for='bug-behavior'>Comportement des bogues</label><select id='bug-behavior'><option value='off'>Hors backlog</option><option value='asRequirements'>Comme des exigences</option><option value='asTasks'>Comme des tâches</option></select><button id='bug-behavior-save' type='button'>Enregistrer</button></div><p id='category-error' class='error' hidden></p>";
+          document.getElementById("bug-behavior").value = behavior;
+          document.getElementById("bug-behavior-save").onclick = async () => {
+            const note = document.getElementById("category-error");
+            note.hidden = true;
+            try {
+              await api("PATCH", "/" + org + "/" + project + "/" + team + "/_apis/work/teamsettings?api-version=7.1", {
+                bugsBehavior: document.getElementById("bug-behavior").value,
+              });
+            } catch (error) {
+              note.hidden = false;
+              note.textContent = error.message;
+              return;
+            }
             location.reload();
           };
           return;
