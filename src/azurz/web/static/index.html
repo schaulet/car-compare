@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Azurz — demandes et déploiements</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Azurz</h1>
+      <p>Du chat Dust vers Azure DevOps, puis vers les instances Ignition.</p>
+    </div>
+    <label class="switch">
+      <input id="auto" type="checkbox" />
+      <span>Traitement automatique des demandes prêtes</span>
+    </label>
+  </header>
+  <main>
+    <section>
+      <h2>Chat</h2>
+      <div class="stack">
+        <label>
+          Message
+          <textarea id="message" placeholder="Décrivez le module Ignition attendu."></textarea>
+        </label>
+        <div class="row">
+          <button id="send" type="button">Envoyer</button>
+          <button id="fresh" class="secondary" type="button">Nouvelle demande</button>
+          <button id="example" class="secondary" type="button">Exemple OEE</button>
+        </div>
+        <p class="muted" id="mode">Une nouvelle demande sera créée.</p>
+        <div id="chat-result" class="status"></div>
+      </div>
+    </section>
+    <section>
+      <h2>Demandes</h2>
+      <div id="demands" class="stack"></div>
+    </section>
+    <section class="wide">
+      <h2>Artefacts et instances</h2>
+      <div class="checks" id="targets"></div>
+      <div id="deploy-status" class="status"></div>
+      <div id="artifacts"></div>
+      <h2>Déploiements</h2>
+      <div id="deployments" class="stack"></div>
+    </section>
+    <section class="wide">
+      <h2>Agents, capacités et prérogatives</h2>
+      <div id="agents" class="stack"></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

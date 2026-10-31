@@ -60,6 +60,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Lab Azurz
+.azurz-data/
+
+# Rust
+azdo/target/
+
 # Build
 *.manifest
 *.spec

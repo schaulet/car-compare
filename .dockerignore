@@ -1,0 +1,8 @@
+.venv
+.azurz-data
+.git
+.pytest_cache
+**/__pycache__
+*.pyc
+dist
+*.egg-info
