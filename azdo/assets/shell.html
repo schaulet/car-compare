@@ -245,6 +245,7 @@
       <a href="/__ORG__/__PROJECT__/_buildquietudes">Quiétudes de build</a>
       <a href="/__ORG__/__PROJECT__/_buildsuspensions">Suspensions de build</a>
       <a href="/__ORG__/__PROJECT__/_buildlatences">Latences de build</a>
+      <a href="/__ORG__/__PROJECT__/_buildattentes">Attentes de build</a>
       <a href="/__ORG__/__PROJECT__/_picklists">Listes</a>
       <a href="/__ORG__/__PROJECT__/_fields">Champs</a>
       <a href="/__ORG__/__PROJECT__/_teams">Équipes</a>
@@ -7321,6 +7322,48 @@
               error.hidden = true;
               try {
                 await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/pauses/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
+                location.reload();
+              } catch (err) {
+                error.hidden = false;
+                error.textContent = err.message;
+              }
+            };
+          });
+          return;
+        }
+        if (hub === "/_buildattentes") {
+          const builds = await collection("build/builds");
+          let rows = [];
+          for (const build of builds) {
+            const items = await api("GET", root + "/build/builds/" + encodeURIComponent(build.id) + "/attentes?api-version=7.1");
+            rows = rows.concat(items.value || []);
+          }
+          const table = rows.length ? "<table id='build-attentes'><thead><tr><th></th><th>Nom</th><th>Build</th></tr></thead><tbody>" + rows.map((item) => "<tr><td><button type='button' class='build-attente-remove' data-id='" + esc(item.id) + "' data-name='" + esc(item.name) + "' data-build='" + esc(item.buildId) + "'>Retirer</button></td><td>" + esc(item.name) + "</td><td>" + esc(item.buildNumber) + "</td></tr>").join("") + "</tbody></table>" : "<p id='build-attente-empty' class='sub'>Aucune attente de build.</p>";
+          view.innerHTML = "<h1>Attentes de build</h1><div class='command'><input id='build-attente-name' placeholder='Pompe' /><button id='build-attente-add' type='button'>Ajouter</button></div>" + table + "<p id='build-attente-error' class='error' hidden></p>";
+          document.getElementById("build-attente-add").onclick = async () => {
+            const error = document.getElementById("build-attente-error");
+            error.hidden = true;
+            const name = document.getElementById("build-attente-name").value;
+            try {
+              let current = await collection("build/builds");
+              if (!current.length) {
+                await api("POST", root + "/build/builds?api-version=7.1", { definition: { id: 1 }, sourceBranch: "refs/heads/main" });
+                current = await collection("build/builds");
+              }
+              const build = current[0];
+              await api("POST", root + "/build/builds/" + encodeURIComponent(build.id) + "/attentes?api-version=7.1", { name: name });
+              location.reload();
+            } catch (err) {
+              error.hidden = false;
+              error.textContent = err.message;
+            }
+          };
+          document.querySelectorAll("button.build-attente-remove").forEach((button) => {
+            button.onclick = async () => {
+              const error = document.getElementById("build-attente-error");
+              error.hidden = true;
+              try {
+                await api("DELETE", root + "/build/builds/" + encodeURIComponent(button.dataset.build) + "/attentes/" + encodeURIComponent(button.dataset.id) + "?api-version=7.1");
                 location.reload();
               } catch (err) {
                 error.hidden = false;
