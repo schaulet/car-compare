@@ -525,6 +525,9 @@ fn team_settings(
             if rest[4].eq_ignore_ascii_case("teamdaysoff") {
                 return team_days_off(state, method, org, project, iteration, body);
             }
+            if rest[4].eq_ignore_ascii_case("workitems") {
+                return iteration_work_items(state, method, org, project, team, iteration, rest);
+            }
         }
         if rest.len() == 3 && method == Method::POST {
             return add_team_iteration(state, org, project, body);
@@ -1151,6 +1154,133 @@ fn capacities(state: &AppState, method: &Method, org: &str, project: &str, itera
         return Json(item).into_response();
     }
     fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+}
+
+fn iteration_work_items(
+    state: &AppState,
+    method: &Method,
+    org: &str,
+    project: &str,
+    team: Option<&str>,
+    iteration: &str,
+    rest: &[String],
+) -> Response {
+    let Some(team_id) = resolve_team_id(state, org, project, team) else {
+        return fail(StatusCode::NOT_FOUND, "équipe introuvable");
+    };
+    if rest.len() != 5 {
+        return if method == Method::GET {
+            fail(StatusCode::NOT_FOUND, "éléments d'itération introuvables")
+        } else {
+            fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée")
+        };
+    }
+    let Some(selected) = team_iterations(state, org, project)
+        .into_iter()
+        .find(|item| iteration_matches(item, iteration))
+    else {
+        return fail(StatusCode::NOT_FOUND, "itération introuvable");
+    };
+    if method != Method::GET {
+        return fail(StatusCode::METHOD_NOT_ALLOWED, "méthode refusée");
+    }
+    let stored_path = item_text(&selected, "path").unwrap_or_default();
+    let path = iteration_field_path(project, &stored_path);
+    let areas = area_rules_of(&stored_team_fields(state, org, project, &team_id), project);
+    let mut items = state.read(|db| {
+        db.project(org, project)
+            .map(|stored| stored.work_items.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
+    items.retain(|item| {
+        item_iteration(item, project).eq_ignore_ascii_case(&path) && area_covered(&item_area(item, project), &areas)
+    });
+    items.sort_by_key(backlog_rank);
+    let stored_id = item_id(&selected);
+    Json(json!({
+        "workItemRelations": iteration_relations(org, project, &items),
+        "url": format!("/{org}/{project}/_apis/work/teamsettings/iterations/{stored_id}/workitems"),
+        "asOf": "2026-10-29T00:00:00Z"
+    }))
+    .into_response()
+}
+
+fn iteration_field_path(project: &str, stored: &str) -> String {
+    let parts: Vec<&str> = stored.split('\\').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return project.to_string();
+    }
+    if parts.len() >= 2 && parts[1].eq_ignore_ascii_case("Iteration") {
+        if parts.len() == 2 {
+            return parts[0].to_string();
+        }
+        return format!("{}\\{}", parts[0], parts[2..].join("\\"));
+    }
+    parts.join("\\")
+}
+
+fn iteration_relations(org: &str, project: &str, items: &[Value]) -> Vec<Value> {
+    let mut parent_of = std::collections::BTreeMap::new();
+    for item in items {
+        let Some(id) = item.get("id").and_then(|value| value.as_i64()) else {
+            continue;
+        };
+        if let Some(parent) = items.iter().find_map(|peer| {
+            let peer_id = peer.get("id").and_then(|value| value.as_i64())?;
+            (peer_id != id && linked_parent(item, peer)).then_some(peer_id)
+        }) {
+            parent_of.insert(id, parent);
+        }
+    }
+    fn chain_cycles(start: i64, parent_of: &std::collections::BTreeMap<i64, i64>) -> bool {
+        let mut seen = vec![start];
+        let mut cursor = start;
+        while let Some(parent) = parent_of.get(&cursor).copied() {
+            if seen.contains(&parent) {
+                return true;
+            }
+            seen.push(parent);
+            cursor = parent;
+        }
+        false
+    }
+    fn reference(org: &str, project: &str, id: i64) -> Value {
+        json!({"id": id, "url": format!("/{org}/{project}/_apis/wit/workitems/{id}")})
+    }
+    fn append_children(
+        parent: i64,
+        org: &str,
+        project: &str,
+        items: &[Value],
+        parent_of: &std::collections::BTreeMap<i64, i64>,
+        relations: &mut Vec<Value>,
+    ) {
+        let children = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_i64()))
+            .filter(|id| parent_of.get(id) == Some(&parent) && !chain_cycles(*id, parent_of))
+            .collect::<Vec<_>>();
+        for child in children {
+            relations.push(json!({
+                "rel": "System.LinkTypes.Hierarchy-Forward",
+                "source": reference(org, project, parent),
+                "target": reference(org, project, child)
+            }));
+            append_children(child, org, project, items, parent_of, relations);
+        }
+    }
+    let mut relations = Vec::new();
+    for id in items.iter().filter_map(|item| item.get("id").and_then(|value| value.as_i64())) {
+        let rooted = parent_of.get(&id).is_none_or(|_| chain_cycles(id, &parent_of));
+        if !rooted {
+            continue;
+        }
+        relations.push(json!({"rel": null, "source": null, "target": reference(org, project, id)}));
+        if !chain_cycles(id, &parent_of) {
+            append_children(id, org, project, items, &parent_of, &mut relations);
+        }
+    }
+    relations
 }
 
 fn team_days_off(state: &AppState, method: &Method, org: &str, project: &str, iteration: &str, body: &[u8]) -> Response {

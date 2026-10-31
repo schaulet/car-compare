@@ -45047,3 +45047,437 @@ async fn backlog_order_places_a_story_before_its_neighbor_and_keeps_the_sibling(
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"][0]["order"], 2);
 }
+
+#[tokio::test]
+async fn iteration_work_items_list_the_story_and_its_task_and_keep_the_sibling() {
+    let app = app();
+    let auth = basic("azurz", "azurz-lab-pat");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/wit/classificationnodes/areas?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects/AzurzDemo/teams?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Sonde"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo","values":[{"value":"AzurzDemo","includeChildren":false}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/teamfieldvalues?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"defaultValue":"AzurzDemo\\Sonde","values":[{"value":"AzurzDemo\\Sonde","includeChildren":true}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    async fn add_iteration(app: &axum::Router, auth: &str, parent: &str, name: &str) -> String {
+        let path = if parent.is_empty() {
+            "/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations?api-version=7.1".to_string()
+        } else {
+            format!("/azurz/AzurzDemo/_apis/wit/classificationnodes/iterations/{parent}?api-version=7.1")
+        };
+        let payload = serde_json::json!({"name": name, "attributes": {"startDate": "2026-11-09", "finishDate": "2026-11-20"}}).to_string();
+        let (status, body, _) = call(app, "POST", &path, Some(auth), None, "application/json", Some(&payload)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let identifier = serde_json::from_str::<serde_json::Value>(&body).unwrap()["identifier"].as_str().unwrap().to_string();
+        let adopt = serde_json::json!({"id": identifier}).to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            "/azurz/AzurzDemo/_apis/work/teamsettings/iterations?api-version=7.1",
+            Some(auth),
+            None,
+            "application/json",
+            Some(&adopt),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        identifier
+    }
+    let semaine = add_iteration(&app, &auth, "Sprint%201", "Semaine").await;
+    let suivi = add_iteration(&app, &auth, "", "Suivi").await;
+
+    async fn item(app: &axum::Router, auth: &str, kind: &str, title: &str, area: &str, iteration: &str) -> i64 {
+        let patch = serde_json::json!([
+            {"op": "add", "path": "/fields/System.Title", "value": title},
+            {"op": "add", "path": "/fields/System.AreaPath", "value": area},
+            {"op": "add", "path": "/fields/System.IterationPath", "value": iteration}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "POST",
+            &format!("/azurz/AzurzDemo/_apis/wit/workitems/${kind}?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap()
+    }
+    async fn child(app: &axum::Router, auth: &str, title: &str, parent: i64, iteration: &str) -> i64 {
+        let id = item(app, auth, "Task", title, "AzurzDemo", iteration).await;
+        let link = serde_json::json!([
+            {"op": "add", "path": "/relations/-", "value": {"rel": "System.LinkTypes.Hierarchy-Reverse", "url": format!("/{parent}")}}
+        ])
+        .to_string();
+        let (status, body, _) = call(
+            app,
+            "PATCH",
+            &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+            Some(auth),
+            None,
+            "application/json-patch+json",
+            Some(&link),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        id
+    }
+    let vanne = item(&app, &auth, "User%20Story", "Vanne", "AzurzDemo", "AzurzDemo\\Sprint 1").await;
+    let pompe = item(&app, &auth, "User%20Story", "Pompe", "AzurzDemo", "azurzdemo\\sprint 1").await;
+    let relais = item(&app, &auth, "User%20Story", "Relais", "AzurzDemo", "AzurzDemo\\Suivi").await;
+    let calendrier = item(&app, &auth, "User%20Story", "Calendrier", "AzurzDemo", "AzurzDemo\\Sprint 1\\Semaine").await;
+    let alpha = item(&app, &auth, "User%20Story", "Alpha", "AzurzDemo\\Sonde", "AzurzDemo\\Sprint 1").await;
+    let joint = child(&app, &auth, "Joint", pompe, "AzurzDemo\\Sprint 1").await;
+    let vis = child(&app, &auth, "Vis", joint, "AzurzDemo\\Sprint 1").await;
+    let ailleurs = child(&app, &auth, "Ailleurs", pompe, "AzurzDemo\\Suivi").await;
+    let libre = item(&app, &auth, "Task", "Libre", "AzurzDemo", "AzurzDemo\\Sprint 1").await;
+    for (id, rank) in [(vanne, 1), (pompe, 2)] {
+        let patch = serde_json::json!([{"op": "add", "path": "/fields/Microsoft.VSTS.Common.StackRank", "value": rank}]).to_string();
+        let (status, body, _) = call(
+            &app,
+            "PATCH",
+            &format!("/azurz/AzurzDemo/_apis/wit/workitems/{id}?api-version=7.1"),
+            Some(&auth),
+            None,
+            "application/json-patch+json",
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/capacities/azurz?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"teamMember":{"displayName":"azurz","uniqueName":"azurz"},"activities":[{"name":"Development","capacityPerDay":6}],"daysOff":[]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/teamdaysoff?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"daysOff":[{"start":"2026-10-30T00:00:00Z","end":"2026-10-30T00:00:00Z"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let move_vanne = serde_json::json!({"ids": [vanne], "nextId": pompe}).to_string();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/workitemsorder?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(&move_vanne),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let sprint = "/azurz/AzurzDemo/AzurzDemo%20Team/_apis/work/teamsettings/iterations/SPRINT%201/workitems?api-version=7.1";
+    let (status, body, _) = call(&app, "GET", sprint, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(listed["asOf"], "2026-10-29T00:00:00Z");
+    assert_eq!(listed["url"], "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/workitems");
+    let relations = listed["workItemRelations"].as_array().unwrap();
+    let shape = |row: &serde_json::Value| {
+        (
+            row["rel"].as_str().map(str::to_string),
+            row["source"]["id"].as_i64(),
+            row["target"]["id"].as_i64().unwrap(),
+        )
+    };
+    let found: Vec<_> = relations.iter().map(shape).collect();
+    assert_eq!(
+        found,
+        vec![
+            (None, None, vanne),
+            (None, None, pompe),
+            (Some("System.LinkTypes.Hierarchy-Forward".into()), Some(pompe), joint),
+            (Some("System.LinkTypes.Hierarchy-Forward".into()), Some(joint), vis),
+            (None, None, libre),
+        ],
+        "{body}"
+    );
+    assert!(relations[0]["rel"].is_null());
+    assert!(relations[0]["source"].is_null());
+    assert!(relations[2]["target"]["url"].as_str().unwrap().ends_with(&format!("/wit/workitems/{joint}")));
+    assert!(!body.contains(&format!("\"id\":{relais}")) || relations.iter().all(|row| row["target"]["id"].as_i64() != Some(relais)), "{body}");
+    for absent in [relais, calendrier, alpha, ailleurs] {
+        assert!(relations.iter().all(|row| row["target"]["id"].as_i64() != Some(absent)), "{absent} {body}");
+    }
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let again: Vec<_> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["workItemRelations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(shape)
+        .collect();
+    assert_eq!(again, found);
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/work/teamsettings/iterations/{semaine}/workitems?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let week: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(week["workItemRelations"].as_array().unwrap().len(), 1);
+    assert_eq!(week["workItemRelations"][0]["target"]["id"], calendrier);
+    assert!(week["workItemRelations"][0]["rel"].is_null());
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/suivi/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let other: Vec<_> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["workItemRelations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(shape)
+        .collect();
+    assert_eq!(other, vec![(None, None, relais), (None, None, ailleurs)], "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Sonde/_apis/work/teamsettings/iterations/Sprint%201/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sonde: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sonde["workItemRelations"].as_array().unwrap().len(), 1);
+    assert_eq!(sonde["workItemRelations"][0]["target"]["id"], alpha);
+    assert!(sonde["workItemRelations"][0]["rel"].is_null());
+
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{vanne}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rank = serde_json::from_str::<serde_json::Value>(&body).unwrap()["fields"]["Microsoft.VSTS.Common.StackRank"].as_i64();
+    let (status, body, _) = call(&app, "GET", sprint, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("/azurz/AzurzDemo/_apis/wit/workitems/{vanne}?api-version=7.1"),
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["fields"]["Microsoft.VSTS.Common.StackRank"].as_i64(), rank);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/capacities?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let capacities: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(capacities["count"], 1);
+    assert_eq!(capacities["value"][0]["activities"][0]["capacityPerDay"], 6);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/teamdaysoff?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["daysOff"][0]["start"], "2026-10-30T00:00:00Z");
+
+    let (status, body, _) = call(&app, "POST", sprint, Some(&auth), None, "application/json", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert!(body.contains("méthode refusée"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/Revue/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("itération introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/Revue/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("itération introuvable"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/_apis/work/teamsettings/iterations/1/workitems/extra?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("éléments d'itération introuvables"), "{body}");
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/AzurzDemo/Inconnue/_apis/work/teamsettings/iterations/1/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("équipe introuvable"), "{body}");
+
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/_apis/projects?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        Some(r#"{"name":"Atelier","description":"Deuxième projet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_patch = serde_json::json!([{"op": "add", "path": "/fields/System.Title", "value": "Atelier"}]).to_string();
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        "/azurz/Atelier/_apis/wit/workitems/$User%20Story?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json-patch+json",
+        Some(&atelier_patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        "/azurz/Atelier/_apis/work/teamsettings/iterations/Sprint%201/workitems?api-version=7.1",
+        Some(&auth),
+        None,
+        "application/json",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atelier_rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(atelier_rows["workItemRelations"].as_array().unwrap().len(), 1);
+    assert_eq!(atelier_rows["workItemRelations"][0]["target"]["id"], atelier);
+    assert!(atelier_rows["url"].as_str().unwrap().contains("/Atelier/"));
+    let (status, body, _) = call(&app, "GET", sprint, Some(&auth), None, "application/json", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kept: Vec<_> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["workItemRelations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(shape)
+        .collect();
+    assert_eq!(kept, found);
+    let _ = suivi;
+}
